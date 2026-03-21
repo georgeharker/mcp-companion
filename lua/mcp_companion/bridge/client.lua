@@ -586,7 +586,6 @@ function Client:refresh_capabilities(callback)
   self:request("tools/list", {}, function(err, result)
     if not err and result then
       self.tools = result.tools or {}
-      state.emit("tool_list_changed")
     else
       log.warn("tools/list failed: %s", tostring(err))
     end
@@ -595,7 +594,6 @@ function Client:refresh_capabilities(callback)
       if not err2 and result2 then
         self.resources = result2.resources or {}
         self.resource_templates = result2.resourceTemplates or {}
-        state.emit("resource_list_changed")
       else
         log.warn("resources/list failed: %s", tostring(err2))
       end
@@ -603,11 +601,13 @@ function Client:refresh_capabilities(callback)
       self:request("prompts/list", {}, function(err3, result3)
         if not err3 and result3 then
           self.prompts = result3.prompts or {}
-          state.emit("prompt_list_changed")
         else
           log.warn("prompts/list failed: %s", tostring(err3))
         end
 
+        -- Emit once after all lists are refreshed — avoids triple re-registration
+        -- on every poll cycle. Individual list_changed events are still emitted
+        -- from SSE notifications (single-list changes) and the initial connect.
         self:_update_server_state()
         state.emit("servers_updated")
         if callback then
@@ -647,12 +647,29 @@ function Client:_update_server_state()
     }))
   end
 
-  -- Group resources by server namespace
+  -- Group resources by server namespace.
+  -- Resource URIs use arbitrary schemes (e.g. "ui://", "memory://") that don't
+  -- correspond to server names. Match by looking for a known server name in the
+  -- URI path, falling back to _bridge.
+  local known_servers = {}
+  for name in pairs(server_map) do
+    known_servers[name] = true
+  end
+
   for _, res in ipairs(self.resources) do
-    local server_name = res.uri and res.uri:match("^([^:]+)://") or "_bridge"
-    if not server_map[server_name] then
-      server_map[server_name] = {
-        name = server_name,
+    local assigned = "_bridge"
+    if res.uri then
+      -- Check if any known server name appears as a path component in the URI
+      for name in pairs(known_servers) do
+        if name ~= "_bridge" and res.uri:find("/" .. name .. "/", 1, true) then
+          assigned = name
+          break
+        end
+      end
+    end
+    if not server_map[assigned] then
+      server_map[assigned] = {
+        name = assigned,
         status = "connected",
         tools = {},
         resources = {},
@@ -660,7 +677,7 @@ function Client:_update_server_state()
         prompts = {},
       }
     end
-    table.insert(server_map[server_name].resources, res)
+    table.insert(server_map[assigned].resources, res)
   end
 
   -- Convert map to sorted array

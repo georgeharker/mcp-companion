@@ -2,41 +2,6 @@
 
 Outstanding work for mcp-companion.nvim, in priority order.
 
-## Fix: Repeated re-registration on first connect
-
-On first connect, `tool_list_changed`, `resource_list_changed`, and `prompt_list_changed`
-events fire before `servers_updated`, causing three re-registration attempts. The fingerprint
-cache in `cc/tools.lua` deduplicates them, but the extra work is unnecessary.
-
-The fix is to suppress capability-change events during the initial connect sequence and
-only emit `bridge_ready` + `servers_updated` once all lists are populated.
-
-Files: `bridge/client.lua` (event emission), `cc/init.lua` (event subscription).
-
-## Feature: Tool approval flow (cc/approval.lua)
-
-`cc/approval.lua` is a stub. Currently all tool calls execute without confirmation.
-
-The approval flow should:
-- Check `config.auto_approve` (bool or function)
-- If not auto-approved, prompt the user (floating window or `vim.ui.select`)
-- Allow per-server and per-tool approval rules
-- Integrate with the CC tool callback (`execute` function in `cc/tools.lua`)
-
-Files: `cc/approval.lua`, `cc/tools.lua` (integrate approval into execute callback).
-
-## Feature: Status UI (ui/init.lua → command)
-
-`ui/init.lua` has a working floating window showing bridge status, servers, and tool
-counts. It is not accessible from Neovim.
-
-Needs:
-- A `:MpcCompanionStatus` user command (or similar)
-- Optionally a keybind in the default config
-- Auto-refresh on `servers_updated` event
-
-Files: `ui/init.lua`, `init.lua` (register command).
-
 ## Feature: E2E test suite (M11)
 
 No automated end-to-end tests. Current tests:
@@ -93,5 +58,12 @@ Files: `native/init.lua`, `init.lua` (wire up public API).
 - **M3** — Lua config/state/log: fully implemented, 17 tests passing
 - **M5** — Lua MCP HTTP client: vim.uv TCP, multi-session, 3/3 passing
 - **M6** — CC tool registration: direct CC tools API, fingerprint dedup, 32/32 tests passing
+- **M10** — Status UI: `:MCPStatus` / `:MCPRestart` / `:MCPLog` commands, floating window
+  with server expand/collapse, live state updates, logs view
+- **Fix** — Repeated re-registration: removed individual `tool_list_changed` /
+  `resource_list_changed` / `prompt_list_changed` emits from `refresh_capabilities()`;
+  only `servers_updated` fires once after all lists are fetched
+- **Approval** — Tool approval flow: `vim.ui.select` prompt with global/per-server/
+  per-tool auto_approve config; wired into `cc/tools.lua` execute callback
 - **M12** — ACP forwarding: monkey-patch `Connection:_establish_session`, HTTP transport,
   confirmed working with OpenCode using tools in a real chat session

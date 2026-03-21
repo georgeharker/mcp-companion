@@ -63,48 +63,61 @@ end
 --- @param client table MCPCompanion.Client
 --- @param namespaced_name string Full bridge tool name (e.g. "everything_echo")
 --- @param display_name string Short name for logging
+--- @param server_name string Server that owns this tool (for approval checks)
 --- @return function
-local function _make_bridge_cmd(client, namespaced_name, display_name)
+local function _make_bridge_cmd(client, namespaced_name, display_name, server_name)
     return function(_self, action, cmd_opts)
         -- action is the raw tool input table from the LLM
         local params = type(action) == "table" and action or {}
-        client:call_tool(namespaced_name, params, function(err, result)
-            vim.schedule(function()
-                if err then
-                    cmd_opts.output_cb({ status = "error", data = tostring(err) })
-                    return
-                end
-                if not result then
-                    cmd_opts.output_cb({ status = "success", data = "" })
-                    return
-                end
-                -- Check for MCP-level error in result
-                if result.isError then
+
+        -- Check approval before executing
+        local approval = require("mcp_companion.cc.approval")
+        approval.check(server_name, display_name, _self, function(approved)
+            if not approved then
+                vim.schedule(function()
+                    cmd_opts.output_cb({ status = "error", data = "Tool call denied by user." })
+                end)
+                return
+            end
+
+            client:call_tool(namespaced_name, params, function(err, result)
+                vim.schedule(function()
+                    if err then
+                        cmd_opts.output_cb({ status = "error", data = tostring(err) })
+                        return
+                    end
+                    if not result then
+                        cmd_opts.output_cb({ status = "success", data = "" })
+                        return
+                    end
+                    -- Check for MCP-level error in result
+                    if result.isError then
+                        local parts = {}
+                        for _, item in ipairs(result.content or {}) do
+                            if item.type == "text" then
+                                table.insert(parts, item.text or "")
+                            end
+                        end
+                        cmd_opts.output_cb({ status = "error", data = table.concat(parts, "\n") })
+                        return
+                    end
+                    -- Extract text content
                     local parts = {}
                     for _, item in ipairs(result.content or {}) do
                         if item.type == "text" then
                             table.insert(parts, item.text or "")
+                        elseif item.type == "image" then
+                            table.insert(parts, string.format("[image: %s]", item.mimeType or "unknown"))
+                        elseif item.type == "resource" and item.resource and item.resource.text then
+                            table.insert(parts, item.resource.text)
                         end
                     end
-                    cmd_opts.output_cb({ status = "error", data = table.concat(parts, "\n") })
-                    return
-                end
-                -- Extract text content
-                local parts = {}
-                for _, item in ipairs(result.content or {}) do
-                    if item.type == "text" then
-                        table.insert(parts, item.text or "")
-                    elseif item.type == "image" then
-                        table.insert(parts, string.format("[image: %s]", item.mimeType or "unknown"))
-                    elseif item.type == "resource" and item.resource and item.resource.text then
-                        table.insert(parts, item.resource.text)
+                    local text = table.concat(parts, "\n")
+                    if text == "" then
+                        text = string.format("Tool '%s' completed with no output.", display_name)
                     end
-                end
-                local text = table.concat(parts, "\n")
-                if text == "" then
-                    text = string.format("Tool '%s' completed with no output.", display_name)
-                end
-                cmd_opts.output_cb({ status = "success", data = text })
+                    cmd_opts.output_cb({ status = "success", data = text })
+                end)
             end)
         end)
     end
@@ -221,7 +234,7 @@ function M.register()
                     return {
                         name = key,
                         cmds = {
-                            _make_bridge_cmd(client, captured_namespaced, captured_display),
+                            _make_bridge_cmd(client, captured_namespaced, captured_display, server.name),
                         },
                         system_prompt = function(_group_config, _ctx)
                             return string.format(

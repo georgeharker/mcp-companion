@@ -56,14 +56,14 @@ all configured MCP servers. The Lua plugin communicates with it over HTTP on loc
         "olimorris/codecompanion.nvim",
         "georgeharker/sharedserver",  -- optional
     },
-    build = "cd bridge && uv venv .venv --python 3.12 && uv pip install -e . --python .venv/bin/python",
+    build = "cd bridge && uv venv --python 3.14 .venv && uv sync --frozen",
     config = function()
         require("mcp_companion").setup({
             bridge = {
                 port = 9741,
                 config = vim.fn.expand("~/.config/mcp/servers.json"),
             },
-            log = { level = "info" },
+            log = { level = "info", notify = "error" },
         })
     end,
 },
@@ -124,6 +124,22 @@ When you use the `opencode` adapter in CodeCompanion, the bridge is automaticall
 forwarded to OpenCode via `session/new`. OpenCode connects to the bridge directly
 and can call all MCP tools autonomously without any extra configuration.
 
+### Commands
+
+| Command | Description |
+|---|---|
+| `:MCPStatus` | Toggle the status floating window |
+| `:MCPRestart` | Restart the MCP bridge |
+| `:MCPLog` | Open the log file in a buffer |
+
+Add a keymap in your config:
+```lua
+vim.keymap.set("n", "<leader>ms", "<cmd>MCPStatus<cr>", { desc = "MCP status" })
+```
+
+The status window shows bridge state, connected servers, and tool/resource/prompt counts.
+Press `<CR>` on a server to expand/collapse it. Press `l` for the logs view, `q` to close.
+
 ### Manual bridge control
 
 ```lua
@@ -162,7 +178,8 @@ require("mcp_companion").setup({
         poll_interval = 30000,          -- capability polling in ms
     },
     log = {
-        level = "info",                 -- "debug", "info", "warn", "error"
+        level = "info",                 -- file log level: "debug", "info", "warn", "error"
+        notify = "error",               -- vim.notify level (default: errors only)
         file = true,                    -- write to ~/.local/state/nvim/mcp-companion.log
     },
     auto_approve = false,               -- auto-approve all tool calls (or function(server, tool))
@@ -173,8 +190,7 @@ require("mcp_companion").setup({
 
 ```bash
 cd bridge
-uv venv .venv --python 3.12
-uv pip install -e ".[dev]"
+cd bridge && uv venv --python 3.14 .venv && uv sync --frozen --extra dev
 pytest tests/ -v
 ```
 
