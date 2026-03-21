@@ -1,0 +1,21 @@
+{
+  "servers": {
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "env": {},
+      "disabled": false,
+      "autoApprove": ["echo"]
+    },
+    "disabled-server": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "disabled": true
+    },
+    "http-example": {
+      "url": "http://localhost:9999/mcp",
+      "transport": "http",
+      "disabled": true
+    }
+  }
+}
