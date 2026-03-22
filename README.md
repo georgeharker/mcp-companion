@@ -1,184 +1,85 @@
-# mcp-companion.nvim
+# mcp-companion
 
-A Neovim plugin that connects the [Model Context Protocol (MCP)](https://modelcontextprotocol.io)
-ecosystem to [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim).
+An MCP proxy bridge and editor integration that aggregates multiple
+[Model Context Protocol](https://modelcontextprotocol.io) servers behind a
+single HTTP endpoint, with first-class
+[CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) support.
 
-MCP servers (tools, resources, prompts) are exposed as native CodeCompanion features
-and forwarded to ACP agents (OpenCode, Claude Code) so they can call them autonomously.
+The bridge runs standalone as a Python process — any MCP-aware client can
+connect to it over HTTP. The Lua plugin layer adds Neovim-specific features:
+tool registration, editor context, slash commands, ACP forwarding, and a status
+UI.
 
-## Features
-
-### MCP tools as CC tools
-
-Every tool from every configured MCP server is registered as a CodeCompanion tool.
-The LLM can call them directly during chat, and they appear in the tool picker.
-Tools are grouped by server (`@github`, `@todoist`, etc.) and individually addressable.
-
-### MCP resources as editor context (`#variables`)
-
-MCP resources are registered as CC editor context entries.
-Type `#mcp:resource_name` in a chat buffer to inline a resource's content.
-Optionally, resources can be auto-injected into every new chat's system prompt
-(useful for guidance documents like basic-memory's "ai assistant guide").
-
-### MCP prompts as slash commands
-
-MCP prompts become CC slash commands.
-Type `/mcp:prompt_name` in a chat buffer to invoke a prompt.
-If the prompt defines arguments, you are prompted to fill them in before the prompt
-messages are injected into the chat.
-
-### ACP forwarding
-
-When using an ACP adapter (OpenCode, Claude Code), the bridge is automatically
-injected into the ACP session via `session/new` and `session/load`.
-The agent connects to the bridge directly over HTTP (or via `mcp-remote` stdio
-fallback) and can call all MCP tools autonomously without extra configuration.
-Transport is chosen based on agent capabilities: HTTP if the agent advertises
-`mcpCapabilities.http`, stdio via `mcp-remote` otherwise.
-
-### Tool approval flow
-
-Tool calls go through a configurable approval chain before execution:
-
-1. **Global auto-approve** -- `auto_approve = true` or a custom function
-2. **Native servers** -- auto-approved (they run in-process)
-3. **Per-server patterns** -- `autoApprove` list in your servers.json
-4. **User prompt** -- `vim.ui.select` ("Allow" / "Deny")
-
-### Bridge lifecycle management
-
-A Python [FastMCP](https://github.com/jlowin/fastmcp) bridge process is managed
-automatically via [sharedserver](https://github.com/georgeharker/sharedserver).
-The bridge is shared across Neovim instances on the same port, with automatic
-startup, health polling, idle timeout, and graceful shutdown.
-
-### Shared server support
-
-The bridge runs as a shared process via
-[sharedserver](https://github.com/georgeharker/sharedserver).
-Multiple Neovim instances connect to the same bridge on `127.0.0.1:9741`,
-avoiding duplicate MCP server processes. The bridge stays alive for the configured
-idle timeout (`30m` default) after the last Neovim instance disconnects.
-
-### Hot reload
-
-Capabilities are polled at a configurable interval (`poll_interval`, default 30s).
-When MCP servers add, remove, or change tools/resources/prompts, the plugin
-re-registers everything in CodeCompanion automatically.
-
-### Status UI
-
-`:MCPStatus` opens a floating window showing bridge state, connected servers,
-and tool/resource/prompt counts. Servers can be expanded/collapsed, and a log view
-is available. `:MCPRestart` restarts the bridge. `:MCPLog` opens the log file.
-
-### Meta-tools
-
-The bridge exposes management tools that the LLM can call:
-
-- `bridge__status` -- list all configured servers and their state
-- `bridge__enable_server` / `bridge__disable_server` -- toggle servers at runtime
-
-### Environment variable interpolation
-
-Server configs support `${VAR}` and `${env:VAR}` interpolation with optional
-defaults, applied to all config fields:
-
-| Syntax | Description |
-|---|---|
-| `${VAR}` | Expands to `$VAR` value, empty string if unset |
-| `${env:VAR}` | Same as `${VAR}` (VS Code / Claude Desktop compat) |
-| `${VAR:-default}` | Expands to `$VAR` if set, otherwise `default` |
-| `${env:VAR:-default}` | Same with `env:` prefix |
-
-Expansion applies to: `command`, `args`, `env`, `url`, and `headers` fields.
-
-### OAuth 2.1 / Authentication
-
-MCP servers that require authentication are supported via the `auth` field in
-your server config. Three modes are available:
-
-- **Bearer token** — static token injected as `Authorization: Bearer <token>`
-- **OAuth 2.1** — full Authorization Code + PKCE flow with browser redirect
-- **`"oauth"` shorthand** — automatic OAuth discovery and registration
-
-Tokens are persisted to `~/.local/share/mcp-companion/oauth-tokens/<server>/`
-and reused across sessions. Refresh tokens are handled automatically.
-
-## Architecture
+## Overview
 
 ```
-Neovim
-├── mcp_companion (Lua plugin)
-│   ├── bridge/         HTTP client → FastMCP bridge process
-│   ├── cc/             CodeCompanion extension
-│   │   ├── tools       MCP tools → CC tools (function calling)
-│   │   ├── editor_context  MCP resources → CC #editor_context
-│   │   ├── slash_commands  MCP prompts → CC /slash_commands
-│   │   └── approval    Tool approval flow (auto-approve + vim.ui.select)
-│   ├── native/         Pure-Lua MCP server registration (stub)
-│   └── ui/             Status floating window (:MCPStatus)
-│
-└── CodeCompanion
-    └── ACP adapter     → OpenCode / Claude Code (session/new injects bridge)
-
-bridge/ (Python, FastMCP)
-├── server.py           Proxy server with middleware + health endpoint
-├── config.py           Pydantic models, env interpolation, transport config
-└── meta_tools.py       bridge__status, bridge__enable/disable_server
+┌─────────────────────────────────────────────────────┐
+│  MCP Bridge (Python, standalone)                    │
+│  Aggregates N MCP servers → single HTTP endpoint    │
+│  Auth, env interpolation, meta-tools, health API    │
+└────────────────────┬────────────────────────────────┘
+                     │ HTTP :9741
+        ┌────────────┼────────────────┐
+        ▼            ▼                ▼
+   Neovim plugin   OpenCode     Any HTTP client
+   (CodeCompanion) (ACP agent)  (curl, scripts)
 ```
 
-The bridge is a [FastMCP](https://github.com/jlowin/fastmcp) server that proxies
-all configured MCP servers through a single HTTP endpoint. The Lua plugin
-communicates with it over HTTP on localhost. A `SanitizeSchemaMiddleware` handles
-servers with circular `$ref` schemas (e.g. Todoist) that would otherwise crash
-Pydantic serialization.
+## MCP Bridge (standalone)
 
-## Requirements
+The bridge is a [FastMCP](https://github.com/jlowin/fastmcp) server that
+proxies all configured MCP servers through a single HTTP endpoint. It works
+independently of Neovim — any MCP client that speaks HTTP can use it.
 
-- Neovim 0.10+
-- Python 3.12+ with [`uv`](https://github.com/astral-sh/uv)
-- [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) v19+
-- [sharedserver](https://github.com/georgeharker/sharedserver) (optional, for bridge lifecycle)
-- An MCP server config file (same format as VS Code / Claude Desktop)
+### Quick start
 
-## Installation
+```bash
+# Install dependencies
+cd bridge
+uv venv --python 3.14 .venv && uv sync --frozen
 
-### lazy.nvim
+# Run the bridge
+uv run python -m mcp_bridge --config ~/.config/mcp/servers.json --port 9741
 
-```lua
-{
-    "georgeharker/mcp-companion.nvim",
-    lazy = false,
-    dependencies = {
-        "olimorris/codecompanion.nvim",
-        "georgeharker/sharedserver",  -- optional, manages bridge lifecycle
-    },
-    build = "cd bridge && uv venv --python 3.14 .venv && uv sync --frozen",
-    config = function()
-        require("mcp_companion").setup({
-            bridge = {
-                port = 9741,
-                config = vim.fn.expand("~/.config/mcp/servers.json"),
-            },
-            log = { level = "info", notify = "error" },
-        })
-    end,
-},
+# Health check
+curl http://127.0.0.1:9741/health
 ```
 
-Then register the CC extension in your CodeCompanion config:
+### What the bridge does
 
-```lua
-require("codecompanion").setup({
-    extensions = {
-        mcp_companion = {
-            callback = "mcp_companion.cc",
-            opts = {},
-        },
-    },
-})
+- Reads a standard `mcpServers` JSON config (VS Code / Claude Desktop format)
+- Spawns and manages stdio servers, connects to HTTP/SSE servers
+- Exposes all tools, resources, and prompts through one HTTP endpoint
+- Handles environment variable interpolation, OAuth 2.1 auth, schema sanitization
+- Provides meta-tools (`bridge__status`, `bridge__enable_server`, `bridge__disable_server`)
+- Serves a `/health` endpoint with server status
+
+### Using with other MCP clients
+
+Any MCP client that supports HTTP transport can connect directly:
+
+```bash
+# OpenCode, Claude Code, or any ACP agent
+# Point it at http://127.0.0.1:9741
+
+# Or use curl to call tools directly
+curl -X POST http://127.0.0.1:9741/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
+```
+
+### Running with sharedserver
+
+For long-running bridge processes shared across multiple clients, use
+[sharedserver](https://github.com/georgeharker/sharedserver):
+
+```bash
+# Bridge stays alive 30 min after last client disconnects
+sharedserver use mcp-bridge -- \
+  python -m mcp_bridge --config ~/.config/mcp/servers.json --port 9741
+
+# Detach when done (bridge stays alive for other clients)
+sharedserver unuse mcp-bridge
 ```
 
 ## MCP Server Config
@@ -225,15 +126,33 @@ format is supported:
 |---|---|---|
 | `command` | `string` | Executable for stdio transport |
 | `args` | `string[]` | Arguments for the command |
-| `env` | `object` | Environment variables (supports `${env:VAR}` interpolation) |
+| `env` | `object` | Environment variables (supports interpolation) |
 | `url` | `string` | URL for http/sse transport |
-| `headers` | `object` | HTTP headers (supports `${env:VAR}` interpolation) |
+| `headers` | `object` | HTTP headers (supports interpolation) |
 | `transport` | `string` | `"stdio"`, `"http"`, or `"sse"` (auto-detected from presence of `url`) |
 | `disabled` | `boolean` | Skip this server |
-| `autoApprove` | `string[]` | Tool name patterns to auto-approve (Lua patterns) |
+| `autoApprove` | `string[]` | Tool name patterns to auto-approve |
 | `auth` | `string\|object` | Authentication config (see below) |
 
-### Authentication examples
+### Environment variable interpolation
+
+All config fields support `${VAR}` interpolation with optional defaults:
+
+| Syntax | Description |
+|---|---|
+| `${VAR}` | Expands to `$VAR` value, empty string if unset |
+| `${env:VAR}` | Same as `${VAR}` (VS Code / Claude Desktop compat) |
+| `${VAR:-default}` | Expands to `$VAR` if set, otherwise `default` |
+| `${env:VAR:-default}` | Same with `env:` prefix |
+
+Expansion applies to: `command`, `args`, `env`, `url`, and `headers` fields.
+Interpolation happens at runtime (when connecting to servers), not at config
+load time.
+
+### Authentication
+
+MCP servers that require authentication are supported via the `auth` field.
+Three modes are available:
 
 **Bearer token:**
 
@@ -287,12 +206,136 @@ on an ephemeral port to receive the callback.
 
 When `client_id` is provided, dynamic client registration is skipped.
 
-## Usage
+Tokens are persisted to `~/.local/share/mcp-companion/oauth-tokens/<server>/`
+and reused across sessions. Refresh tokens are handled automatically.
 
-### In CodeCompanion chat
+---
 
-All MCP tools are available as CC tools. The LLM can call them automatically, or you
-can reference them with `@server_name` to include all tools from a server:
+## Neovim Integration
+
+The Lua plugin connects the bridge to
+[CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim), exposing
+MCP capabilities as native editor features.
+
+### Requirements
+
+- Neovim 0.10+
+- Python 3.12+ with [`uv`](https://github.com/astral-sh/uv)
+- [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) v19+
+- [sharedserver](https://github.com/georgeharker/sharedserver) (optional, for bridge lifecycle)
+- An MCP server config file (same format as VS Code / Claude Desktop)
+
+### Installation (lazy.nvim)
+
+```lua
+{
+    "georgeharker/mcp-companion",
+    lazy = false,
+    dependencies = {
+        "olimorris/codecompanion.nvim",
+        "georgeharker/sharedserver",  -- optional, manages bridge lifecycle
+    },
+    build = "cd bridge && uv venv --python 3.14 .venv && uv sync --frozen",
+    config = function()
+        require("mcp_companion").setup({
+            bridge = {
+                port = 9741,
+                config = vim.fn.expand("~/.config/mcp/servers.json"),
+            },
+            log = { level = "info", notify = "error" },
+        })
+    end,
+},
+```
+
+Then register the CC extension in your CodeCompanion config:
+
+```lua
+require("codecompanion").setup({
+    extensions = {
+        mcp_companion = {
+            callback = "mcp_companion.cc",
+            opts = {},
+        },
+    },
+})
+```
+
+### Features
+
+#### MCP tools as CC tools
+
+Every tool from every configured MCP server is registered as a CodeCompanion
+tool. The LLM can call them directly during chat, and they appear in the tool
+picker. Tools are grouped by server (`@github`, `@todoist`, etc.) and
+individually addressable.
+
+#### MCP resources as editor context
+
+MCP resources are registered as CC editor context entries. Type
+`#mcp:resource_name` in a chat buffer to inline a resource's content.
+Optionally, resources can be auto-injected into every new chat's system prompt
+(useful for guidance documents like basic-memory's "ai assistant guide").
+
+#### MCP prompts as slash commands
+
+MCP prompts become CC slash commands. Type `/mcp:prompt_name` in a chat buffer
+to invoke a prompt. If the prompt defines arguments, you are prompted to fill
+them in before the prompt messages are injected into the chat.
+
+#### ACP forwarding
+
+When using an ACP adapter (OpenCode, Claude Code), the bridge is automatically
+injected into the ACP session via `session/new` and `session/load`. The agent
+connects to the bridge directly over HTTP (or via `mcp-remote` stdio fallback)
+and can call all MCP tools autonomously without extra configuration.
+
+#### Tool approval flow
+
+Tool calls go through a configurable approval chain before execution:
+
+1. **Global auto-approve** -- `auto_approve = true` or a custom function
+2. **Native servers** -- auto-approved (they run in-process)
+3. **Per-server patterns** -- `autoApprove` list in your servers.json
+4. **User prompt** -- `vim.ui.select` ("Allow" / "Deny")
+
+#### Bridge lifecycle
+
+The bridge process is managed automatically via
+[sharedserver](https://github.com/georgeharker/sharedserver). Multiple Neovim
+instances share the same bridge on `127.0.0.1:9741`, with automatic startup,
+health polling, idle timeout, and graceful shutdown.
+
+Without sharedserver, the bridge still starts and stops but is not shared across
+Neovim instances.
+
+#### Hot reload
+
+Capabilities are polled at a configurable interval. When MCP servers add,
+remove, or change tools/resources/prompts, the plugin re-registers everything
+in CodeCompanion automatically.
+
+#### Status UI
+
+`:MCPStatus` opens a floating window showing bridge state, connected servers,
+and tool/resource/prompt counts. Servers can be expanded/collapsed, and a log
+view is available. `:MCPRestart` restarts the bridge. `:MCPLog` opens the log
+file.
+
+#### Meta-tools
+
+The bridge exposes management tools that the LLM can call:
+
+- `bridge__status` -- list all configured servers and their state
+- `bridge__enable_server` / `bridge__disable_server` -- toggle servers at runtime
+
+### Usage
+
+#### In CodeCompanion chat
+
+All MCP tools are available as CC tools. The LLM can call them automatically,
+or you can reference them with `@server_name` to include all tools from a
+server:
 
 ```
 @github Create an issue titled "Bug report" in my repo
@@ -300,17 +343,13 @@ can reference them with `@server_name` to include all tools from a server:
 
 Individual tools are also accessible by their full key (`server__tool_name`).
 
-### Editor context (resources)
-
-MCP resources are available as `#mcp:resource_name` variables:
+#### Editor context (resources)
 
 ```
 #mcp:basic-memory://ai-assistant-guide  Tell me about the codebase
 ```
 
-### Slash commands (prompts)
-
-MCP prompts are available as `/mcp:prompt_name` slash commands:
+#### Slash commands (prompts)
 
 ```
 /mcp:summarize-project
@@ -318,7 +357,7 @@ MCP prompts are available as `/mcp:prompt_name` slash commands:
 
 If the prompt requires arguments, you will be prompted to enter them.
 
-### With ACP agents (OpenCode, Claude Code)
+#### With ACP agents (OpenCode, Claude Code)
 
 When you use an ACP adapter in CodeCompanion, the bridge is automatically
 forwarded to the agent via `session/new`. The agent connects to the bridge
@@ -361,7 +400,7 @@ require("mcp_companion").on("bridge_ready", function()
 end)
 ```
 
-## Events
+### Events
 
 | Event | When |
 |---|---|
@@ -373,7 +412,7 @@ end)
 | `resource_list_changed` | Resource list changed |
 | `prompt_list_changed` | Prompt list changed |
 
-## Configuration
+### Plugin Configuration
 
 ```lua
 require("mcp_companion").setup({
@@ -404,7 +443,7 @@ require("mcp_companion").setup({
 })
 ```
 
-### Auto-approve examples
+#### Auto-approve examples
 
 ```lua
 -- Approve everything
@@ -420,7 +459,7 @@ auto_approve = function(tool_name, server_name, ctx)
 end
 ```
 
-### System prompt resource injection
+#### System prompt resource injection
 
 ```lua
 -- Inject all MCP resources into every new chat's system prompt
@@ -430,6 +469,38 @@ system_prompt_resources = true
 system_prompt_resources = { "ai%-assistant%-guide", "project%-context" }
 ```
 
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│ MCP Bridge (Python, FastMCP)                │
+│                                             │
+│  server.py      Proxy + middleware + health  │
+│  config.py      Pydantic models, env interp  │
+│  auth.py        OAuth 2.1, bearer tokens     │
+│  meta_tools.py  bridge__status, enable/disable│
+└────────────────────┬────────────────────────┘
+                     │ HTTP :9741
+┌────────────────────┴────────────────────────┐
+│ Neovim Plugin (Lua)                         │
+│                                             │
+│  bridge/       HTTP client -> bridge process │
+│  cc/           CodeCompanion extension       │
+│    tools       MCP tools -> CC tools         │
+│    editor_context  MCP resources -> #context │
+│    slash_commands   MCP prompts -> /commands  │
+│    approval    Tool approval flow            │
+│  native/       Pure-Lua MCP servers (stub)   │
+│  ui/           Status floating window        │
+└─────────────────────────────────────────────┘
+```
+
+The bridge aggregates N MCP servers through a single HTTP endpoint. A
+`SanitizeSchemaMiddleware` handles servers with circular `$ref` schemas
+(e.g. Todoist) that would otherwise crash Pydantic serialization.
+
 ## Development
 
 ### Python bridge
@@ -438,7 +509,7 @@ system_prompt_resources = { "ai%-assistant%-guide", "project%-context" }
 cd bridge
 uv venv --python 3.14 .venv && uv sync --frozen --extra dev
 pytest tests/ -v
-mypy --strict
+mypy --strict mcp_bridge/ tests/
 ```
 
 ### Lua plugin
@@ -454,7 +525,7 @@ Integration tests (requires a running bridge):
 :luafile tests/test_real_servers.lua
 ```
 
-## Type safety
+### Type safety
 
 - **Lua**: Full LuaLS type annotations. Zero warnings under `lua-language-server --check --checklevel=Warning`.
 - **Python**: Pydantic models throughout. Zero errors under `mypy --strict`.
