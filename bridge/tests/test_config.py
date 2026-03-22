@@ -57,6 +57,54 @@ def test_server_config_from_dict_http() -> None:
     assert srv.url == "http://example.com/mcp"
 
 
+class TestEnvCoercion:
+    """Tests for env dict value coercion in ServerConfig.from_dict."""
+
+    def test_int_value_coerced_to_str(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x", "env": {"PORT": 3000}})
+        assert srv.env == {"PORT": "3000"}
+
+    def test_float_value_coerced_to_str(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x", "env": {"TIMEOUT": 1.5}})
+        assert srv.env == {"TIMEOUT": "1.5"}
+
+    def test_bool_value_coerced_to_str(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x", "env": {"DEBUG": True}})
+        assert srv.env == {"DEBUG": "True"}
+
+    def test_string_value_passes_through(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x", "env": {"KEY": "val"}})
+        assert srv.env == {"KEY": "val"}
+
+    def test_missing_env_defaults_empty(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x"})
+        assert srv.env == {}
+
+
+class TestAutoApprove:
+    """Tests for autoApprove field handling in ServerConfig.from_dict."""
+
+    def test_auto_approve_list(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x", "autoApprove": ["echo", "ping"]})
+        assert srv.auto_approve == ["echo", "ping"]
+
+    def test_auto_approve_true_becomes_wildcard(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x", "autoApprove": True})
+        assert srv.auto_approve == ["*"]
+
+    def test_auto_approve_false_becomes_empty(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x", "autoApprove": False})
+        assert srv.auto_approve == []
+
+    def test_auto_approve_missing_defaults_empty(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x"})
+        assert srv.auto_approve == []
+
+    def test_auto_approve_null_becomes_empty(self) -> None:
+        srv = ServerConfig.from_dict("s", {"command": "x", "autoApprove": None})
+        assert srv.auto_approve == []
+
+
 def test_enabled_servers() -> None:
     config = BridgeConfig.load(str(FIXTURES / "servers.json"))
     enabled = config.get_enabled_servers()

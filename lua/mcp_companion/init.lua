@@ -48,11 +48,6 @@ function M.setup(opts)
   --   extensions = { mcp_companion = { callback = "mcp_companion.cc", opts = {...} } }
   -- We do NOT call cc.register_extension() here — CC calls M.init(schema) on our module.
 
-  -- Start bridge (only if config file exists)
-  if config.get().bridge.config then
-    bridge.start()
-  end
-
   -- Autocmds
   local group = vim.api.nvim_create_augroup("MCPCompanion", { clear = true })
   vim.api.nvim_create_autocmd("VimLeavePre", {
@@ -61,6 +56,18 @@ function M.setup(opts)
       bridge.stop()
     end,
   })
+
+  -- Start bridge lazily on first CodeCompanion chat (only if config file exists)
+  if config.get().bridge.config then
+    vim.api.nvim_create_autocmd("User", {
+      group = group,
+      pattern = "CodeCompanionChatCreated",
+      once = true,
+      callback = function()
+        bridge.start()
+      end,
+    })
+  end
 
   -- User commands
   vim.api.nvim_create_user_command("MCPStatus", function()

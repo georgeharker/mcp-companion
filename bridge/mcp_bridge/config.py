@@ -49,16 +49,27 @@ class ServerConfig(BaseModel):
         if transport_str is None:
             transport_str = "http" if "url" in data else "stdio"
 
+        raw_auto_approve = data.get("autoApprove", [])
+        if raw_auto_approve is True:
+            auto_approve: list[str] = ["*"]
+        elif raw_auto_approve is False or raw_auto_approve is None:
+            auto_approve = []
+        else:
+            auto_approve = list(raw_auto_approve)
+
+        raw_env = data.get("env", {})
+        env = {k: str(v) for k, v in raw_env.items()} if raw_env else {}
+
         return cls(
             name=name,
             command=data.get("command"),
             args=data.get("args", []),
-            env=data.get("env", {}),
+            env=env,
             transport=Transport(transport_str),
             url=data.get("url"),
             headers=data.get("headers", {}),
             disabled=data.get("disabled", False),
-            auto_approve=data.get("autoApprove", []),
+            auto_approve=auto_approve,
             auth=data.get("auth"),
         )
 
