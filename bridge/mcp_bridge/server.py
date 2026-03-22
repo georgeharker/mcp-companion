@@ -7,15 +7,23 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
+import httpx
 import mcp.types as mt
-from fastmcp import FastMCP
+from fastmcp import Client, FastMCP
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mcp_bridge.config import BridgeConfig, HealthResponse, ServerStatusInfo
+from mcp_bridge.auth import build_auth
+from mcp_bridge.config import (
+    BridgeConfig,
+    HealthResponse,
+    ServerConfig,
+    ServerStatusInfo,
+    _interpolate_str,
+)
 
 logger = logging.getLogger("mcp-bridge")
 
@@ -109,6 +117,30 @@ class SanitizeSchemaMiddleware(Middleware):
         return new_tool
 
 
+def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> FastMCP:
+    """Create a proxy for a single upstream MCP server.
+
+    When the server has auth configured, we create a ``Client`` with
+    ``auth=`` set so the proxy's upstream HTTP requests carry the right
+    credentials.  For servers without auth we fall back to the simpler
+    dict-based ``create_proxy(config_dict)`` path.
+    """
+    auth: httpx.Auth | None = build_auth(
+        name,
+        auth_config=srv.auth,
+        server_url=srv.url,
+    )
+
+    if auth is not None and srv.url:
+        # Auth requires a Client so we can inject httpx.Auth into the transport
+        client = Client(_interpolate_str(srv.url), auth=auth)
+        return create_proxy(client, name=name)
+
+    # No auth — use the standard config-dict path
+    proxy_config = config.to_fastmcp_config(name)
+    return create_proxy(proxy_config.model_dump(exclude_none=True), name=name)
+
+
 def create_bridge(config_path: str) -> FastMCP:
     """Create the bridge FastMCP server from a config file.
 
@@ -127,8 +159,7 @@ def create_bridge(config_path: str) -> FastMCP:
     enabled = config.get_enabled_servers()
     for name, srv in enabled.items():
         try:
-            proxy_config = config.to_fastmcp_config(name)
-            proxy = create_proxy(proxy_config.model_dump(exclude_none=True), name=name)
+            proxy = _create_server_proxy(config, name, srv)
             bridge.mount(proxy, namespace=name)
             logger.info("Mounted server: %s (%s)", name, srv.transport.value)
         except Exception:

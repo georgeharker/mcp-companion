@@ -82,14 +82,29 @@ The bridge exposes management tools that the LLM can call:
 
 ### Environment variable interpolation
 
-Server configs support `${env:VAR}` and `${VAR}` interpolation in `env` and
-`headers` fields, matching VS Code and Claude Desktop format.
+Server configs support `${VAR}` and `${env:VAR}` interpolation with optional
+defaults, applied to all config fields:
 
-### OAuth 2.1 (work in progress)
+| Syntax | Description |
+|---|---|
+| `${VAR}` | Expands to `$VAR` value, empty string if unset |
+| `${env:VAR}` | Same as `${VAR}` (VS Code / Claude Desktop compat) |
+| `${VAR:-default}` | Expands to `$VAR` if set, otherwise `default` |
+| `${env:VAR:-default}` | Same with `env:` prefix |
 
-MCP OAuth 2.1 authentication ([spec](https://gofastmcp.com/clients/auth/oauth))
-is planned. This will enable authenticated access to MCP servers that require
-OAuth flows, potentially integrating with editor context for token management.
+Expansion applies to: `command`, `args`, `env`, `url`, and `headers` fields.
+
+### OAuth 2.1 / Authentication
+
+MCP servers that require authentication are supported via the `auth` field in
+your server config. Three modes are available:
+
+- **Bearer token** — static token injected as `Authorization: Bearer <token>`
+- **OAuth 2.1** — full Authorization Code + PKCE flow with browser redirect
+- **`"oauth"` shorthand** — automatic OAuth discovery and registration
+
+Tokens are persisted to `~/.local/share/mcp-companion/oauth-tokens/<server>/`
+and reused across sessions. Refresh tokens are handled automatically.
 
 ## Architecture
 
@@ -216,6 +231,61 @@ format is supported:
 | `transport` | `string` | `"stdio"`, `"http"`, or `"sse"` (auto-detected from presence of `url`) |
 | `disabled` | `boolean` | Skip this server |
 | `autoApprove` | `string[]` | Tool name patterns to auto-approve (Lua patterns) |
+| `auth` | `string\|object` | Authentication config (see below) |
+
+### Authentication examples
+
+**Bearer token:**
+
+```json
+{
+  "mcpServers": {
+    "my-api": {
+      "url": "https://api.example.com/mcp",
+      "auth": { "bearer": "${env:MY_API_TOKEN}" }
+    }
+  }
+}
+```
+
+**OAuth 2.1 (auto-discovery):**
+
+```json
+{
+  "mcpServers": {
+    "my-api": {
+      "url": "https://api.example.com/mcp",
+      "auth": "oauth"
+    }
+  }
+}
+```
+
+This triggers the full [MCP OAuth 2.1](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/authorization/)
+flow: metadata discovery, dynamic client registration, PKCE authorization code
+grant via browser redirect, and token exchange. A local HTTP server is started
+on an ephemeral port to receive the callback.
+
+**OAuth 2.1 with explicit client:**
+
+```json
+{
+  "mcpServers": {
+    "my-api": {
+      "url": "https://api.example.com/mcp",
+      "auth": {
+        "oauth": {
+          "client_id": "my-app",
+          "client_secret": "${env:OAUTH_SECRET}",
+          "scopes": "read write"
+        }
+      }
+    }
+  }
+}
+```
+
+When `client_id` is provided, dynamic client registration is skipped.
 
 ## Usage
 

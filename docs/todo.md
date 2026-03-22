@@ -54,3 +54,16 @@ Files: `native/init.lua`, `init.lua` (wire up public API).
   system prompt injection via ChatCreated autocmd; old `cc/variables.lua` removed
 - **Slash commands** — MCP prompts → CC `/slash_commands` via `cc/slash_commands.lua`;
   targets `interactions.chat.slash_commands` with callback-based registration
+- **Type safety (Lua)** — Full LuaLS type annotations across all 13 source files and 4
+  test files. Zero warnings under `lua-language-server --check --checklevel=Warning`.
+  Added `.luarc.json` with LuaJIT runtime, Neovim runtime library, luv types.
+- **Type safety (Python)** — Migrated from dataclasses to Pydantic models. `mypy --strict`
+  passes with zero errors across all 9 source files.
+- **OAuth 2.1** — Full MCP OAuth 2.1 support: `auth.py` with `FileTokenStorage`,
+  `_BearerAuth`, and `build_auth()` factory. Browser-based Authorization Code + PKCE
+  flow, token persistence to `~/.local/share/mcp-companion/oauth-tokens/`, automatic
+  refresh. Supports bearer tokens, `"oauth"` shorthand, and explicit client config.
+  23 unit tests in `test_auth.py`.
+- **Env expansion** — `${VAR}`, `${env:VAR}`, `${VAR:-default}` interpolation applied
+  to all config fields (command, args, env, url, headers). Expansion at
+  `to_fastmcp_config()` time, not at load time. 30 tests in `test_config.py`.
