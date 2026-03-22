@@ -5,7 +5,7 @@ import argparse
 from mcp_bridge.server import create_bridge
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         prog="mcp-bridge",
         description="MCP proxy bridge server",

@@ -1,29 +1,22 @@
 """Meta-tools for the bridge — status, enable/disable servers."""
 
+from __future__ import annotations
+
 from fastmcp import FastMCP
 
-from mcp_bridge.config import BridgeConfig
+from mcp_bridge.config import BridgeConfig, ServerStatusInfo
 
 
 def register_meta_tools(bridge: FastMCP, config: BridgeConfig) -> None:
     """Register bridge management tools on the FastMCP server."""
 
     @bridge.tool()
-    def bridge__status() -> dict:
+    def bridge__status() -> dict[str, ServerStatusInfo]:
         """Get status of all configured MCP servers.
 
         Returns a dict of server names to their configuration and status.
         """
-        result = {}
-        for name, srv in config.servers.items():
-            result[name] = {
-                "transport": srv.transport,
-                "disabled": srv.disabled,
-                "command": srv.command,
-                "url": srv.url,
-                "auto_approve": srv.auto_approve,
-            }
-        return result
+        return {name: config.get_server_status(name) for name in config.servers}
 
     @bridge.tool()
     def bridge__enable_server(server_name: str) -> str:

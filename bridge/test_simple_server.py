@@ -1,6 +1,14 @@
 """Simple test bridge with direct tools only (no proxy) to test multi-session."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from fastmcp import FastMCP
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
 
 bridge = FastMCP("test-bridge")
 
@@ -18,10 +26,10 @@ def add(a: int, b: int) -> str:
 
 
 @bridge.custom_route("/health", methods=["GET"])
-async def health(request):
-    from starlette.responses import JSONResponse
+async def health(request: Request) -> JSONResponse:
+    from starlette.responses import JSONResponse as _JSONResponse
 
-    return JSONResponse({"status": "ok"})
+    return _JSONResponse({"status": "ok"})
 
 
 if __name__ == "__main__":

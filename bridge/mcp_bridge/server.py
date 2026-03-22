@@ -1,5 +1,7 @@
 """FastMCP bridge server — proxies multiple MCP servers through one endpoint."""
 
+from __future__ import annotations
+
 import json
 import logging
 from collections.abc import Sequence
@@ -13,12 +15,12 @@ from fastmcp.tools import Tool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mcp_bridge.config import BridgeConfig
+from mcp_bridge.config import BridgeConfig, HealthResponse, ServerStatusInfo
 
 logger = logging.getLogger("mcp-bridge")
 
 
-def _safe_json_clone(obj: Any) -> Any:
+def _safe_json_clone(obj: object) -> Any:
     """JSON round-trip to break Python-level circular object identity."""
     return json.loads(json.dumps(obj, default=str))
 
@@ -28,17 +30,17 @@ class SanitizeSchemaMiddleware(Middleware):
 
     FastMCP ProxyTool objects can carry circular Python object references
     (especially from servers with $ref schemas like Todoist).  Pydantic's
-    model_dump() crashes with 'Circular reference detected (id repeated)'.
+    ``model_dump()`` crashes with 'Circular reference detected (id repeated)'.
 
     Our middleware catches these failures and reconstructs the tool as a
-    plain mcp.types.Tool (the wire-format dataclass) which has no internal
+    plain ``mcp.types.Tool`` (the wire-format dataclass) which has no internal
     state that can be circular.  The original FastMCP Tool objects remain
     in the tool registry for execution -- this only affects the listing
     response.
 
     NOTE: We override the *low-level* response by intercepting request_handler
     since FastMCP's middleware returns Tool objects that still get serialized
-    by the MCP SDK's _send_response(), which is where it crashes.
+    by the MCP SDK's ``_send_response()``, which is where it crashes.
     """
 
     async def on_list_tools(
@@ -47,14 +49,6 @@ class SanitizeSchemaMiddleware(Middleware):
         call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
     ) -> Sequence[Tool]:
         tools = list(await call_next(context))
-        # We can't prevent _send_response from crashing on these Tool objects.
-        # Instead, store the clean wire-format tools on the context so we can
-        # intercept at a lower level.  But FastMCP's middleware doesn't give us
-        # that option, so we need a different approach entirely.
-        #
-        # The real solution: monkey-patch the session's _send_response or
-        # build our own /mcp/tools/list handler.  For now, let's try to make
-        # the Tool objects serializable by replacing them entirely.
         sanitized: list[Tool] = []
         for tool in tools:
             try:
@@ -77,11 +71,12 @@ class SanitizeSchemaMiddleware(Middleware):
 
         # Clean the parameters via JSON round-trip
         try:
-            clean_params = _safe_json_clone(tool.parameters)
+            clean_params: dict[str, Any] = _safe_json_clone(tool.parameters)
         except (ValueError, RecursionError, TypeError):
             clean_params = {"type": "object", "properties": {}}
 
         # Clean annotations if present
+        clean_annotations: dict[str, Any] | None
         try:
             clean_annotations = _safe_json_clone(
                 tool.annotations.model_dump() if tool.annotations else None
@@ -133,11 +128,11 @@ def create_bridge(config_path: str) -> FastMCP:
     for name, srv in enabled.items():
         try:
             proxy_config = config.to_fastmcp_config(name)
-            proxy = create_proxy(proxy_config, name=name)
+            proxy = create_proxy(proxy_config.model_dump(exclude_none=True), name=name)
             bridge.mount(proxy, namespace=name)
-            logger.info(f"Mounted server: {name} ({srv.transport})")
-        except Exception as e:
-            logger.error(f"Failed to mount server '{name}': {e}")
+            logger.info("Mounted server: %s (%s)", name, srv.transport.value)
+        except Exception:
+            logger.exception("Failed to mount server '%s'", name)
 
     # Register meta-tools
     from mcp_bridge.meta_tools import register_meta_tools
@@ -147,18 +142,14 @@ def create_bridge(config_path: str) -> FastMCP:
     # Health endpoint
     @bridge.custom_route("/health", methods=["GET"])
     async def health_check(request: Request) -> JSONResponse:
-        server_statuses: dict[str, Any] = {}
-        for name, srv in config.servers.items():
-            server_statuses[name] = {
-                "transport": srv.transport,
-                "disabled": srv.disabled,
-            }
-        return JSONResponse(
-            {
-                "status": "ok",
-                "servers": server_statuses,
-                "config_path": config.config_path,
-            }
+        server_statuses: dict[str, ServerStatusInfo] = {
+            name: config.get_server_status(name) for name in config.servers
+        }
+        response = HealthResponse(
+            status="ok",
+            servers=server_statuses,
+            config_path=config.config_path,
         )
+        return JSONResponse(response.model_dump(mode="json"))
 
     return bridge
