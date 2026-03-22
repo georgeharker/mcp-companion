@@ -127,9 +127,34 @@ format is supported:
 
 ### sharedServer — per-server process management
 
-The `sharedServer` field links a server entry to a `sharedServers` process definition.
-When the bridge starts, it uses sharedserver to launch (or attach to an already-running)
-instance of that process, then waits for it to become reachable before mounting the proxy.
+Many MCP servers that expose an HTTP endpoint (as opposed to stdio) need to run as
+standalone processes: started before the bridge connects, kept alive during the session,
+and shut down when no longer needed. Managing this manually is tedious — you have to
+remember to start them before your editor, keep them running, and clean them up
+afterward.
+
+The `sharedServer` field solves this. It links a server entry to a process definition in
+the top-level `sharedServers` dict. The bridge delegates lifecycle to
+[sharedserver](https://github.com/georgeharker/sharedserver), a reference-counted
+process supervisor:
+
+- On bridge startup, sharedserver **starts** the process (or increments a refcount if
+  it is already running from another client)
+- The process stays alive as long as any client holds a reference — multiple bridge
+  instances, Neovim windows, or scripts share the same process transparently
+- After the last client detaches, the process remains alive for `grace_period` before
+  stopping — so a quick restart or a second Neovim window opening does not cause an
+  unnecessary restart
+- On bridge shutdown, sharedserver **decrements the refcount**; the process stops only
+  when the grace period expires with no remaining clients
+
+The result is ephemeral-but-shared server processes: they start on demand, are shared
+across all clients that need them, and stop themselves when idle. You never need to
+manually start or stop them.
+
+The bridge waits up to `health_timeout` seconds for the process to become reachable
+after starting before mounting the proxy. If the process was already running, this
+passes immediately.
 
 A complete example — a Google Workspace MCP server that needs OAuth and is managed via
 sharedserver:
@@ -171,7 +196,7 @@ entries can reference the same `sharedServers` entry.
 | `command` | `string` | **required** | Executable to run (e.g. `"uvx"`) |
 | `args` | `string[]` | `[]` | Arguments to the command (supports interpolation) |
 | `env` | `object` | `{}` | Extra environment variables (supports interpolation) |
-| `grace_period` | `string` | — | How long to keep server alive after last client detaches (e.g. `"30m"`) |
+| `grace_period` | `string` | — | How long to keep the process alive after the last client detaches (e.g. `"30m"`) |
 | `health_timeout` | `integer` | `30` | Seconds to poll the server URL after start before giving up |
 
 ### Environment variable interpolation
