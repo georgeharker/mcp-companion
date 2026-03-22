@@ -13,24 +13,6 @@ Needs a proper E2E suite that can run in CI without a live Neovim instance, cove
 - CC tool registration and callback execution
 - ACP session injection (mock CC ACP Connection)
 
-## Feature: MCP resources → CC variables (cc/variables.lua)
-
-`cc/variables.lua` is a stub. MCP resources should be registered as CodeCompanion
-`#variable` completions so users can insert resource content into chat with `#resource_name`.
-
-CC variables API: `config.strategies.chat.variables[name] = { callback = fn, description }`.
-
-Files: `cc/variables.lua`.
-
-## Feature: MCP prompts → CC slash commands (cc/slash_commands.lua)
-
-`cc/slash_commands.lua` is a stub. MCP prompts should be registered as CodeCompanion
-`/slash_command` completions.
-
-CC slash commands API: `config.strategies.chat.slash_commands[name] = { callback = fn, description }`.
-
-Files: `cc/slash_commands.lua`.
-
 ## TODO: Native Lua MCP server registration (M9)
 
 `native/init.lua` is a stub. The original plan included an API for registering MCP
@@ -67,3 +49,8 @@ Files: `native/init.lua`, `init.lua` (wire up public API).
   per-tool auto_approve config; wired into `cc/tools.lua` execute callback
 - **M12** — ACP forwarding: monkey-patch `Connection:_establish_session`, HTTP transport,
   confirmed working with OpenCode using tools in a real chat session
+- **Editor context** — MCP resources → CC `#editor_context` entries via
+  `cc/editor_context.lua`; targets `interactions.shared.editor_context` (CC v19+ API);
+  system prompt injection via ChatCreated autocmd; old `cc/variables.lua` removed
+- **Slash commands** — MCP prompts → CC `/slash_commands` via `cc/slash_commands.lua`;
+  targets `interactions.chat.slash_commands` with callback-based registration

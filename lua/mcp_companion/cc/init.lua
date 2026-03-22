@@ -1,7 +1,7 @@
 --- mcp-companion.nvim — CC Extension entry point
 --- Bridges MCP capabilities into CodeCompanion:
 ---   - MCP tools → CC tools (function calling)
----   - MCP resources → CC # variables
+---   - MCP resources → CC #editor_context entries
 ---   - MCP prompts → CC / slash commands
 ---
 --- Registered via CodeCompanion.register_extension("mcp_companion", M)
@@ -45,7 +45,7 @@ end
 
 function M._register_all()
   M._register_tools()
-  M._register_resources()
+  M._register_editor_context()
   M._register_prompts()
 end
 
@@ -58,12 +58,12 @@ function M._register_tools()
   end
 end
 
-function M._register_resources()
-  local ok, vars = pcall(require, "mcp_companion.cc.variables")
+function M._register_editor_context()
+  local ok, editor_ctx = pcall(require, "mcp_companion.cc.editor_context")
   if ok then
-    vars.register()
+    editor_ctx.register()
   else
-    log.warn("Failed to load cc.variables: %s", tostring(vars))
+    log.warn("Failed to load cc.editor_context: %s", tostring(editor_ctx))
   end
 end
 
@@ -192,8 +192,9 @@ M.exports = {
   --- Force refresh all capabilities
   refresh = function()
     local bridge = require("mcp_companion.bridge")
-    if bridge.client and bridge.client.connected then
-      bridge.client:refresh_capabilities()
+    local client = bridge.client
+    if client and client.connected then
+      client:refresh_capabilities()
     end
   end,
 }

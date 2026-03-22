@@ -1,7 +1,7 @@
 -- Test: add User-Agent and Connection headers like curl
 local uv = vim.uv
 
-local tcp1 = uv.new_tcp()
+local tcp1 = assert(uv.new_tcp())
 local session_id = nil
 
 tcp1:connect('127.0.0.1', 9741, function(err)
@@ -14,7 +14,7 @@ tcp1:connect('127.0.0.1', 9741, function(err)
       if not tcp1:is_closing() then tcp1:close() end
       vim.schedule(function()
         print('\n--- tools/list with extra headers ---')
-        local tcp2 = uv.new_tcp()
+        local tcp2 = assert(uv.new_tcp())
         tcp2:connect('127.0.0.1', 9741, function(err2)
           if err2 then print('err2: ' .. err2); vim.cmd('qa!'); return end
 

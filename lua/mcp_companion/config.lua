@@ -15,7 +15,8 @@ local M = {}
 --- @class MCPCompanion.Config
 --- @field bridge MCPCompanion.BridgeConfig
 --- @field native_servers table<string, {enabled: boolean}>
---- @field auto_approve boolean|fun(server_name: string, tool_name: string, params: table): boolean
+--- @field auto_approve boolean|fun(tool_name: string, server_name: string, tool_ctx: table): boolean
+--- @field system_prompt_resources? boolean|string[] Resource name patterns to inject into system prompt
 --- @field ui {enabled: boolean, width: number, height: number, border: string}
 --- @field log {level: string, file: boolean}
 --- @field global_env table<string, string>
@@ -39,6 +40,8 @@ M.defaults = {
   },
 
   auto_approve = false,
+
+  system_prompt_resources = nil,
 
   ui = {
     enabled = true,

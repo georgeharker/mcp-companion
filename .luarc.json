@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime": {
+    "version": "LuaJIT",
+    "special": {
+      "require": "require"
+    }
+  },
+  "workspace": {
+    "library": [
+      "/opt/homebrew/share/nvim/runtime/lua",
+      "${3rd}/luv/library"
+    ],
+    "checkThirdParty": false
+  },
+  "diagnostics": {
+    "globals": ["vim"],
+    "disable": ["luadoc-miss-module-name"]
+  },
+  "type": {
+    "castNumberToInteger": true
+  }
+}

@@ -10,9 +10,6 @@
 
 local log = require("mcp_companion.log")
 
-local Client = {}
-Client.__index = Client
-
 --- @class MCPCompanion.Client
 --- @field host string
 --- @field port number
@@ -24,15 +21,23 @@ Client.__index = Client
 --- @field resources table[] Cached resource definitions
 --- @field resource_templates table[] Cached resource template definitions
 --- @field prompts table[] Cached prompt definitions
---- @field _poll_timer? uv_timer_t Polling timer handle
---- @field _sse_tcp? uv_tcp_t Dedicated SSE stream TCP handle
+--- @field _poll_timer? uv.uv_timer_t Polling timer handle
+--- @field _sse_tcp? uv.uv_tcp_t Dedicated SSE stream TCP handle
 --- @field _sse_buf string SSE stream accumulation buffer
---- @field _sse_reconnect_timer? uv_timer_t SSE reconnect delay timer
+--- @field _sse_reconnect_timer? uv.uv_timer_t SSE reconnect delay timer
 --- @field _sse_connected boolean Whether SSE stream is active
---- @field _config table Original config
+--- @field _config MCPCompanion.ClientConfig Original config
+local Client = {}
+Client.__index = Client
+
+--- @class MCPCompanion.ClientConfig
+--- @field host? string
+--- @field port? number
+--- @field request_timeout? number
+--- @field poll_interval? number
 
 --- Create a new MCP HTTP client
---- @param config {host: string, port: number, request_timeout?: number, poll_interval?: number}
+--- @param config MCPCompanion.ClientConfig
 --- @return MCPCompanion.Client
 function Client.new(config)
   return setmetatable({
@@ -921,7 +926,7 @@ function Client:_cleanup_sse()
   self._sse_buf = ""
 
   if self._sse_tcp then
-    local tcp = self._sse_tcp
+    local tcp = self._sse_tcp --[[@as uv.uv_tcp_t]]
     self._sse_tcp = nil
     pcall(function()
       tcp:read_stop()

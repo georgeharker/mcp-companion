@@ -5,11 +5,14 @@ local M = {}
 
 local log = require("mcp_companion.log")
 
---- @type MCPCompanion.Config|nil
-local _config = nil
+--- @type MCPCompanion.Config
+local _config ---@diagnostic disable-line: missing-fields
 
 --- @type MCPCompanion.Client|nil Bridge MCP client instance
 M.client = nil
+
+--- @type boolean Whether setup() has been called
+local _configured = false
 
 --- @type any Direct subprocess handle (fallback mode)
 M._job = nil
@@ -18,11 +21,12 @@ M._job = nil
 --- @param config MCPCompanion.Config
 function M.setup(config)
   _config = config
+  _configured = true
 end
 
 --- Start the bridge process and connect
 function M.start()
-  if not _config then
+  if not _configured then
     log.error("Bridge not configured — call setup() first")
     return
   end
@@ -64,7 +68,7 @@ function M._check_existing(callback)
     { text = true },
     function(result)
       vim.schedule(function()
-        callback(result.stdout and result.stdout:match("200") ~= nil)
+        callback(result.stdout ~= nil and result.stdout:match("200") ~= nil)
       end)
     end
   )
@@ -177,6 +181,11 @@ function M._wait_and_connect()
   local max_attempts = _config.bridge.startup_timeout or 30
 
   local timer = vim.uv.new_timer()
+  if not timer then
+    log.error("Failed to create health-check timer")
+    state.update("bridge", { status = "error", error = "Timer creation failed" })
+    return
+  end
   timer:start(
     500, -- initial delay
     1000, -- retry every 1s
@@ -217,18 +226,19 @@ function M._create_client()
   local state = require("mcp_companion.state")
   local Client = require("mcp_companion.bridge.client")
 
-  M.client = Client.new({
+  local client = Client.new({
     host = _config.bridge.host or "127.0.0.1",
     port = _config.bridge.port,
     request_timeout = _config.bridge.request_timeout,
   })
+  M.client = client
 
-  M.client:connect(function(ok, err)
+  client:connect(function(ok, err)
     if ok then
       state.update("bridge", { status = "connected" })
       state.emit("bridge_ready")
       log.info("MCP client connected (%d tools, %d resources, %d prompts)",
-        #M.client.tools, #M.client.resources, #M.client.prompts)
+        #client.tools, #client.resources, #client.prompts)
     else
       state.update("bridge", { status = "error", error = tostring(err) })
       state.emit("bridge_error", err)
@@ -245,8 +255,9 @@ end
 function M.stop()
   local state = require("mcp_companion.state")
 
-  if M.client then
-    M.client:disconnect()
+  local client = M.client
+  if client then
+    client:disconnect()
     M.client = nil
   end
 
@@ -278,12 +289,13 @@ function M.restart()
 end
 
 --- Get bridge status
---- @return table {running: boolean, shared: boolean, port?: number, clients?: number}
+--- @return {running: boolean, shared: boolean, port?: number, clients?: number, pid?: number}
 function M.status()
+  local client = M.client
   local result = {
-    running = M.client ~= nil and M.client.connected,
+    running = client ~= nil and client.connected,
     shared = false,
-    port = _config and _config.bridge.port,
+    port = _configured and _config.bridge.port or nil,
   }
 
   local ss_ok, ss = pcall(require, "sharedserver")

@@ -26,7 +26,8 @@ function M.check(server_name, tool_name, tool_ctx, callback)
   end
 
   if type(config.auto_approve) == "function" then
-    local ok, result = pcall(config.auto_approve, tool_name, server_name, tool_ctx)
+    local fn = config.auto_approve --[[@as fun(tool_name: string, server_name: string, tool_ctx: table): boolean]]
+    local ok, result = pcall(fn, tool_name, server_name, tool_ctx)
     if ok then
       return callback(result)
     end

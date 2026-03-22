@@ -492,7 +492,10 @@ function M.render()
 
   for i, line in ipairs(_lines) do
     for _, hl in ipairs(line.highlights) do
-      vim.api.nvim_buf_add_highlight(_buf, ns, hl[1], i - 1, hl[2], hl[3])
+      vim.api.nvim_buf_set_extmark(_buf, ns, i - 1, hl[2], {
+        end_col = hl[3],
+        hl_group = hl[1],
+      })
     end
   end
 end

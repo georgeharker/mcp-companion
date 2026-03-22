@@ -219,6 +219,7 @@ end
 -- ── 3. Connect Lua client ────────────────────────────────────────────────────
 section("Client connection")
 
+--- @type MCPCompanion.Client|nil
 local client = nil
 local connected = false
 
@@ -323,7 +324,7 @@ end
 
 --- Helper: synchronous tool call with 8s timeout
 local function call_tool(namespaced, params)
-    if not connected then return nil, "not connected" end
+    if not connected or not client then return nil, "not connected" end
     local result, call_err
     local done = false
     client:call_tool(namespaced, params or vim.empty_dict(), function(e, r)
