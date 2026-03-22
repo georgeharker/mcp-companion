@@ -20,6 +20,75 @@ class Transport(str, Enum):
     SSE = "sse"
 
 
+class SharedServerConfig(BaseModel):
+    """Configuration for spawning an HTTP server process via sharedserver.
+
+    Lives under the top-level ``sharedServers`` dict in the config file.
+    Server entries reference a shared server by name via ``"sharedServer": "<name>"``.
+
+    Example JSON (top-level section)::
+
+        "sharedServers": {
+            "goog_ws": {
+                "command": "uvx",
+                "args": ["workspace-mcp", "--transport", "streamable-http"],
+                "env": {
+                    "WORKSPACE_MCP_PORT": "8002",
+                    "MCP_ENABLE_OAUTH21": "true"
+                },
+                "grace_period": "30m",
+                "health_timeout": 30
+            }
+        }
+
+    Server entry::
+
+        "google-workspace": {
+            "url": "http://localhost:8002/mcp",
+            "auth": "oauth",
+            "sharedServer": "goog_ws"
+        }
+    """
+
+    name: str
+    """sharedserver server name — key in the top-level ``sharedServers`` dict."""
+
+    command: str
+    """Executable to run (e.g. ``"uvx"``)."""
+
+    args: list[str] = Field(default_factory=list)
+    """Arguments to the command (e.g. ``["workspace-mcp", "--transport", "streamable-http"]``)."""
+
+    env: dict[str, str] = Field(default_factory=dict)
+    """Extra environment variables for the spawned process.
+    Supports ``${VAR}``, ``${env:VAR}``, and ``${VAR:-default}`` interpolation.
+    """
+
+    grace_period: str | None = None
+    """Grace period to pass to sharedserver (e.g. ``"30m"``).
+    When the last client unuses the server it stays alive for this duration.
+    """
+
+    health_timeout: int = 30
+    """Seconds to wait for the HTTP server to become reachable after starting.
+    The bridge polls the server URL until it responds or this timeout expires.
+    """
+
+    @classmethod
+    def from_dict(cls, name: str, data: dict[str, Any]) -> SharedServerConfig:
+        """Parse a ``sharedServers`` entry dict, keyed by *name*."""
+        raw_env = data.get("env", {})
+        env = {k: str(v) for k, v in raw_env.items()} if raw_env else {}
+        return cls(
+            name=name,
+            command=data["command"],
+            args=data.get("args", []),
+            env=env,
+            grace_period=data.get("grace_period") or data.get("gracePeriod"),
+            health_timeout=int(data.get("health_timeout", data.get("healthTimeout", 30))),
+        )
+
+
 class ServerConfig(BaseModel):
     """Configuration for a single MCP server."""
 
@@ -42,6 +111,9 @@ class ServerConfig(BaseModel):
     - ``{"oauth": {...}}``    — OAuth with explicit options (scopes, client_id, ...)
     """
 
+    shared_server: str | None = None
+    """Name of a top-level ``sharedServers`` entry to start before connecting."""
+
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> ServerConfig:
         """Create ServerConfig from a config dict entry."""
@@ -60,6 +132,9 @@ class ServerConfig(BaseModel):
         raw_env = data.get("env", {})
         env = {k: str(v) for k, v in raw_env.items()} if raw_env else {}
 
+        # camelCase or snake_case key
+        shared_server = data.get("sharedServer") or data.get("shared_server")
+
         return cls(
             name=name,
             command=data.get("command"),
@@ -71,6 +146,7 @@ class ServerConfig(BaseModel):
             disabled=data.get("disabled", False),
             auto_approve=auto_approve,
             auth=data.get("auth"),
+            shared_server=shared_server,
         )
 
 
@@ -101,6 +177,8 @@ class ServerStatusInfo(BaseModel):
     auto_approve: list[str] = Field(default_factory=list)
     auth_type: str | None = None
     """Authentication type: ``"oauth"``, ``"bearer"``, or ``None``."""
+    shared_server: str | None = None
+    """sharedServers key if this server has a managed process, else ``None``."""
 
 
 class HealthResponse(BaseModel):
@@ -111,10 +189,57 @@ class HealthResponse(BaseModel):
     config_path: str = ""
 
 
+class OAuthConfig(BaseModel):
+    """Top-level OAuth settings for the bridge.
+
+    These are global defaults; individual servers can override ``cache_tokens``
+    inside their ``auth: {oauth: {cache_tokens: false}}`` block.
+
+    Example JSON (top-level section)::
+
+        "oauth": {
+            "cache_tokens": true,
+            "token_dir": "~/.cache/mcp-companion/oauth-tokens"
+        }
+    """
+
+    cache_tokens: bool = True
+    """Persist OAuth tokens to disk (default ``true``).
+
+    When ``true``, tokens are stored under *token_dir* and reused across bridge
+    restarts.  When ``false``, tokens live in memory only and the browser OAuth
+    flow runs again on each restart.
+    """
+
+    token_dir: str | None = None
+    """Directory for OAuth token files.
+
+    Defaults to ``~/.cache/mcp-companion/oauth-tokens`` when ``null``.
+    Supports ``~`` expansion.  Each server gets its own subdirectory.
+    """
+
+    @property
+    def token_dir_path(self) -> Path | None:
+        """Resolved :class:`~pathlib.Path` for *token_dir*, or ``None`` to use the default."""
+        if self.token_dir is None:
+            return None
+        return Path(self.token_dir).expanduser()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OAuthConfig:
+        """Parse the top-level ``oauth`` config dict."""
+        return cls(
+            cache_tokens=bool(data.get("cache_tokens", True)),
+            token_dir=data.get("token_dir") or data.get("tokenDir"),
+        )
+
+
 class BridgeConfig(BaseModel):
     """Full bridge configuration."""
 
     servers: dict[str, ServerConfig] = Field(default_factory=dict)
+    shared_servers: dict[str, SharedServerConfig] = Field(default_factory=dict)
+    oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     config_path: str = ""
 
     @classmethod
@@ -132,11 +257,36 @@ class BridgeConfig(BaseModel):
             name: ServerConfig.from_dict(name, srv_data) for name, srv_data in raw_servers.items()
         }
 
-        return cls(servers=servers, config_path=str(path))
+        raw_shared: dict[str, Any] = raw.get("sharedServers", {})
+        shared_servers = {
+            name: SharedServerConfig.from_dict(name, data) for name, data in raw_shared.items()
+        }
+
+        raw_oauth: dict[str, Any] = raw.get("oauth", {})
+        oauth = OAuthConfig.from_dict(raw_oauth) if raw_oauth else OAuthConfig()
+
+        return cls(
+            servers=servers,
+            shared_servers=shared_servers,
+            oauth=oauth,
+            config_path=str(path),
+        )
 
     def get_enabled_servers(self) -> dict[str, ServerConfig]:
         """Return only enabled servers."""
         return {name: srv for name, srv in self.servers.items() if not srv.disabled}
+
+    def resolve_shared_server(self, server_name: str) -> SharedServerConfig | None:
+        """Return the SharedServerConfig for a server, if it has one."""
+        srv = self.servers.get(server_name)
+        if srv is None or srv.shared_server is None:
+            return None
+        ss = self.shared_servers.get(srv.shared_server)
+        if ss is None:
+            raise KeyError(
+                f"Server '{server_name}' references unknown sharedServer '{srv.shared_server}'"
+            )
+        return ss
 
     def to_fastmcp_config(self, name: str) -> FastMCPConfig:
         """Convert a single server config to a typed FastMCP proxy config.
@@ -186,6 +336,7 @@ class BridgeConfig(BaseModel):
             url=srv.url,
             auto_approve=srv.auto_approve,
             auth_type=auth_type,
+            shared_server=srv.shared_server,
         )
 
 

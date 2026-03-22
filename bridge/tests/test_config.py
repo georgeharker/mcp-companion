@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 from mcp_bridge.config import (
     BridgeConfig,
+    OAuthConfig,
     ServerConfig,
+    SharedServerConfig,
     _interpolate_str,
     _interpolate_dict,
     _interpolate_list,
@@ -26,6 +28,74 @@ def test_load_config() -> None:
     assert "everything" in config.servers
     assert "disabled-server" in config.servers
     assert "http-example" in config.servers
+    assert "sharedserver-example" in config.servers
+
+
+def test_load_config_sharedserver_parsed() -> None:
+    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    srv = config.servers["sharedserver-example"]
+    # Server entry just holds a reference name
+    assert srv.shared_server == "goog_ws"
+    # The actual config lives in shared_servers
+    ss = config.shared_servers["goog_ws"]
+    assert ss.command == "uvx"
+    assert ss.grace_period == "30m"
+    assert ss.health_timeout == 30
+
+
+def test_server_status_sharedserver_name() -> None:
+    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    status = config.get_server_status("sharedserver-example")
+    assert status.shared_server == "goog_ws"
+
+
+def test_server_status_no_sharedserver() -> None:
+    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    status = config.get_server_status("everything")
+    assert status.shared_server is None
+
+
+# ── OAuthConfig ────────────────────────────────────────────────────
+
+
+def test_oauth_config_defaults() -> None:
+    cfg = OAuthConfig()
+    assert cfg.cache_tokens is True
+    assert cfg.token_dir is None
+    assert cfg.token_dir_path is None
+
+
+def test_oauth_config_from_dict_defaults() -> None:
+    cfg = OAuthConfig.from_dict({})
+    assert cfg.cache_tokens is True
+    assert cfg.token_dir is None
+
+
+def test_oauth_config_from_dict_disable_cache() -> None:
+    cfg = OAuthConfig.from_dict({"cache_tokens": False})
+    assert cfg.cache_tokens is False
+
+
+def test_oauth_config_from_dict_token_dir() -> None:
+    cfg = OAuthConfig.from_dict({"token_dir": "/tmp/my-tokens"})
+    from pathlib import Path
+
+    assert cfg.token_dir_path == Path("/tmp/my-tokens")
+
+
+def test_oauth_config_from_dict_token_dir_camel() -> None:
+    """camelCase key ``tokenDir`` is accepted."""
+    cfg = OAuthConfig.from_dict({"tokenDir": "/tmp/my-tokens"})
+    from pathlib import Path
+
+    assert cfg.token_dir_path == Path("/tmp/my-tokens")
+
+
+def test_bridge_config_oauth_defaults() -> None:
+    """BridgeConfig has sensible OAuth defaults when no oauth key in file."""
+    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    assert config.oauth.cache_tokens is True
+    assert config.oauth.token_dir is None
 
 
 def test_server_config_from_dict_stdio() -> None:

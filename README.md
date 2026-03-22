@@ -25,6 +25,8 @@ UI.
    (CodeCompanion) (ACP agent)  (curl, scripts)
 ```
 
+---
+
 ## MCP Bridge (standalone)
 
 The bridge is a [FastMCP](https://github.com/jlowin/fastmcp) server that
@@ -68,19 +70,7 @@ curl -X POST http://127.0.0.1:9741/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
 ```
 
-### Running with sharedserver
-
-For long-running bridge processes shared across multiple clients, use
-[sharedserver](https://github.com/georgeharker/sharedserver):
-
-```bash
-# Bridge stays alive 30 min after last client disconnects
-sharedserver use mcp-bridge -- \
-  python -m mcp_bridge --config ~/.config/mcp/servers.json --port 9741
-
-# Detach when done (bridge stays alive for other clients)
-sharedserver unuse mcp-bridge
-```
+---
 
 ## MCP Server Config
 
@@ -133,6 +123,7 @@ format is supported:
 | `disabled` | `boolean` | Skip this server |
 | `autoApprove` | `string[]` | Tool name patterns to auto-approve |
 | `auth` | `string\|object` | Authentication config (see below) |
+| `sharedServer` | `string` | Name of a `sharedServers` entry to start before connecting (see below) |
 
 ### Environment variable interpolation
 
@@ -149,12 +140,14 @@ Expansion applies to: `command`, `args`, `env`, `url`, and `headers` fields.
 Interpolation happens at runtime (when connecting to servers), not at config
 load time.
 
-### Authentication
+---
+
+## Authentication
 
 MCP servers that require authentication are supported via the `auth` field.
 Three modes are available:
 
-**Bearer token:**
+### Bearer token
 
 ```json
 {
@@ -167,7 +160,7 @@ Three modes are available:
 }
 ```
 
-**OAuth 2.1 (auto-discovery):**
+### OAuth 2.1 — auto-discovery
 
 ```json
 {
@@ -182,10 +175,9 @@ Three modes are available:
 
 This triggers the full [MCP OAuth 2.1](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/authorization/)
 flow: metadata discovery, dynamic client registration, PKCE authorization code
-grant via browser redirect, and token exchange. A local HTTP server is started
-on an ephemeral port to receive the callback.
+grant via browser redirect, and token exchange.
 
-**OAuth 2.1 with explicit client:**
+### OAuth 2.1 — explicit client
 
 ```json
 {
@@ -206,8 +198,148 @@ on an ephemeral port to receive the callback.
 
 When `client_id` is provided, dynamic client registration is skipped.
 
-Tokens are persisted to `~/.local/share/mcp-companion/oauth-tokens/<server>/`
+### OAuth options
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `client_id` | `string` | — | Pre-registered OAuth client ID (skips dynamic registration) |
+| `client_secret` | `string` | — | Client secret (used with `client_id`) |
+| `scopes` | `string\|string[]` | — | OAuth scopes to request |
+| `client_metadata_url` | `string` | — | CIMD URL (alternative to dynamic registration) |
+| `cache_tokens` | `boolean` | `true` | Persist tokens to disk for this server (overrides global setting) |
+
+### OAuth token caching
+
+By default, tokens are persisted to `~/.cache/mcp-companion/oauth-tokens/<server>/`
 and reused across sessions. Refresh tokens are handled automatically.
+
+**Global caching settings** live in the top-level `oauth` section of your config:
+
+```json
+{
+  "oauth": {
+    "cache_tokens": true,
+    "token_dir": "~/.cache/mcp-companion/oauth-tokens"
+  },
+  "mcpServers": { ... }
+}
+```
+
+**Per-server override** — disable caching for one server while keeping it globally:
+
+```json
+{
+  "mcpServers": {
+    "my-api": {
+      "url": "https://api.example.com/mcp",
+      "auth": {
+        "oauth": {
+          "cache_tokens": false
+        }
+      }
+    }
+  }
+}
+```
+
+**CLI flags** — override everything at startup (highest priority):
+
+```bash
+# Disable disk caching entirely (tokens lost on restart)
+python -m mcp_bridge --config servers.json --no-oauth-cache
+
+# Use a custom token directory
+python -m mcp_bridge --config servers.json --oauth-token-dir /secure/tokens
+
+# Re-enable caching if config file says otherwise
+python -m mcp_bridge --config servers.json --oauth-cache
+```
+
+Priority order (highest to lowest): CLI flag → config `oauth` section → built-in default.
+
+---
+
+## sharedserver support
+
+The bridge can manage HTTP-based MCP servers using
+[sharedserver](https://github.com/georgeharker/sharedserver) — a reference-counted
+process supervisor. Multiple clients (Neovim instances, scripts) can attach to the same
+named server; it stays alive as long as any client holds a reference, then idles for a
+grace period before stopping.
+
+### Install sharedserver
+
+```bash
+cargo install sharedserver
+```
+
+Or download a pre-built binary from the
+[sharedserver releases](https://github.com/georgeharker/sharedserver/releases).
+
+### Config format
+
+Add a top-level `sharedServers` dict, then reference entries by name from individual
+servers using `"sharedServer": "<name>"`:
+
+```json
+{
+  "sharedServers": {
+    "google-workspace-proc": {
+      "command": "uvx",
+      "args": ["workspace-mcp", "--transport", "streamable-http"],
+      "env": {
+        "WORKSPACE_MCP_PORT": "8002",
+        "MCP_ENABLE_OAUTH21": "true",
+        "GOOGLE_OAUTH_CLIENT_ID": "${env:GOOGLE_OAUTH_CLIENT_ID}",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "${env:GOOGLE_OAUTH_CLIENT_SECRET}"
+      },
+      "grace_period": "30m",
+      "health_timeout": 30
+    }
+  },
+  "mcpServers": {
+    "google-workspace": {
+      "url": "http://localhost:8002/mcp",
+      "auth": "oauth",
+      "sharedServer": "google-workspace-proc"
+    }
+  }
+}
+```
+
+When the bridge starts, it calls `sharedserver use <name> --pid <bridge-pid> -- <command> <args>`
+for each enabled server with a `sharedServer` reference.  It then polls the server URL
+until it responds (or `health_timeout` seconds elapse) before mounting the proxy.
+
+When the bridge stops, it calls `sharedserver unuse <name>` to decrement the refcount.
+The process keeps running until the grace period expires after the last client detaches.
+
+### `sharedServers` options
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `command` | `string` | **required** | Executable to run (e.g. `"uvx"`) |
+| `args` | `string[]` | `[]` | Arguments to the command |
+| `env` | `object` | `{}` | Extra environment variables (supports interpolation) |
+| `grace_period` | `string` | — | How long to keep server alive after last client (e.g. `"30m"`) |
+| `health_timeout` | `integer` | `30` | Seconds to wait for the HTTP server to become reachable |
+
+### Running the bridge itself under sharedserver
+
+For long-running bridge processes shared across multiple clients, the bridge process
+itself can be managed by sharedserver:
+
+```bash
+# Bridge stays alive 30 min after last client disconnects
+sharedserver use mcp-bridge -- \
+  python -m mcp_bridge --config ~/.config/mcp/servers.json --port 9741
+
+# Detach when done (bridge stays alive for other clients)
+sharedserver unuse mcp-bridge
+```
+
+The Neovim plugin does this automatically — see the [Neovim integration](#neovim-integration)
+section below.
 
 ---
 
@@ -222,8 +354,29 @@ MCP capabilities as native editor features.
 - Neovim 0.10+
 - Python 3.12+ with [`uv`](https://github.com/astral-sh/uv)
 - [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) v19+
-- [sharedserver](https://github.com/georgeharker/sharedserver) (optional, for bridge lifecycle)
-- An MCP server config file (same format as VS Code / Claude Desktop)
+
+Optional but recommended:
+- [sharedserver](https://github.com/georgeharker/sharedserver) — shares the bridge
+  process across multiple Neovim instances with automatic lifecycle management
+
+### Installing sharedserver (for Neovim users)
+
+The plugin uses sharedserver to manage the bridge process so multiple Neovim instances
+share a single bridge, with automatic startup, health polling, idle timeout, and graceful
+shutdown.
+
+**Install via cargo:**
+
+```bash
+cargo install sharedserver
+```
+
+**Or install via the lazy.nvim dependency** — add `georgeharker/sharedserver` as a
+dependency in your plugin spec (see below). This installs the Rust binary automatically
+via the plugin's build step.
+
+Without sharedserver, the bridge still starts and stops but is not shared across
+Neovim instances (each instance manages its own bridge process).
 
 ### Installation (lazy.nvim)
 
@@ -233,7 +386,12 @@ MCP capabilities as native editor features.
     lazy = false,
     dependencies = {
         "olimorris/codecompanion.nvim",
-        "georgeharker/sharedserver",  -- optional, manages bridge lifecycle
+        -- Optional: manages bridge lifecycle across Neovim instances
+        -- Installs the sharedserver Rust binary automatically
+        {
+            "georgeharker/sharedserver",
+            build = "cargo build --release",
+        },
     },
     build = "cd bridge && uv venv --python 3.14 .venv && uv sync --frozen",
     config = function()
@@ -294,20 +452,26 @@ and can call all MCP tools autonomously without extra configuration.
 
 Tool calls go through a configurable approval chain before execution:
 
-1. **Global auto-approve** -- `auto_approve = true` or a custom function
-2. **Native servers** -- auto-approved (they run in-process)
-3. **Per-server patterns** -- `autoApprove` list in your servers.json
-4. **User prompt** -- `vim.ui.select` ("Allow" / "Deny")
+1. **Global auto-approve** — `auto_approve = true` or a custom function
+2. **Native servers** — auto-approved (they run in-process)
+3. **Per-server patterns** — `autoApprove` list in your servers.json
+4. **User prompt** — `vim.ui.select` ("Allow" / "Deny")
 
 #### Bridge lifecycle
 
-The bridge process is managed automatically via
-[sharedserver](https://github.com/georgeharker/sharedserver). Multiple Neovim
-instances share the same bridge on `127.0.0.1:9741`, with automatic startup,
-health polling, idle timeout, and graceful shutdown.
+When sharedserver is available, the Neovim plugin calls:
 
-Without sharedserver, the bridge still starts and stops but is not shared across
-Neovim instances.
+```
+sharedserver use mcp-bridge --grace-period <idle_timeout> --pid <nvim-pid> \
+  -- python -m mcp_bridge --config <path> --port <port>
+```
+
+Multiple Neovim instances share the same bridge on `127.0.0.1:9741`. When
+the last Neovim instance exits (or calls `stop_bridge()`), the bridge stays
+alive for `idle_timeout` in case another instance reconnects, then shuts down.
+
+Without sharedserver, the bridge starts directly via `vim.uv` and lives for
+the lifetime of the Neovim instance.
 
 #### Hot reload
 
@@ -326,8 +490,8 @@ file.
 
 The bridge exposes management tools that the LLM can call:
 
-- `bridge__status` -- list all configured servers and their state
-- `bridge__enable_server` / `bridge__disable_server` -- toggle servers at runtime
+- `bridge__status` — list all configured servers and their state
+- `bridge__enable_server` / `bridge__disable_server` — toggle servers at runtime
 
 ### Usage
 
@@ -480,6 +644,7 @@ system_prompt_resources = { "ai%-assistant%-guide", "project%-context" }
 │  server.py      Proxy + middleware + health  │
 │  config.py      Pydantic models, env interp  │
 │  auth.py        OAuth 2.1, bearer tokens     │
+│  sharedserver.py  sharedserver lifecycle     │
 │  meta_tools.py  bridge__status, enable/disable│
 └────────────────────┬────────────────────────┘
                      │ HTTP :9741
@@ -501,13 +666,15 @@ The bridge aggregates N MCP servers through a single HTTP endpoint. A
 `SanitizeSchemaMiddleware` handles servers with circular `$ref` schemas
 (e.g. Todoist) that would otherwise crash Pydantic serialization.
 
+---
+
 ## Development
 
 ### Python bridge
 
 ```bash
 cd bridge
-uv venv --python 3.14 .venv && uv sync --frozen --extra dev
+uv venv --python 3.14 .venv && uv sync --frozen
 pytest tests/ -v
 mypy --strict mcp_bridge/ tests/
 ```

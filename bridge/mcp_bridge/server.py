@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -22,8 +23,9 @@ from mcp_bridge.config import (
     HealthResponse,
     ServerConfig,
     ServerStatusInfo,
-    _interpolate_str,
+    _interpolate_str,  # noqa: PLC2701
 )
+from mcp_bridge.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-bridge")
 
@@ -129,6 +131,8 @@ def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> 
         name,
         auth_config=srv.auth,
         server_url=srv.url,
+        token_dir=config.oauth.token_dir_path,
+        cache_tokens=config.oauth.cache_tokens,
     )
 
     if auth is not None and srv.url:
@@ -141,18 +145,47 @@ def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> 
     return create_proxy(proxy_config.model_dump(exclude_none=True), name=name)
 
 
-def create_bridge(config_path: str) -> FastMCP:
+def create_bridge(
+    config_path: str,
+    *,
+    oauth_cache_tokens: bool | None = None,
+    oauth_token_dir: str | None = None,
+) -> FastMCP:
     """Create the bridge FastMCP server from a config file.
 
     Reads servers.json, creates a proxy for each enabled server,
     mounts them under namespaced prefixes, and adds meta-tools + health.
+
+    CLI overrides (when provided) take precedence over the ``oauth`` section
+    of the config file:
+
+    - *oauth_cache_tokens*: ``False`` disables disk token caching globally.
+    - *oauth_token_dir*: path override for the OAuth token directory.
     """
     config = BridgeConfig.load(config_path)
+
+    # Apply CLI overrides on top of config-file oauth settings
+    if oauth_cache_tokens is not None:
+        config.oauth.cache_tokens = oauth_cache_tokens
+    if oauth_token_dir is not None:
+        config.oauth.token_dir = oauth_token_dir
+
+    ss_manager = SharedServerManager(config)
+
+    @asynccontextmanager
+    async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
+        await ss_manager.start_all()
+        try:
+            yield
+        finally:
+            await ss_manager.stop_all()
+
     bridge = FastMCP(
         name="mcp-bridge",
         instructions="MCP Bridge — proxies multiple MCP servers through a single endpoint.",
         dereference_schemas=False,  # Disabled: circular $ref causes infinite recursion
         middleware=[SanitizeSchemaMiddleware()],  # Strips circular refs before serialization
+        lifespan=_lifespan,
     )
 
     # Mount each enabled server as a namespaced proxy

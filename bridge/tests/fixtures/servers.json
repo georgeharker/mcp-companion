@@ -1,4 +1,19 @@
 {
+  "sharedServers": {
+    "goog_ws": {
+      "command": "uvx",
+      "args": ["workspace-mcp", "--transport", "streamable-http"],
+      "env": {
+        "WORKSPACE_MCP_PORT": "8002",
+        "MCP_ENABLE_OAUTH21": "true",
+        "GOOGLE_OAUTH_CLIENT_ID": "${env:GOOGLE_OAUTH_CLIENT_ID}",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "${env:GOOGLE_OAUTH_CLIENT_SECRET}",
+        "OAUTHLIB_INSECURE_TRANSPORT": "1"
+      },
+      "grace_period": "30m",
+      "health_timeout": 30
+    }
+  },
   "servers": {
     "everything": {
       "command": "npx",
@@ -16,6 +31,12 @@
       "url": "http://localhost:9999/mcp",
       "transport": "http",
       "disabled": true
+    },
+    "sharedserver-example": {
+      "url": "http://localhost:8002/mcp",
+      "auth": "oauth",
+      "disabled": true,
+      "sharedServer": "goog_ws"
     }
   }
 }

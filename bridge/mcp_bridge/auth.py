@@ -1,95 +1,124 @@
-"""OAuth 2.1 authentication support for MCP bridge.
+"""OAuth authentication support for MCP bridge.
 
 Provides:
-- File-based token storage (persists tokens across bridge restarts)
+- File-based key-value store for persistent OAuth token storage
 - Auth factory: builds the right httpx.Auth for each server config
-- Integrates with the MCP SDK's ``OAuthClientProvider``
+- Uses FastMCP's OAuth client for the full Authorization Code + PKCE flow
 
-Token files are stored at ``~/.local/share/mcp-companion/oauth-tokens/<server>/``.
+Token files are stored under ``token_dir/<server>/`` (default
+``~/.cache/mcp-companion/oauth-tokens``).  Disk caching can be disabled by
+passing ``cache_tokens=False`` to :func:`build_auth`, in which case tokens are
+kept in memory only and lost when the bridge restarts.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import secrets
-import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import re
+from datetime import datetime, timezone
 from pathlib import Path
-from threading import Thread
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Mapping
 
 import httpx
-from mcp.client.auth import OAuthClientProvider, TokenStorage
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
-from pydantic import AnyUrl
+from fastmcp.client.auth import OAuth
+from key_value.aio._utils.managed_entry import ManagedEntry
+from key_value.aio.stores.base import BaseStore
 
 logger = logging.getLogger("mcp-bridge")
 
-# Default token storage directory
-_DEFAULT_TOKEN_DIR = Path.home() / ".local" / "share" / "mcp-companion" / "oauth-tokens"
-
-# Browser auth timeout (seconds)
-_AUTH_TIMEOUT = 300
+# Default token storage directory (XDG cache convention)
+_DEFAULT_TOKEN_DIR = Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
 
 
-class FileTokenStorage(TokenStorage):
-    """Persist OAuth tokens and client registration to JSON files on disk.
+def _now() -> datetime:
+    return datetime.now(tz=timezone.utc)
 
-    Layout::
 
-        base_dir/
-            tokens.json      — OAuthToken (access_token, refresh_token, ...)
-            client_info.json — OAuthClientInformationFull (client_id, ...)
+def _sanitize(s: str) -> str:
+    """Replace filesystem-unsafe characters with underscores."""
+    return re.sub(r"[^\w\-.]", "_", s)
+
+
+class FileKeyValueStore(BaseStore):
+    """Persistent file-based key-value store implementing ``AsyncKeyValueProtocol``.
+
+    Each entry is stored as a JSON file under::
+
+        base_dir/<collection>/<sanitized_key>.json
+
+    The file format is::
+
+        {
+            "value": {...},
+            "created_at": "2024-01-01T00:00:00+00:00",   # optional
+            "expires_at": "2025-01-01T00:00:00+00:00"    # optional, omitted if no TTL
+        }
+
+    Expired entries are treated as missing (deleted lazily on next read).
     """
 
     def __init__(self, base_dir: Path) -> None:
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self._tokens_path = self.base_dir / "tokens.json"
-        self._client_info_path = self.base_dir / "client_info.json"
+        super().__init__(stable_api=True)
 
-    async def get_tokens(self) -> OAuthToken | None:
-        data = self._load_json(self._tokens_path)
-        if data is None:
-            return None
-        return OAuthToken(**data)
+    def _entry_path(self, collection: str, key: str) -> Path:
+        coll_dir = self.base_dir / _sanitize(collection)
+        coll_dir.mkdir(parents=True, exist_ok=True)
+        return coll_dir / (_sanitize(key) + ".json")
 
-    async def set_tokens(self, tokens: OAuthToken) -> None:
-        self._save_model(self._tokens_path, tokens)
-
-    async def get_client_info(self) -> OAuthClientInformationFull | None:
-        data = self._load_json(self._client_info_path)
-        if data is None:
-            return None
-        return OAuthClientInformationFull(**data)
-
-    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
-        self._save_model(self._client_info_path, client_info)
-
-    @staticmethod
-    def _load_json(path: Path) -> dict[str, Any] | None:
-        """Read a JSON file and return the parsed dict, or ``None``."""
+    async def _get_managed_entry(self, *, key: str, collection: str) -> ManagedEntry | None:
+        path = self._entry_path(collection, key)
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Corrupt token file %s, ignoring: %s", path, exc)
             return None
 
-    @staticmethod
-    def _save_model(path: Path, model: OAuthToken | OAuthClientInformationFull) -> None:
-        path.write_text(
-            model.model_dump_json(indent=2, exclude_none=True),
-            encoding="utf-8",
-        )
+        value: Mapping[str, Any] = raw.get("value", {})
+        created_at: datetime | None = None
+        expires_at: datetime | None = None
 
+        if raw_ca := raw.get("created_at"):
+            try:
+                created_at = datetime.fromisoformat(raw_ca)
+            except ValueError:
+                pass
+        if raw_ea := raw.get("expires_at"):
+            try:
+                expires_at = datetime.fromisoformat(raw_ea)
+            except ValueError:
+                pass
 
-class OAuthFlowError(Exception):
-    """Raised when the OAuth browser flow fails."""
+        entry = ManagedEntry(value=value, created_at=created_at, expires_at=expires_at)
+
+        # Treat expired entries as missing; clean up lazily
+        if entry.is_expired:
+            path.unlink(missing_ok=True)
+            return None
+
+        return entry
+
+    async def _put_managed_entry(
+        self, *, key: str, collection: str, managed_entry: ManagedEntry
+    ) -> None:
+        path = self._entry_path(collection, key)
+        data: dict[str, Any] = {"value": dict(managed_entry.value)}
+        if managed_entry.created_at:
+            data["created_at"] = managed_entry.created_at.isoformat()
+        if managed_entry.expires_at:
+            data["expires_at"] = managed_entry.expires_at.isoformat()
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:
+        path = self._entry_path(collection, key)
+        if path.exists():
+            path.unlink()
+            return True
+        return False
 
 
 class _BearerAuth(httpx.Auth):
@@ -98,9 +127,7 @@ class _BearerAuth(httpx.Auth):
     def __init__(self, token: str) -> None:
         self._token = token
 
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Any:  # Generator[httpx.Request, httpx.Response, None]
+    def auth_flow(self, request: httpx.Request) -> Any:
         request.headers["Authorization"] = f"Bearer {self._token}"
         yield request
 
@@ -111,15 +138,28 @@ def build_auth(
     auth_config: dict[str, Any] | str | None,
     server_url: str | None = None,
     token_dir: Path | None = None,
+    cache_tokens: bool = True,
 ) -> httpx.Auth | None:
     """Build an ``httpx.Auth`` from a server's auth configuration.
 
     Supports three modes:
 
-    1. ``auth: "oauth"`` — OAuth 2.1 Authorization Code + PKCE via browser.
+    1. ``auth: "oauth"`` — OAuth 2.1 Authorization Code + PKCE via FastMCP's
+       OAuth client, with file-based token persistence.
     2. ``auth: {"bearer": "<token>"}`` — Static bearer token.
     3. ``auth: {"oauth": {scopes: [...], client_id: "...", ...}}`` —
        OAuth with pre-registered client or explicit scopes.
+
+    Token caching:
+    - ``cache_tokens=True`` (default): tokens persisted to ``token_dir/<server>/``
+      (default ``~/.cache/mcp-companion/oauth-tokens``).  Tokens survive bridge
+      restarts and are refreshed automatically.
+    - ``cache_tokens=False``: tokens kept in memory only.  The OAuth browser flow
+      will be triggered on every bridge restart.
+
+    The ``cache_tokens`` flag can also be set per-server inside the auth dict:
+    ``auth: {oauth: {cache_tokens: false}}``.  Per-server setting overrides the
+    global flag passed here.
 
     Returns ``None`` if no auth is configured.
     """
@@ -132,10 +172,11 @@ def build_auth(
     if auth_config == "oauth":
         if not server_url:
             raise ValueError(f"Server '{server_name}': auth='oauth' requires a URL")
-        return _build_oauth_provider(
+        return _build_oauth(
             server_name=server_name,
             server_url=server_url,
             base_dir=base_dir,
+            cache_tokens=cache_tokens,
         )
 
     if not isinstance(auth_config, dict):
@@ -158,7 +199,11 @@ def build_auth(
         oauth_opts = auth_config["oauth"]
         if not isinstance(oauth_opts, dict):
             raise ValueError(f"Server '{server_name}': auth.oauth must be a dict")
-        return _build_oauth_provider(
+        # Per-server cache_tokens overrides the global flag
+        effective_cache = oauth_opts.get("cache_tokens", cache_tokens)
+        if not isinstance(effective_cache, bool):
+            effective_cache = bool(effective_cache)
+        return _build_oauth(
             server_name=server_name,
             server_url=server_url,
             base_dir=base_dir,
@@ -166,12 +211,13 @@ def build_auth(
             client_id=oauth_opts.get("client_id"),
             client_secret=oauth_opts.get("client_secret"),
             client_metadata_url=oauth_opts.get("client_metadata_url"),
+            cache_tokens=effective_cache,
         )
 
     raise ValueError(f"Server '{server_name}': unrecognized auth keys: {set(auth_config.keys())}")
 
 
-def _build_oauth_provider(
+def _build_oauth(
     *,
     server_name: str,
     server_url: str,
@@ -180,140 +226,44 @@ def _build_oauth_provider(
     client_id: str | None = None,
     client_secret: str | None = None,
     client_metadata_url: str | None = None,
-) -> OAuthClientProvider:
-    """Construct an ``OAuthClientProvider`` with file-based token storage.
+    cache_tokens: bool = True,
+) -> OAuth:
+    """Construct a FastMCP ``OAuth`` provider.
 
-    Uses a lightweight stdlib HTTP server in a daemon thread for the
-    OAuth redirect callback, and ``webbrowser.open()`` for the browser step.
+    When *cache_tokens* is ``True`` (default) a :class:`FileKeyValueStore` is
+    created at *base_dir* and passed as ``token_storage``.  Tokens are persisted
+    to disk and survive bridge restarts.
+
+    When *cache_tokens* is ``False`` ``token_storage=None`` is passed, which
+    tells FastMCP to use an in-memory store.  Tokens are lost on restart and the
+    OAuth browser flow will run again on next startup.
     """
-    storage = FileTokenStorage(base_dir)
+    scope_str: str | None = None
+    if isinstance(scopes, list):
+        scope_str = " ".join(scopes)
+    elif isinstance(scopes, str):
+        scope_str = scopes
 
-    # --- Callback server setup ---
-    # We start the callback server eagerly so we know the port for redirect_uri.
-    # It sits idle until the OAuth flow actually needs it.
+    if cache_tokens:
+        storage: FileKeyValueStore | None = FileKeyValueStore(base_dir)
+        logger.info(
+            "Configuring OAuth for server '%s' with disk token cache at %s",
+            server_name,
+            base_dir,
+        )
+    else:
+        storage = None
+        logger.info(
+            "Configuring OAuth for server '%s' with in-memory token storage (disk cache disabled)",
+            server_name,
+        )
 
-    _code_future: asyncio.Future[tuple[str, str | None]] | None = None
-    _loop_ref: list[asyncio.AbstractEventLoop] = []
-
-    class _Handler(BaseHTTPRequestHandler):
-        """Captures ``code`` and ``state`` from the OAuth redirect."""
-
-        def do_GET(self) -> None:  # noqa: N802
-            parsed = urlparse(self.path)
-            if parsed.path != "/callback":
-                self.send_response(404)
-                self.end_headers()
-                return
-
-            params = parse_qs(parsed.query)
-            code = (params.get("code") or [""])[0] or None
-            state = (params.get("state") or [""])[0] or None
-            error = (params.get("error") or [""])[0] or None
-
-            # Send browser response immediately
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            body = (
-                "<html><body>"
-                "<h2>Authorization complete!</h2>"
-                "<p>You can close this tab and return to your editor.</p>"
-                "</body></html>"
-            )
-            self.wfile.write(body.encode())
-
-            # Signal the async side via the event loop
-            if _code_future is not None and _loop_ref:
-                loop = _loop_ref[0]
-                if error:
-                    loop.call_soon_threadsafe(
-                        _code_future.set_exception,
-                        OAuthFlowError(f"OAuth error: {error}"),
-                    )
-                elif code:
-                    loop.call_soon_threadsafe(
-                        _code_future.set_result,
-                        (code, state),
-                    )
-                else:
-                    loop.call_soon_threadsafe(
-                        _code_future.set_exception,
-                        OAuthFlowError("No authorization code in redirect"),
-                    )
-
-        def log_message(self, format: str, *args: Any) -> None:
-            pass  # Suppress stdlib HTTP server access logs
-
-    http_server = HTTPServer(("127.0.0.1", 0), _Handler)
-    actual_port = http_server.server_address[1]
-    redirect_uri = f"http://127.0.0.1:{actual_port}/callback"
-    logger.info("OAuth callback for '%s' listening on port %d", server_name, actual_port)
-
-    server_thread = Thread(target=http_server.serve_forever, daemon=True)
-    server_thread.start()
-
-    # --- Build client metadata ---
-    scope_list: list[str] = []
-    if isinstance(scopes, str):
-        scope_list = scopes.split()
-    elif isinstance(scopes, list):
-        scope_list = list(scopes)
-
-    redirect_url = AnyUrl(redirect_uri)
-
-    client_metadata = OAuthClientMetadata(
-        redirect_uris=[redirect_url],
-        token_endpoint_auth_method="none",  # Public client, PKCE-only
-        grant_types=["authorization_code", "refresh_token"],
-        response_types=["code"],
+    return OAuth(
+        mcp_url=server_url,
+        scopes=scope_str,
         client_name=f"mcp-companion ({server_name})",
-        scope=" ".join(scope_list) if scope_list else None,
-    )
-
-    # --- Async callbacks for OAuthClientProvider ---
-
-    async def redirect_handler(url: str) -> None:
-        logger.info("Opening browser for OAuth authorization...")
-        webbrowser.open(url)
-
-    async def callback_handler() -> tuple[str, str | None]:
-        nonlocal _code_future
-        loop = asyncio.get_running_loop()
-        _loop_ref.clear()
-        _loop_ref.append(loop)
-        _code_future = loop.create_future()
-        try:
-            return await asyncio.wait_for(_code_future, timeout=_AUTH_TIMEOUT)
-        except asyncio.TimeoutError:
-            raise OAuthFlowError(
-                f"OAuth timeout for '{server_name}': "
-                "browser authorization not completed within 5 minutes"
-            ) from None
-
-    # --- Build provider ---
-
-    provider = OAuthClientProvider(
-        server_url=server_url,
-        client_metadata=client_metadata,
-        storage=storage,
-        redirect_handler=redirect_handler,
-        callback_handler=callback_handler,
+        token_storage=storage,
+        client_id=client_id,
+        client_secret=client_secret,
         client_metadata_url=client_metadata_url,
     )
-
-    # Pre-populate client info if a client_id was provided (skip dynamic registration)
-    if client_id:
-        pre_reg = OAuthClientInformationFull(
-            client_id=client_id,
-            client_secret=client_secret if client_secret else None,
-            redirect_uris=[redirect_url],
-            token_endpoint_auth_method=("client_secret_basic" if client_secret else "none"),
-            grant_types=["authorization_code", "refresh_token"],
-            response_types=["code"],
-            client_name=f"mcp-companion ({server_name})",
-        )
-        # Synchronous write — called during bridge startup before event loop runs
-        pre_reg_json = pre_reg.model_dump_json(indent=2, exclude_none=True)
-        (base_dir / "client_info.json").write_text(pre_reg_json, encoding="utf-8")
-
-    return provider
