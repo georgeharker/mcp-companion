@@ -125,6 +125,55 @@ format is supported:
 | `auth` | `string\|object` | Authentication config (see below) |
 | `sharedServer` | `string` | Name of a `sharedServers` entry to start before connecting (see below) |
 
+### sharedServer — per-server process management
+
+The `sharedServer` field links a server entry to a `sharedServers` process definition.
+When the bridge starts, it uses sharedserver to launch (or attach to an already-running)
+instance of that process, then waits for it to become reachable before mounting the proxy.
+
+A complete example — a Google Workspace MCP server that needs OAuth and is managed via
+sharedserver:
+
+```json
+{
+  "sharedServers": {
+    "google-workspace-proc": {
+      "command": "uvx",
+      "args": ["workspace-mcp", "--transport", "streamable-http"],
+      "env": {
+        "WORKSPACE_MCP_PORT": "8002",
+        "MCP_ENABLE_OAUTH21": "true",
+        "GOOGLE_OAUTH_CLIENT_ID": "${env:GOOGLE_OAUTH_CLIENT_ID}",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "${env:GOOGLE_OAUTH_CLIENT_SECRET}"
+      },
+      "grace_period": "30m",
+      "health_timeout": 30
+    }
+  },
+  "mcpServers": {
+    "google-workspace": {
+      "url": "http://localhost:8002/mcp",
+      "auth": "oauth",
+      "sharedServer": "google-workspace-proc"
+    }
+  }
+}
+```
+
+The `sharedServers` key is separate from `mcpServers` — it describes *how to run* the
+process; the `mcpServers` entry describes *how to connect* to it.  Multiple server
+entries can reference the same `sharedServers` entry.
+
+**`sharedServers` entry fields:**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `command` | `string` | **required** | Executable to run (e.g. `"uvx"`) |
+| `args` | `string[]` | `[]` | Arguments to the command (supports interpolation) |
+| `env` | `object` | `{}` | Extra environment variables (supports interpolation) |
+| `grace_period` | `string` | — | How long to keep server alive after last client detaches (e.g. `"30m"`) |
+| `health_timeout` | `integer` | `30` | Seconds to poll the server URL after start before giving up |
+
 ### Environment variable interpolation
 
 All config fields support `${VAR}` interpolation with optional defaults:
@@ -259,90 +308,6 @@ Priority order (highest to lowest): CLI flag → config `oauth` section → buil
 
 ---
 
-## sharedserver support
-
-The bridge can manage HTTP-based MCP servers using
-[sharedserver](https://github.com/georgeharker/sharedserver) — a reference-counted
-process supervisor. Multiple clients (Neovim instances, scripts) can attach to the same
-named server; it stays alive as long as any client holds a reference, then idles for a
-grace period before stopping.
-
-### Install sharedserver
-
-```bash
-cargo install sharedserver
-```
-
-Or download a pre-built binary from the
-[sharedserver releases](https://github.com/georgeharker/sharedserver/releases).
-
-### Config format
-
-Add a top-level `sharedServers` dict, then reference entries by name from individual
-servers using `"sharedServer": "<name>"`:
-
-```json
-{
-  "sharedServers": {
-    "google-workspace-proc": {
-      "command": "uvx",
-      "args": ["workspace-mcp", "--transport", "streamable-http"],
-      "env": {
-        "WORKSPACE_MCP_PORT": "8002",
-        "MCP_ENABLE_OAUTH21": "true",
-        "GOOGLE_OAUTH_CLIENT_ID": "${env:GOOGLE_OAUTH_CLIENT_ID}",
-        "GOOGLE_OAUTH_CLIENT_SECRET": "${env:GOOGLE_OAUTH_CLIENT_SECRET}"
-      },
-      "grace_period": "30m",
-      "health_timeout": 30
-    }
-  },
-  "mcpServers": {
-    "google-workspace": {
-      "url": "http://localhost:8002/mcp",
-      "auth": "oauth",
-      "sharedServer": "google-workspace-proc"
-    }
-  }
-}
-```
-
-When the bridge starts, it calls `sharedserver use <name> --pid <bridge-pid> -- <command> <args>`
-for each enabled server with a `sharedServer` reference.  It then polls the server URL
-until it responds (or `health_timeout` seconds elapse) before mounting the proxy.
-
-When the bridge stops, it calls `sharedserver unuse <name>` to decrement the refcount.
-The process keeps running until the grace period expires after the last client detaches.
-
-### `sharedServers` options
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `command` | `string` | **required** | Executable to run (e.g. `"uvx"`) |
-| `args` | `string[]` | `[]` | Arguments to the command |
-| `env` | `object` | `{}` | Extra environment variables (supports interpolation) |
-| `grace_period` | `string` | — | How long to keep server alive after last client (e.g. `"30m"`) |
-| `health_timeout` | `integer` | `30` | Seconds to wait for the HTTP server to become reachable |
-
-### Running the bridge itself under sharedserver
-
-For long-running bridge processes shared across multiple clients, the bridge process
-itself can be managed by sharedserver:
-
-```bash
-# Bridge stays alive 30 min after last client disconnects
-sharedserver use mcp-bridge -- \
-  python -m mcp_bridge --config ~/.config/mcp/servers.json --port 9741
-
-# Detach when done (bridge stays alive for other clients)
-sharedserver unuse mcp-bridge
-```
-
-The Neovim plugin does this automatically — see the [Neovim integration](#neovim-integration)
-section below.
-
----
-
 ## Neovim Integration
 
 The Lua plugin connects the bridge to
@@ -354,16 +319,13 @@ MCP capabilities as native editor features.
 - Neovim 0.10+
 - Python 3.12+ with [`uv`](https://github.com/astral-sh/uv)
 - [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) v19+
+- [sharedserver](https://github.com/georgeharker/sharedserver) — manages the bridge
+  process lifecycle across multiple Neovim instances
 
-Optional but recommended:
-- [sharedserver](https://github.com/georgeharker/sharedserver) — shares the bridge
-  process across multiple Neovim instances with automatic lifecycle management
+### Installing sharedserver
 
-### Installing sharedserver (for Neovim users)
-
-The plugin uses sharedserver to manage the bridge process so multiple Neovim instances
-share a single bridge, with automatic startup, health polling, idle timeout, and graceful
-shutdown.
+The plugin uses sharedserver to share one bridge process across all Neovim instances,
+with automatic startup, health polling, idle timeout, and graceful shutdown.
 
 **Install via cargo:**
 
@@ -371,27 +333,31 @@ shutdown.
 cargo install sharedserver
 ```
 
-**Or install via the lazy.nvim dependency** — add `georgeharker/sharedserver` as a
-dependency in your plugin spec (see below). This installs the Rust binary automatically
-via the plugin's build step.
-
-Without sharedserver, the bridge still starts and stops but is not shared across
-Neovim instances (each instance manages its own bridge process).
+**Or let lazy.nvim build it** — list `georgeharker/sharedserver` as a plugin entry with
+a `build` step (see the lazy.nvim spec below). lazy.nvim will compile and install the
+binary automatically on first sync.
 
 ### Installation (lazy.nvim)
 
+Install sharedserver and mcp-companion as separate top-level plugin entries so
+lazy.nvim runs the build steps independently, then declare sharedserver as a
+dependency of mcp-companion so load order is correct:
+
 ```lua
+-- sharedserver: builds the Rust binary that manages bridge process lifecycle
+{
+    "georgeharker/sharedserver",
+    build = "cargo build --release",
+    lazy = false,
+},
+
+-- mcp-companion: the bridge + Neovim plugin
 {
     "georgeharker/mcp-companion",
     lazy = false,
     dependencies = {
         "olimorris/codecompanion.nvim",
-        -- Optional: manages bridge lifecycle across Neovim instances
-        -- Installs the sharedserver Rust binary automatically
-        {
-            "georgeharker/sharedserver",
-            build = "cargo build --release",
-        },
+        "georgeharker/sharedserver",
     },
     build = "cd bridge && uv venv --python 3.14 .venv && uv sync --frozen",
     config = function()
