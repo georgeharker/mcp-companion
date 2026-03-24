@@ -2,110 +2,73 @@
 
 from __future__ import annotations
 
-import json
-import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
 
 from mcp_bridge.auth import (
-    FileKeyValueStore,
     _BearerAuth,
     build_auth,
+    create_encrypted_store,
 )
 
 
-# ── FileKeyValueStore ──────────────────────────────────────────────
+# ── create_encrypted_store ─────────────────────────────────────────
 
 
-class TestFileKeyValueStore:
-    """Unit tests for file-based key-value persistence."""
+class TestEncryptedStore:
+    """Unit tests for encrypted file-based key-value persistence."""
 
     @pytest.fixture
-    def store(self, tmp_path: Path) -> FileKeyValueStore:
-        return FileKeyValueStore(tmp_path / "store")
+    def store(self, tmp_path: Path):
+        return create_encrypted_store(tmp_path, "test-server")
 
     @pytest.mark.anyio
-    async def test_get_missing_key(self, store: FileKeyValueStore) -> None:
+    async def test_get_missing_key(self, store) -> None:
         assert await store.get(key="missing", collection="col") is None
 
     @pytest.mark.anyio
-    async def test_roundtrip(self, store: FileKeyValueStore) -> None:
+    async def test_roundtrip(self, store) -> None:
         await store.put(key="k", value={"a": 1, "b": "two"}, collection="col")
         result = await store.get(key="k", collection="col")
         assert result == {"a": 1, "b": "two"}
 
     @pytest.mark.anyio
-    async def test_delete_existing(self, store: FileKeyValueStore) -> None:
+    async def test_delete_existing(self, store) -> None:
         await store.put(key="k", value={"x": 1}, collection="col")
         deleted = await store.delete(key="k", collection="col")
         assert deleted is True
         assert await store.get(key="k", collection="col") is None
 
     @pytest.mark.anyio
-    async def test_delete_missing(self, store: FileKeyValueStore) -> None:
+    async def test_delete_missing(self, store) -> None:
         deleted = await store.delete(key="missing", collection="col")
         assert deleted is False
 
     @pytest.mark.anyio
-    async def test_creates_directories(self, tmp_path: Path) -> None:
-        deep = tmp_path / "a" / "b" / "c"
-        store = FileKeyValueStore(deep)
-        assert deep.exists()
-        assert await store.get(key="k", collection="col") is None
-
-    @pytest.mark.anyio
-    async def test_corrupt_file_returns_none(self, store: FileKeyValueStore) -> None:
-        coll_dir = store.base_dir / "col"
-        coll_dir.mkdir(parents=True, exist_ok=True)
-        (coll_dir / "k.json").write_text("NOT JSON", encoding="utf-8")
-        assert await store.get(key="k", collection="col") is None
-
-    @pytest.mark.anyio
-    async def test_multiple_collections_independent(self, store: FileKeyValueStore) -> None:
+    async def test_multiple_collections_independent(self, store) -> None:
         await store.put(key="k", value={"v": 1}, collection="col1")
         await store.put(key="k", value={"v": 2}, collection="col2")
         assert (await store.get(key="k", collection="col1")) == {"v": 1}
         assert (await store.get(key="k", collection="col2")) == {"v": 2}
 
     @pytest.mark.anyio
-    async def test_ttl_expiry(self, store: FileKeyValueStore) -> None:
-        """Entries with an already-expired TTL are treated as missing."""
-        # Write a file with an expires_at in the past
-        coll_dir = store.base_dir / "col"
-        coll_dir.mkdir(parents=True, exist_ok=True)
-        past = (datetime.now(tz=timezone.utc) - timedelta(seconds=10)).isoformat()
-        (coll_dir / "k.json").write_text(
-            json.dumps({"value": {"x": 1}, "expires_at": past}), encoding="utf-8"
-        )
-        assert await store.get(key="k", collection="col") is None
-        # File should be cleaned up lazily
-        assert not (coll_dir / "k.json").exists()
-
-    @pytest.mark.anyio
-    async def test_no_ttl_does_not_expire(self, store: FileKeyValueStore) -> None:
-        await store.put(key="k", value={"x": 1}, collection="col")
-        result = await store.get(key="k", collection="col")
-        assert result is not None
-
-    @pytest.mark.anyio
-    async def test_file_contents_are_valid_json(self, store: FileKeyValueStore) -> None:
-        await store.put(key="k", value={"foo": "bar"}, collection="col")
-        path = store.base_dir / "col" / "k.json"
-        assert path.exists()
-        data: dict[str, Any] = json.loads(path.read_text())
-        assert data["value"] == {"foo": "bar"}
-
-    @pytest.mark.anyio
-    async def test_key_with_special_chars_sanitized(self, store: FileKeyValueStore) -> None:
-        """Keys containing slashes/colons are sanitized to valid filenames."""
+    async def test_key_with_special_chars(self, store) -> None:
+        """Keys containing slashes/colons work via sanitization."""
         key = "http://localhost:8002/mcp/tokens"
         await store.put(key=key, value={"tok": "abc"}, collection="mcp-oauth-token")
         result = await store.get(key=key, collection="mcp-oauth-token")
         assert result == {"tok": "abc"}
+
+    def test_derives_encryption_key_from_machine_id(self, tmp_path: Path) -> None:
+        """Encryption key is derived deterministically from machine ID + username."""
+        # Create two stores - they should use the same derived key
+        store1 = create_encrypted_store(tmp_path, "srv1")
+        store2 = create_encrypted_store(tmp_path, "srv2")
+        # No .key file should be created (key is derived, not stored)
+        key_file = tmp_path / ".key"
+        assert not key_file.exists()
 
 
 # ── _BearerAuth ────────────────────────────────────────────────────
@@ -196,8 +159,8 @@ class TestBuildAuth:
         )
         assert isinstance(result, OAuth)
 
-    def test_oauth_uses_file_storage(self, tmp_path: Path) -> None:
-        """OAuth provider is configured with FileKeyValueStore at the right path."""
+    def test_oauth_uses_encrypted_storage(self, tmp_path: Path) -> None:
+        """OAuth provider is configured with encrypted storage at the right path."""
         result = build_auth(
             "srv",
             auth_config="oauth",

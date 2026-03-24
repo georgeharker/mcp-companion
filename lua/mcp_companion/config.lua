@@ -11,6 +11,7 @@ local M = {}
 --- @field python_cmd string Default "python3"
 --- @field startup_timeout number Seconds to wait for bridge health. Default 30.
 --- @field request_timeout number Default timeout for MCP requests in seconds. Default 60.
+--- @field token_key? string Encryption key for OAuth token storage (or set MCP_BRIDGE_TOKEN_KEY env var)
 
 --- @class MCPCompanion.Config
 --- @field bridge MCPCompanion.BridgeConfig
@@ -33,6 +34,7 @@ M.defaults = {
     python_cmd = "python3",
     startup_timeout = 30,
     request_timeout = 60,
+    token_key = nil,
   },
 
   native_servers = {

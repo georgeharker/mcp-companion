@@ -62,7 +62,8 @@ def test_oauth_config_defaults() -> None:
     cfg = OAuthConfig()
     assert cfg.cache_tokens is True
     assert cfg.token_dir is None
-    assert cfg.token_dir_path is None
+    # token_dir_path returns default when token_dir is None
+    assert cfg.token_dir_path == Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
 
 
 def test_oauth_config_from_dict_defaults() -> None:

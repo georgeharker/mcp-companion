@@ -114,6 +114,14 @@ class ServerConfig(BaseModel):
     shared_server: str | None = None
     """Name of a top-level ``sharedServers`` entry to start before connecting."""
 
+    tool_filter: list[str] = Field(default_factory=list)
+    """Glob patterns to filter which tools are exposed from this server.
+
+    If empty (default), all tools are included.
+    Patterns are matched against the tool name (without server prefix).
+    Examples: ``["gmail_*", "calendar_*"]`` to only include Gmail and Calendar tools.
+    """
+
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> ServerConfig:
         """Create ServerConfig from a config dict entry."""
@@ -134,6 +142,7 @@ class ServerConfig(BaseModel):
 
         # camelCase or snake_case key
         shared_server = data.get("sharedServer") or data.get("shared_server")
+        tool_filter = data.get("toolFilter") or data.get("tool_filter") or []
 
         return cls(
             name=name,
@@ -147,6 +156,7 @@ class ServerConfig(BaseModel):
             auto_approve=auto_approve,
             auth=data.get("auth"),
             shared_server=shared_server,
+            tool_filter=tool_filter,
         )
 
 
@@ -187,6 +197,7 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     servers: dict[str, ServerStatusInfo] = Field(default_factory=dict)
     config_path: str = ""
+    pending_oauth: list[str] = Field(default_factory=list)
 
 
 class OAuthConfig(BaseModel):
@@ -219,10 +230,10 @@ class OAuthConfig(BaseModel):
     """
 
     @property
-    def token_dir_path(self) -> Path | None:
-        """Resolved :class:`~pathlib.Path` for *token_dir*, or ``None`` to use the default."""
+    def token_dir_path(self) -> Path:
+        """Resolved :class:`~pathlib.Path` for *token_dir*, using default if not set."""
         if self.token_dir is None:
-            return None
+            return Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
         return Path(self.token_dir).expanduser()
 
     @classmethod

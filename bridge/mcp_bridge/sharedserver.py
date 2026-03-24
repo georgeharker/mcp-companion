@@ -251,3 +251,42 @@ class SharedServerManager:
             subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         except (subprocess.TimeoutExpired, OSError) as exc:
             logger.warning("sharedserver unuse '%s' failed: %s", name, exc)
+
+
+# Module-level manager reference for cleanup
+_manager: SharedServerManager | None = None
+
+
+def register_for_cleanup(manager: SharedServerManager) -> None:
+    """Register a SharedServerManager for cleanup on process exit."""
+    global _manager
+    _manager = manager
+
+
+def cleanup() -> None:
+    """Cleanup sharedserver references on exit.
+
+    Safe to call from signal handlers or atexit. Runs stop_all() to
+    decrement reference counts for all started servers.
+    """
+    global _manager
+    if _manager is None:
+        return
+
+    try:
+        # Run stop_all in a new event loop if needed
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Schedule cleanup in the running loop
+            asyncio.ensure_future(_manager.stop_all())
+        else:
+            # Create new loop for cleanup
+            asyncio.run(_manager.stop_all())
+    except Exception as e:
+        logger.warning("Failed to cleanup sharedservers: %s", e)
+    finally:
+        _manager = None

@@ -4,6 +4,7 @@
 local M = {}
 
 local log = require("mcp_companion.log")
+local curl = require("plenary.curl")
 
 --- @type MCPCompanion.Config
 local _config ---@diagnostic disable-line: missing-fields
@@ -63,35 +64,41 @@ end
 --- @param callback fun(running: boolean)
 function M._check_existing(callback)
   local url = string.format("http://%s:%d/health", _config.bridge.host, _config.bridge.port)
-  vim.system(
-    { "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--connect-timeout", "1", url },
-    { text = true },
-    function(result)
-      vim.schedule(function()
-        callback(result.stdout ~= nil and result.stdout:match("200") ~= nil)
-      end)
-    end
-  )
+  curl.get(url, {
+    timeout = 1000,
+    callback = vim.schedule_wrap(function(response)
+      callback(response and response.status == 200)
+    end),
+    on_error = vim.schedule_wrap(function(_)
+      callback(false)
+    end),
+  })
 end
 
 --- Build the bridge command + args
 --- @return string[] cmd
 local function _bridge_cmd()
-  return {
+  local cmd = {
     _config.bridge.python_cmd,
     "-m", "mcp_bridge",
     "--config", _config.bridge.config,
     "--port", tostring(_config.bridge.port),
     "--host", _config.bridge.host or "127.0.0.1",
   }
+  return cmd
 end
 
 --- Build environment for bridge process
 --- @return table<string,string>
 local function _bridge_env()
-  return vim.tbl_extend("force", _config.global_env or {}, {
+  local env = vim.tbl_extend("force", _config.global_env or {}, {
     MCP_BRIDGE_PORT = tostring(_config.bridge.port),
   })
+  -- Pass encryption key if configured
+  if _config.bridge.token_key then
+    env.MCP_BRIDGE_TOKEN_KEY = _config.bridge.token_key
+  end
+  return env
 end
 
 --- Start via sharedserver Lua plugin (shared process across Neovim instances)
@@ -203,20 +210,21 @@ function M._wait_and_connect()
         return
       end
 
-      vim.system(
-        { "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--connect-timeout", "1", url },
-        { text = true },
-        function(result)
-          vim.schedule(function()
-            if result.stdout and result.stdout:match("200") then
-              timer:stop()
-              timer:close()
-              log.info("Bridge healthy on port %d (after %ds)", _config.bridge.port, attempts)
-              M._create_client()
-            end
-          end)
-        end
-      )
+      curl.get(url, {
+        timeout = 1000,
+        callback = vim.schedule_wrap(function(response)
+          if response and response.status == 200 then
+            timer:stop()
+            timer:close()
+            log.info("Bridge healthy on port %d (after %ds)", _config.bridge.port, attempts)
+            M._create_client()
+          end
+        end),
+        on_error = function(_)
+          -- Connection failed - just wait for next attempt
+          log.debug("Health check attempt %d failed (connection refused)", attempts)
+        end,
+      })
     end)
   )
 end

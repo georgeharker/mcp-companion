@@ -57,17 +57,9 @@ function M.setup(opts)
     end,
   })
 
-  -- Start bridge lazily on first CodeCompanion chat (only if config file exists)
-  if config.get().bridge.config then
-    vim.api.nvim_create_autocmd("User", {
-      group = group,
-      pattern = "CodeCompanionChatCreated",
-      once = true,
-      callback = function()
-        bridge.start()
-      end,
-    })
-  end
+  -- Bridge is started by CC extension setup (cc/init.lua) when CodeCompanion loads,
+  -- ensuring it's healthy before any ACP session is created.
+  -- Manual start available via :MCPStart command.
 
   -- User commands
   vim.api.nvim_create_user_command("MCPStatus", function()

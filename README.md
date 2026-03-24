@@ -331,6 +331,31 @@ python -m mcp_bridge --config servers.json --oauth-cache
 
 Priority order (highest to lowest): CLI flag → config `oauth` section → built-in default.
 
+### Token encryption
+
+Cached OAuth tokens are encrypted at rest using Fernet symmetric encryption. By default,
+the encryption key is derived from machine-specific identifiers (hostname + username).
+This provides obfuscation but not strong security — anyone with access to your home
+directory can derive the same key.
+
+For stronger security, set a custom encryption key:
+
+```bash
+# Via environment variable
+export MCP_BRIDGE_TOKEN_KEY="your-secret-key-here"
+python -m mcp_bridge --config servers.json
+
+# Or in Neovim config
+require("mcp_companion").setup({
+    bridge = {
+        token_key = "your-secret-key-here",
+    },
+})
+```
+
+When you change the encryption key, existing cached tokens become unreadable and you'll
+need to re-authenticate with OAuth servers.
+
 ---
 
 ## Neovim Integration
@@ -343,6 +368,7 @@ MCP capabilities as native editor features.
 
 - Neovim 0.10+
 - Python 3.12+ with [`uv`](https://github.com/astral-sh/uv)
+- [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) — async utilities
 - [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) v19+
 - [sharedserver](https://github.com/georgeharker/sharedserver) — manages the bridge
   process lifecycle across multiple Neovim instances
@@ -381,6 +407,7 @@ dependency of mcp-companion so load order is correct:
     "georgeharker/mcp-companion",
     lazy = false,
     dependencies = {
+        "nvim-lua/plenary.nvim",
         "olimorris/codecompanion.nvim",
         "georgeharker/sharedserver",
     },
@@ -579,6 +606,7 @@ require("mcp_companion").setup({
         idle_timeout = "30m",           -- sharedserver grace period
         startup_timeout = 30,           -- seconds to wait for bridge health
         request_timeout = 60,           -- default MCP request timeout in seconds
+        token_key = nil,                -- encryption key for OAuth tokens (or use MCP_BRIDGE_TOKEN_KEY env)
     },
     log = {
         level = "info",                 -- file log level: "debug", "info", "warn", "error"

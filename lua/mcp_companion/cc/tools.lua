@@ -1,19 +1,15 @@
 --- mcp-companion.nvim — CC Tool Registration
---- Registers MCP tools from the bridge into CodeCompanion's tool system.
+--- Registers MCP tools from the bridge into CodeCompanion's MCP tool registry.
 ---
---- Injects directly into config.interactions.chat.tools (the live CC config table),
---- following the same pattern as mcphub.nvim's dynamic tool registration.
+--- Uses CC's `codecompanion.mcp.register_tools()` API which persists across
+--- config reloads. Tools are then merged via CC's filter.lua `pre_filter`.
 ---
---- Each MCP server becomes a tool group. Each tool within becomes an individual
---- CC tool entry with a callback() that returns the tool spec.
+--- Each bridge server becomes a registry entry with its tools and a group.
 --- @module mcp_companion.cc.tools
 
 local M = {}
 
 local log = require("mcp_companion.log")
-
---- ID prefix for all tools/groups we own — used for cleanup
-local _ID_PREFIX = "mcp_companion:"
 
 --- Fingerprint of the last successful registration (tool count + sorted names).
 --- Used to skip re-registration when nothing has changed.
@@ -31,30 +27,6 @@ local function _fingerprint(servers)
     end
     table.sort(names)
     return tostring(#names) .. ":" .. table.concat(names, ",")
-end
-
---- Remove all previously registered tools and groups from CC config
-local function _cleanup(tools_tbl)
-    -- Remove individual tools
-    for key, value in pairs(tools_tbl) do
-        if type(value) == "table" and type(value.id) == "string" then
-            if value.id:sub(1, #_ID_PREFIX) == _ID_PREFIX then
-                tools_tbl[key] = nil
-            end
-        end
-    end
-
-    -- Remove groups
-    local groups = tools_tbl.groups
-    if type(groups) == "table" then
-        for key, value in pairs(groups) do
-            if type(value) == "table" and type(value.id) == "string" then
-                if value.id:sub(1, #_ID_PREFIX) == _ID_PREFIX then
-                    groups[key] = nil
-                end
-            end
-        end
-    end
 end
 
 --- Build the cmds handler for a bridge tool.
@@ -80,63 +52,43 @@ local function _make_bridge_cmd(client, namespaced_name, display_name, server_na
                 return
             end
 
+            -- Execute the tool via bridge client
             client:call_tool(namespaced_name, params, function(err, result)
                 vim.schedule(function()
                     if err then
                         cmd_opts.output_cb({ status = "error", data = tostring(err) })
-                        return
-                    end
-                    if not result then
-                        cmd_opts.output_cb({ status = "success", data = "" })
-                        return
-                    end
-                    -- Check for MCP-level error in result
-                    if result.isError then
-                        local parts = {}
-                        for _, item in ipairs(result.content or {}) do
-                            if item.type == "text" then
-                                table.insert(parts, item.text or "")
+                    else
+                        -- MCP tool results have a content array of content blocks
+                        local content = result and result.content or {}
+                        local text_parts = {}
+                        for _, block in ipairs(content) do
+                            if block.type == "text" then
+                                table.insert(text_parts, block.text)
+                            elseif block.type == "image" then
+                                table.insert(text_parts, "[Image: " .. (block.mimeType or "unknown") .. "]")
+                            elseif block.type == "resource" then
+                                table.insert(text_parts, "[Resource: " .. (block.resource and block.resource.uri or "unknown") .. "]")
                             end
                         end
-                        cmd_opts.output_cb({ status = "error", data = table.concat(parts, "\n") })
-                        return
+                        local output = table.concat(text_parts, "\n")
+                        cmd_opts.output_cb({ status = "success", data = output })
                     end
-                    -- Extract text content
-                    local parts = {}
-                    for _, item in ipairs(result.content or {}) do
-                        if item.type == "text" then
-                            table.insert(parts, item.text or "")
-                        elseif item.type == "image" then
-                            table.insert(parts, string.format("[image: %s]", item.mimeType or "unknown"))
-                        elseif item.type == "resource" and item.resource and item.resource.text then
-                            table.insert(parts, item.resource.text)
-                        end
-                    end
-                    local text = table.concat(parts, "\n")
-                    if text == "" then
-                        text = string.format("Tool '%s' completed with no output.", display_name)
-                    end
-                    cmd_opts.output_cb({ status = "success", data = text })
                 end)
             end)
         end)
     end
 end
 
---- Build the output handlers table (error + success) for a CC tool.
---- output.error(self, stderr, meta) and output.success(self, stdout, meta)
---- where stdout/stderr are arrays and meta.tools.chat is the chat object.
---- @param display_name string
+--- Build output handlers for tool results
+--- @param display_name string Tool display name for output formatting
 --- @return table
 local function _make_output(display_name)
     return {
-        error = function(_self, stderr, meta)
-            local chat = meta and meta.tools and meta.tools.chat
-            if not chat then return end
-            local err_data = stderr and (stderr[#stderr] or {}) or {}
-            local text = type(err_data) == "table" and (err_data.data or vim.inspect(err_data))
-                or tostring(err_data)
-            chat:add_tool_output(_self, string.format("**`%s` Tool**: Error:\n```\n%s\n```", display_name, text))
+        rejected = function(_self, rejected_msg)
+            return string.format("**`%s` Tool Rejected**: %s", display_name, rejected_msg or "No reason given")
+        end,
+        error = function(_self, error_msg)
+            return string.format("**`%s` Tool Error**: %s", display_name, error_msg or "Unknown error")
         end,
         success = function(_self, stdout, meta)
             local chat = meta and meta.tools and meta.tools.chat
@@ -155,30 +107,14 @@ local function _make_output(display_name)
     }
 end
 
---- Register all MCP tools from the bridge into CodeCompanion.
---- Reads state.servers (pre-grouped by client._update_server_state) and
---- injects tool entries + groups into config.interactions.chat.tools.
+--- Register all MCP tools from the bridge into CodeCompanion's MCP registry.
+--- Uses CC's `mcp.register_tools()` API which persists across config reloads.
 function M.register()
-    local cc_config_ok, cc_config = pcall(require, "codecompanion.config")
-    if not cc_config_ok then
-        log.debug("codecompanion.config not available, skipping tool registration")
+    local cc_mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
+    if not cc_mcp_ok then
+        log.debug("codecompanion.mcp not available, skipping tool registration")
         return
     end
-
-    -- Safely navigate to the tools table
-    local tools_tbl = cc_config.interactions
-        and cc_config.interactions.chat
-        and cc_config.interactions.chat.tools
-    if not tools_tbl then
-        log.warn("codecompanion.config.interactions.chat.tools not found")
-        return
-    end
-
-    -- Ensure groups subtable exists
-    tools_tbl.groups = tools_tbl.groups or {}
-
-    -- Clean up previous registrations
-    _cleanup(tools_tbl)
 
     local state = require("mcp_companion.state")
     local bridge = require("mcp_companion.bridge")
@@ -207,6 +143,7 @@ function M.register()
             goto continue
         end
 
+        local server_tools = {}  -- tool_name -> tool_config
         local tool_keys = {}
 
         for _, tool in ipairs(server.tools or {}) do
@@ -214,10 +151,8 @@ function M.register()
             -- tool._namespaced = full bridge name (e.g. "everything_echo")
             local display = tool._display or tool.name
             local namespaced = tool._namespaced or tool.name
-            -- Key into the tools table: server_name__tool_display_name
-            local key = server.name .. "__" .. display
-
-            local tool_id = _ID_PREFIX .. server.name .. ":" .. display
+            -- Use the namespaced name as the key (already unique and matches bridge)
+            local key = namespaced
 
             -- Capture loop variables for the closure
             local captured_display = display
@@ -225,11 +160,8 @@ function M.register()
             local captured_description = tool.description or ("MCP tool: " .. display)
             local captured_input_schema = tool.inputSchema or { type = "object", properties = {} }
 
-            tools_tbl[key] = {
-                id = tool_id,
+            server_tools[key] = {
                 description = captured_description,
-                hide_in_help_window = true,
-                visible = false,
                 callback = function()
                     return {
                         name = key,
@@ -261,13 +193,10 @@ function M.register()
             registered_tools = registered_tools + 1
         end
 
-        -- Create a group for this server
+        -- Register this server's tools with CC's MCP registry
         if #tool_keys > 0 then
-            local group_key = server.name
-            tools_tbl.groups[group_key] = {
-                id = _ID_PREFIX .. "group:" .. server.name,
+            local group = {
                 description = string.format("All tools from the `%s` MCP server", server.name),
-                hide_in_help_window = false,
                 tools = tool_keys,
                 system_prompt = function(_group_config, _ctx)
                     return string.format(
@@ -278,6 +207,8 @@ function M.register()
                 end,
                 opts = { collapse_tools = true },
             }
+
+            cc_mcp.register_tools(server.name, server_tools, group)
             registered_servers = registered_servers + 1
         end
 
@@ -288,18 +219,22 @@ function M.register()
     _last_fingerprint = fp
 end
 
---- Unregister all previously registered tools (cleanup only)
+--- Unregister all previously registered tools
 function M.unregister()
-    local cc_config_ok, cc_config = pcall(require, "codecompanion.config")
-    if not cc_config_ok then return end
-    local tools_tbl = cc_config.interactions
-        and cc_config.interactions.chat
-        and cc_config.interactions.chat.tools
-    if tools_tbl then
-        _cleanup(tools_tbl)
+    local cc_mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
+    if not cc_mcp_ok then return end
+
+    local state = require("mcp_companion.state")
+    local servers = state.field("servers") or {}
+
+    for _, server in ipairs(servers) do
+        if server.name ~= "_bridge" then
+            cc_mcp.unregister_tools(server.name)
+        end
     end
-    -- Reset fingerprint so the next register() call does a full re-registration
+
     _last_fingerprint = nil
+    log.debug("CC tools unregistered")
 end
 
 return M

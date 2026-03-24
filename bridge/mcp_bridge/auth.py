@@ -1,124 +1,116 @@
 """OAuth authentication support for MCP bridge.
 
 Provides:
-- File-based key-value store for persistent OAuth token storage
+- Encrypted file-based key-value store for persistent OAuth token storage
 - Auth factory: builds the right httpx.Auth for each server config
 - Uses FastMCP's OAuth client for the full Authorization Code + PKCE flow
 
 Token files are stored under ``token_dir/<server>/`` (default
-``~/.cache/mcp-companion/oauth-tokens``).  Disk caching can be disabled by
-passing ``cache_tokens=False`` to :func:`build_auth`, in which case tokens are
-kept in memory only and lost when the bridge restarts.
+``~/.cache/mcp-companion/oauth-tokens``), encrypted with Fernet.
+Disk caching can be disabled by passing ``cache_tokens=False`` to
+:func:`build_auth`, in which case tokens are kept in memory only
+and lost when the bridge restarts.
 """
 
 from __future__ import annotations
 
-import json
+import getpass
+import hashlib
 import logging
-import re
-from datetime import datetime, timezone
+import os
+import platform
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import httpx
+from cryptography.fernet import Fernet
 from fastmcp.client.auth import OAuth
-from key_value.aio._utils.managed_entry import ManagedEntry
-from key_value.aio.stores.base import BaseStore
+from fastmcp.server.auth.jwt_issuer import derive_jwt_key
+from key_value.aio.protocols import AsyncKeyValue
+from key_value.aio.stores.filetree import (
+    FileTreeStore,
+    FileTreeV1CollectionSanitizationStrategy,
+    FileTreeV1KeySanitizationStrategy,
+)
+from key_value.aio.stores.memory import MemoryStore
+from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
 logger = logging.getLogger("mcp-bridge")
 
 # Default token storage directory (XDG cache convention)
 _DEFAULT_TOKEN_DIR = Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
 
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc)
-
-
-def _sanitize(s: str) -> str:
-    """Replace filesystem-unsafe characters with underscores."""
-    return re.sub(r"[^\w\-.]", "_", s)
+# Environment variable for encryption key (optional - derived from machine ID if not set)
+_ENCRYPTION_KEY_ENV = "MCP_BRIDGE_TOKEN_KEY"
 
 
-class FileKeyValueStore(BaseStore):
-    """Persistent file-based key-value store implementing ``AsyncKeyValueProtocol``.
+def _get_or_create_encryption_key(token_dir: Path) -> bytes:
+    """Get or derive a Fernet encryption key for token storage.
 
-    Each entry is stored as a JSON file under::
+    Key sources (in priority order):
+    1. MCP_BRIDGE_TOKEN_KEY environment variable - for explicit key management
+    2. Derived from machine ID + username - stable across restarts, unique per user
 
-        base_dir/<collection>/<sanitized_key>.json
+    **Security Note**: The derived key (option 2) provides obfuscation, not strong
+    security. Anyone with read access to your home directory can derive the same
+    key. For stronger security, set MCP_BRIDGE_TOKEN_KEY to a securely stored secret.
 
-    The file format is::
-
-        {
-            "value": {...},
-            "created_at": "2024-01-01T00:00:00+00:00",   # optional
-            "expires_at": "2025-01-01T00:00:00+00:00"    # optional, omitted if no TTL
-        }
-
-    Expired entries are treated as missing (deleted lazily on next read).
+    The derived key approach is a reasonable default that:
+    - Prevents casual inspection of token files
+    - Is stable across bridge restarts (no key file to manage)
+    - Is unique per user on multi-user systems
     """
+    # Check environment first - explicit key takes priority
+    if env_key := os.environ.get(_ENCRYPTION_KEY_ENV):
+        logger.debug("Using encryption key from %s environment variable", _ENCRYPTION_KEY_ENV)
+        return derive_jwt_key(
+            low_entropy_material=env_key,
+            salt="mcp-bridge-token-encryption",
+        )
 
-    def __init__(self, base_dir: Path) -> None:
-        self.base_dir = base_dir
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        super().__init__(stable_api=True)
+    # Derive from machine ID + username (stable, unique per user)
+    machine_id = platform.node()  # hostname
+    username = getpass.getuser()
+    material = f"{machine_id}:{username}:mcp-companion-tokens"
 
-    def _entry_path(self, collection: str, key: str) -> Path:
-        coll_dir = self.base_dir / _sanitize(collection)
-        coll_dir.mkdir(parents=True, exist_ok=True)
-        return coll_dir / (_sanitize(key) + ".json")
+    logger.debug("Deriving encryption key from machine ID + username")
+    return derive_jwt_key(
+        low_entropy_material=material,
+        salt="mcp-bridge-token-encryption",
+    )
 
-    async def _get_managed_entry(self, *, key: str, collection: str) -> ManagedEntry | None:
-        path = self._entry_path(collection, key)
-        if not path.exists():
-            return None
-        try:
-            raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Corrupt token file %s, ignoring: %s", path, exc)
-            return None
 
-        value: Mapping[str, Any] = raw.get("value", {})
-        created_at: datetime | None = None
-        expires_at: datetime | None = None
+def create_encrypted_store(token_dir: Path, server_name: str) -> AsyncKeyValue:
+    """Create an encrypted file-based key-value store for a server.
 
-        if raw_ca := raw.get("created_at"):
-            try:
-                created_at = datetime.fromisoformat(raw_ca)
-            except ValueError:
-                pass
-        if raw_ea := raw.get("expires_at"):
-            try:
-                expires_at = datetime.fromisoformat(raw_ea)
-            except ValueError:
-                pass
+    Uses FastMCP's FileTreeStore wrapped with FernetEncryptionWrapper.
+    Each server gets its own subdirectory under token_dir.
 
-        entry = ManagedEntry(value=value, created_at=created_at, expires_at=expires_at)
+    Args:
+        token_dir: Base directory for token storage.
+        server_name: Server name (used as subdirectory).
 
-        # Treat expired entries as missing; clean up lazily
-        if entry.is_expired:
-            path.unlink(missing_ok=True)
-            return None
+    Returns:
+        AsyncKeyValue store with encryption.
+    """
+    encryption_key = _get_or_create_encryption_key(token_dir)
 
-        return entry
+    # Each server gets its own directory
+    storage_dir = token_dir / server_name
+    storage_dir.mkdir(parents=True, exist_ok=True)
 
-    async def _put_managed_entry(
-        self, *, key: str, collection: str, managed_entry: ManagedEntry
-    ) -> None:
-        path = self._entry_path(collection, key)
-        data: dict[str, Any] = {"value": dict(managed_entry.value)}
-        if managed_entry.created_at:
-            data["created_at"] = managed_entry.created_at.isoformat()
-        if managed_entry.expires_at:
-            data["expires_at"] = managed_entry.expires_at.isoformat()
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    file_store = FileTreeStore(
+        data_directory=storage_dir,
+        key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(storage_dir),
+        collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(storage_dir),
+    )
 
-    async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:
-        path = self._entry_path(collection, key)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+    # Wrap with encryption - decryption errors are treated as cache misses
+    return FernetEncryptionWrapper(
+        key_value=file_store,
+        fernet=Fernet(key=encryption_key),
+        raise_on_decryption_error=False,
+    )
 
 
 class _BearerAuth(httpx.Auth):
@@ -230,9 +222,9 @@ def _build_oauth(
 ) -> OAuth:
     """Construct a FastMCP ``OAuth`` provider.
 
-    When *cache_tokens* is ``True`` (default) a :class:`FileKeyValueStore` is
+    When *cache_tokens* is ``True`` (default) an encrypted file store is
     created at *base_dir* and passed as ``token_storage``.  Tokens are persisted
-    to disk and survive bridge restarts.
+    to disk with Fernet encryption and survive bridge restarts.
 
     When *cache_tokens* is ``False`` ``token_storage=None`` is passed, which
     tells FastMCP to use an in-memory store.  Tokens are lost on restart and the
@@ -244,15 +236,15 @@ def _build_oauth(
     elif isinstance(scopes, str):
         scope_str = scopes
 
+    storage: AsyncKeyValue | None = None
     if cache_tokens:
-        storage: FileKeyValueStore | None = FileKeyValueStore(base_dir)
+        storage = create_encrypted_store(base_dir, server_name)
         logger.info(
-            "Configuring OAuth for server '%s' with disk token cache at %s",
+            "Configuring OAuth for server '%s' with encrypted disk token cache at %s",
             server_name,
-            base_dir,
+            base_dir / server_name,
         )
     else:
-        storage = None
         logger.info(
             "Configuring OAuth for server '%s' with in-memory token storage (disk cache disabled)",
             server_name,
@@ -267,3 +259,88 @@ def _build_oauth(
         client_secret=client_secret,
         client_metadata_url=client_metadata_url,
     )
+
+
+def has_valid_oauth_token(
+    server_name: str,
+    token_dir: Path | str,
+) -> bool:
+    """Check if OAuth token files exist for the given server.
+
+    Returns True if token files exist in the cache. Since tokens are now
+    encrypted, we can't easily verify validity without decrypting. We just
+    check for existence and let the OAuth flow handle invalid/expired tokens.
+
+    This is used to decide whether to mount OAuth-protected servers at
+    startup - if no files exist, mounting would definitely block on OAuth flow.
+    """
+    token_dir = Path(token_dir) if isinstance(token_dir, str) else token_dir
+    token_subdir = token_dir / server_name / "mcp-oauth-token"
+
+    if not token_subdir.exists():
+        logger.debug("No token directory for server '%s' at %s", server_name, token_subdir)
+        return False
+
+    # Check if any token files exist (they're encrypted, so we can't read them)
+    token_files = list(token_subdir.glob("*"))
+    if token_files:
+        logger.debug("Found %d token file(s) for server '%s'", len(token_files), server_name)
+        return True
+
+    logger.debug("No token files found for server '%s'", server_name)
+    return False
+
+
+def clear_oauth_cache(
+    server_name: str,
+    token_dir: Path | str,
+) -> bool:
+    """Clear all cached OAuth data for a server.
+
+    This should be called when we detect that the OAuth server has lost
+    its client registration (e.g., server restarted and cached client_id
+    is no longer valid). Clearing the cache forces a fresh OAuth flow
+    with new client registration on next attempt.
+
+    Returns True if any files were deleted.
+    """
+    import shutil
+
+    token_dir = Path(token_dir) if isinstance(token_dir, str) else token_dir
+    server_cache_dir = token_dir / server_name
+
+    if not server_cache_dir.exists():
+        logger.debug("No cache directory for server '%s' at %s", server_name, server_cache_dir)
+        return False
+
+    try:
+        # Remove entire server cache directory (tokens + client registration)
+        shutil.rmtree(server_cache_dir)
+        logger.info(
+            "Cleared OAuth cache for server '%s' at %s",
+            server_name,
+            server_cache_dir,
+        )
+        return True
+    except Exception as e:
+        logger.warning("Failed to clear OAuth cache for server '%s': %s", server_name, e)
+        return False
+
+
+def is_stale_client_error(error: Exception) -> bool:
+    """Check if an error indicates stale OAuth client registration.
+
+    Returns True if the error suggests the OAuth server has lost the
+    dynamic client registration (e.g., server restarted). In this case,
+    clearing the token cache and retrying with fresh registration may help.
+    """
+    error_str = str(error).lower()
+    stale_indicators = [
+        "unregistered client",
+        "invalid_client",
+        "client not found",
+        "client_id",
+        "invalid client",
+        "unknown client",
+    ]
+    return any(indicator in error_str for indicator in stale_indicators)

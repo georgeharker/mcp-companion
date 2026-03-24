@@ -553,18 +553,21 @@ function Client:connect(callback)
     -- Send initialized notification
     self:notify("notifications/initialized")
 
-    -- Fetch initial capabilities, then start monitoring for changes
-    self:refresh_capabilities(function()
-      -- NOTE: SSE notification stream is currently disabled.
-      -- FastMCP routes subsequent request responses to the SSE stream's
-      -- TCP connection instead of the request's own connection, causing
-      -- tool calls to time out. Use polling as the reliable alternative.
-      --
-      -- Start capability polling for change detection
-      local interval = self._config.poll_interval or 30000
-      self:_start_polling(interval)
+    -- Fetch server names from health endpoint for correct tool name parsing
+    self:_fetch_server_names(function()
+      -- Fetch initial capabilities, then start monitoring for changes
+      self:refresh_capabilities(function()
+        -- NOTE: SSE notification stream is currently disabled.
+        -- FastMCP routes subsequent request responses to the SSE stream's
+        -- TCP connection instead of the request's own connection, causing
+        -- tool calls to time out. Use polling as the reliable alternative.
+        --
+        -- Start capability polling for change detection
+        local interval = self._config.poll_interval or 30000
+        self:_start_polling(interval)
 
-      callback(true)
+        callback(true)
+      end)
     end)
   end)
 end
@@ -579,7 +582,56 @@ function Client:disconnect()
   self.resources = {}
   self.resource_templates = {}
   self.prompts = {}
+  self._known_server_names = {}
   log.debug("Client disconnected")
+end
+
+--- Fetch server names from bridge health endpoint
+--- Used for correct tool name parsing (servers may have hyphens in names)
+--- @param callback fun()
+function Client:_fetch_server_names(callback)
+  -- Use plenary.curl for health endpoint (it's not an MCP request)
+  local curl = require("plenary.curl")
+  local url = string.format("http://%s:%d/health", self.host, self.port)
+  
+  curl.get(url, {
+    timeout = 5000,
+    callback = vim.schedule_wrap(function(response)
+      if not response or response.status ~= 200 then
+        log.warn("Failed to fetch server names: status=%s", response and response.status or "no response")
+        self._known_server_names = {}
+        callback()
+        return
+      end
+
+      local ok, data = pcall(vim.json.decode, response.body)
+      if not ok or not data or not data.servers then
+        log.warn("Invalid health response: %s", response.body and response.body:sub(1, 100) or "empty")
+        self._known_server_names = {}
+        callback()
+        return
+      end
+
+      -- Extract server names, sorted by length descending so longer names match first
+      local names = {}
+      for name, _ in pairs(data.servers) do
+        table.insert(names, name)
+      end
+      -- Add "bridge" for meta-tools (bridge__status, bridge__enable_server, etc.)
+      -- These use double underscore but we still need to match the prefix
+      table.insert(names, "bridge")
+      table.sort(names, function(a, b) return #a > #b end)
+
+      self._known_server_names = names
+      log.debug("Known server names: %s", vim.inspect(names))
+      callback()
+    end),
+    on_error = vim.schedule_wrap(function(err)
+      log.warn("Failed to fetch server names: %s", vim.inspect(err))
+      self._known_server_names = {}
+      callback()
+    end),
+  })
 end
 
 --- Refresh all capabilities from bridge
@@ -628,9 +680,35 @@ function Client:_update_server_state()
   local state = require("mcp_companion.state")
   local server_map = {} --- @type table<string, MCPCompanion.ServerInfo>
 
+  -- Build list of known server names from health endpoint (stored during connect)
+  -- This allows us to correctly parse tool names like "basic-memory_write_note"
+  -- where the server name contains hyphens.
+  local known_servers = self._known_server_names or {}
+
   -- Group tools by server namespace (FastMCP uses "_" separator)
   for _, tool in ipairs(self.tools) do
-    local server_name, tool_name = tool.name:match("^(.-)_(.+)$")
+    local server_name, tool_name = nil, nil
+
+    -- Try to match against known server names first
+    for _, srv_name in ipairs(known_servers) do
+      local prefix = srv_name .. "_"
+      if tool.name:sub(1, #prefix) == prefix then
+        server_name = srv_name
+        tool_name = tool.name:sub(#prefix + 1)
+        -- Strip leading underscore if present (for bridge__ meta-tools)
+        if tool_name:sub(1, 1) == "_" then
+          tool_name = tool_name:sub(2)
+        end
+        break
+      end
+    end
+
+    -- Fallback: split on first underscore (for unknown servers)
+    if not server_name then
+      server_name, tool_name = tool.name:match("^(.-)_(.+)$")
+    end
+
+    -- If still no match, it's a bridge-level tool
     if not server_name or server_name == "" then
       server_name = "_bridge"
       tool_name = tool.name
