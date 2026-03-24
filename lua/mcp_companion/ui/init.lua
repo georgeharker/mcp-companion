@@ -24,6 +24,7 @@ local _augroup = nil
 local icons = {
   connected = "●",
   disconnected = "○",
+  disabled = "⊘",
   error = "✗",
   connecting = "◌",
   tool = "⚡",
@@ -41,9 +42,11 @@ local icons = {
 local function status_icon(status)
   if status == "connected" then
     return icons.connected, "DiagnosticOk"
+  elseif status == "disabled" then
+    return icons.disabled, "Comment"
   elseif status == "error" then
     return icons.error, "DiagnosticError"
-  elseif status == "connecting" then
+  elseif status == "connecting" or status == "healthy" then
     return icons.connecting, "DiagnosticWarn"
   else
     return icons.disconnected, "Comment"
@@ -69,6 +72,7 @@ end
 --- @field text string Plain text of the line
 --- @field highlights table[] {group, col_start, col_end}
 --- @field action? function Action when <CR> pressed on this line
+--- @field server_name? string Server name this line belongs to (for toggle)
 
 --- @type UILine[]
 local _lines = {}
@@ -77,18 +81,20 @@ local _lines = {}
 --- @param text string
 --- @param hl? string Highlight group for full line
 --- @param action? function
-local function add_line(text, hl, action)
+--- @param server_name? string
+local function add_line(text, hl, action, server_name)
   local highlights = {}
   if hl then
     table.insert(highlights, { hl, 0, #text })
   end
-  table.insert(_lines, { text = text, highlights = highlights, action = action })
+  table.insert(_lines, { text = text, highlights = highlights, action = action, server_name = server_name })
 end
 
 --- Add a line with mixed highlights
 --- @param segments table[] {text, hl?}
 --- @param action? function
-local function add_segments(segments, action)
+--- @param server_name? string
+local function add_segments(segments, action, server_name)
   local text = ""
   local highlights = {}
   for _, seg in ipairs(segments) do
@@ -98,7 +104,7 @@ local function add_segments(segments, action)
       table.insert(highlights, { seg[2], start, #text })
     end
   end
-  table.insert(_lines, { text = text, highlights = highlights, action = action })
+  table.insert(_lines, { text = text, highlights = highlights, action = action, server_name = server_name })
 end
 
 --- Add a separator line
@@ -142,50 +148,66 @@ local function render_server(srv)
   local prompts_n = srv.prompts and #srv.prompts or 0
   local is_expanded = _expanded[srv.name]
   local arrow = is_expanded and icons.collapse or icons.expand
+  local disabled_label = srv.disabled and " [disabled]" or ""
 
   -- Server header line (clickable)
-  add_segments({
+  local header_segments = {
     { "  " .. arrow .. " ", "Comment" },
     { icon .. " ", hl },
     { pad(srv.name, 20) },
-    { string.format("  %d %s  %d %s  %d %s", tools_n, icons.tool, res_n, icons.resource, prompts_n, icons.prompt), "Comment" },
-  }, function()
+  }
+  if srv.disabled then
+    table.insert(header_segments, { disabled_label, "Comment" })
+  else
+    table.insert(header_segments, {
+      string.format("  %d %s  %d %s  %d %s", tools_n, icons.tool, res_n, icons.resource, prompts_n, icons.prompt),
+      "Comment",
+    })
+  end
+  add_segments(header_segments, function()
     _expanded[srv.name] = not _expanded[srv.name]
     M.render()
-  end)
+  end, srv.name)
 
   if not is_expanded then
     return
   end
 
+  -- Disabled servers: show hint instead of empty tool list
+  if srv.disabled then
+    add_line("    (press e to enable)", "Comment", nil, srv.name)
+    add_line("")
+    return
+  end
+
   -- Tools
   if tools_n > 0 then
-    add_line("    " .. icons.tool .. " Tools:", "Title")
+    add_line("    " .. icons.tool .. " Tools:", "Title", nil, srv.name)
     for _, tool in ipairs(srv.tools) do
       local display = tool._display or tool.name or "?"
       local desc = tool.description or ""
       if #desc > 60 then
         desc = desc:sub(1, 57) .. "..."
       end
-      add_line(string.format("      %s  %s", pad(display, 28), desc), "Comment")
+      add_line(string.format("      %s  %s", pad(display, 28), desc), "Comment", nil, srv.name)
     end
   end
 
   -- Resources
   if res_n > 0 then
-    add_line("    " .. icons.resource .. " Resources:", "Title")
+    add_line("    " .. icons.resource .. " Resources:", "Title", nil, srv.name)
     for _, res in ipairs(srv.resources) do
       local name = res.name or res.uri or "?"
-      add_line("      " .. name, "Comment")
+      add_line("      " .. name, "Comment", nil, srv.name)
     end
   end
 
   -- Prompts
   if prompts_n > 0 then
-    add_line("    " .. icons.prompt .. " Prompts:", "Title")
+    add_line("    " .. icons.prompt .. " Prompts:", "Title", nil, srv.name)
     for _, pr in ipairs(srv.prompts) do
       local name = pr.name or "?"
-      add_line("      " .. name, "Comment")
+      add_line("      " .. name, "Comment", nil, srv.name)
     end
   end
   add_line("")
@@ -237,6 +259,8 @@ local function build_status_view(state)
   add_segments({
     { " q", "Special" },
     { " close  ", "Comment" },
+    { "e", "Special" },
+    { " toggle  ", "Comment" },
     { "r", "Special" },
     { " refresh  ", "Comment" },
     { "R", "Special" },
@@ -406,6 +430,31 @@ function M.open()
       line_data.action()
     end
   end, "Activate")
+
+  map("e", function()
+    local cursor = vim.api.nvim_win_get_cursor(_win)
+    local line_idx = cursor[1]
+    local line_data = _lines[line_idx]
+    if not line_data or not line_data.server_name then
+      return
+    end
+    local srv_name = line_data.server_name
+    local bridge_mod = require("mcp_companion.bridge")
+    local client = bridge_mod.client
+    if not client or not client.connected then
+      vim.notify("[mcp-companion] Bridge not connected", vim.log.levels.WARN)
+      return
+    end
+    -- Show feedback
+    vim.notify(string.format("[mcp-companion] Toggling %s...", srv_name), vim.log.levels.INFO)
+    client:toggle_server(srv_name, function(err, result)
+      if err then
+        vim.notify(string.format("[mcp-companion] Toggle failed: %s", tostring(err)), vim.log.levels.ERROR)
+      else
+        vim.notify(string.format("[mcp-companion] %s", result or "done"), vim.log.levels.INFO)
+      end
+    end)
+  end, "Toggle server enable/disable")
 
   -- Subscribe to state changes for live updates
   local state = require("mcp_companion.state")

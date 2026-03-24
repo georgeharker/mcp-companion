@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from pathlib import Path
+import os
+import tempfile
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from mcp_bridge.config import BridgeConfig, SharedServerConfig
 from mcp_bridge.sharedserver import SharedServerManager, _build_use_cmd, _require_binary
+
+
+def _mock_async_process(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> AsyncMock:
+    """Create a mock for asyncio.create_subprocess_exec that returns a process."""
+    proc = AsyncMock()
+    proc.returncode = returncode
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+
+    factory = AsyncMock(return_value=proc)
+    return factory
 
 
 # ── _require_binary ────────────────────────────────────────────────
@@ -122,7 +132,6 @@ def _make_config(*, sharedserver_data: dict[str, Any] | None = None) -> BridgeCo
             }
         },
     }
-    import tempfile, os  # noqa: E401
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(raw, f)
@@ -137,16 +146,17 @@ async def test_start_all_calls_sharedserver_use() -> None:
     config = _make_config()
     mgr = SharedServerManager(config)
 
-    mock_run = MagicMock(return_value=MagicMock(returncode=0))
+    mock_exec = _mock_async_process(returncode=0)
     with (
         patch("shutil.which", return_value="/usr/bin/sharedserver"),
-        patch("subprocess.run", mock_run),
+        patch("asyncio.create_subprocess_exec", mock_exec),
         patch("mcp_bridge.sharedserver._poll_url", new=AsyncMock(return_value=True)),
     ):
         await mgr.start_all()
 
-    assert mock_run.called
-    cmd = mock_run.call_args[0][0]
+    assert mock_exec.called
+    # The first positional args are the command parts
+    cmd = list(mock_exec.call_args[0])
     assert cmd[0] == "/usr/bin/sharedserver"
     assert cmd[1] == "use"
     assert cmd[2] == "goog_ws"
@@ -169,10 +179,10 @@ async def test_start_all_skips_on_nonzero_exit() -> None:
     config = _make_config()
     mgr = SharedServerManager(config)
 
-    mock_run = MagicMock(return_value=MagicMock(returncode=1, stderr="error"))
+    mock_exec = _mock_async_process(returncode=1, stderr=b"error")
     with (
         patch("shutil.which", return_value="/usr/bin/sharedserver"),
-        patch("subprocess.run", mock_run),
+        patch("asyncio.create_subprocess_exec", mock_exec),
     ):
         await mgr.start_all()
 
@@ -186,12 +196,12 @@ async def test_stop_all_calls_unuse() -> None:
     mgr._binary = "/usr/bin/sharedserver"
     mgr._active = ["goog_ws"]
 
-    mock_run = MagicMock(return_value=MagicMock(returncode=0))
-    with patch("subprocess.run", mock_run):
+    mock_exec = _mock_async_process(returncode=0)
+    with patch("asyncio.create_subprocess_exec", mock_exec):
         await mgr.stop_all()
 
-    mock_run.assert_called_once()
-    cmd = mock_run.call_args[0][0]
+    mock_exec.assert_called_once()
+    cmd = list(mock_exec.call_args[0])
     assert cmd == ["/usr/bin/sharedserver", "unuse", "goog_ws"]
     assert mgr._active == []
 
@@ -201,18 +211,17 @@ async def test_stop_all_noop_when_nothing_started() -> None:
     config = _make_config()
     mgr = SharedServerManager(config)
 
-    mock_run = MagicMock()
-    with patch("subprocess.run", mock_run):
+    mock_exec = _mock_async_process()
+    with patch("asyncio.create_subprocess_exec", mock_exec):
         await mgr.stop_all()
 
-    mock_run.assert_not_called()
+    mock_exec.assert_not_called()
 
 
 @pytest.mark.anyio
 async def test_start_all_no_sharedserver_config() -> None:
     """Servers without sharedserver config are silently skipped."""
     raw = {"servers": {"plain": {"url": "http://localhost:9000/mcp"}}}
-    import tempfile, os  # noqa: E401
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(raw, f)
@@ -221,11 +230,11 @@ async def test_start_all_no_sharedserver_config() -> None:
     os.unlink(path)
 
     mgr = SharedServerManager(config)
-    mock_run = MagicMock()
-    with patch("subprocess.run", mock_run):
+    mock_exec = _mock_async_process()
+    with patch("asyncio.create_subprocess_exec", mock_exec):
         await mgr.start_all()
 
-    mock_run.assert_not_called()
+    mock_exec.assert_not_called()
     assert mgr._active == []
 
 
@@ -235,10 +244,10 @@ async def test_health_poll_timeout_warns_but_continues() -> None:
     config = _make_config()
     mgr = SharedServerManager(config)
 
-    mock_run = MagicMock(return_value=MagicMock(returncode=0))
+    mock_exec = _mock_async_process(returncode=0)
     with (
         patch("shutil.which", return_value="/usr/bin/sharedserver"),
-        patch("subprocess.run", mock_run),
+        patch("asyncio.create_subprocess_exec", mock_exec),
         patch("mcp_bridge.sharedserver._poll_url", new=AsyncMock(return_value=False)),
     ):
         await mgr.start_all()

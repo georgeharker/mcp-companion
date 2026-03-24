@@ -22,7 +22,6 @@ import asyncio
 import logging
 import os
 import shutil
-import subprocess
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -91,9 +90,8 @@ def _build_use_cmd(
     ``pid`` should be the long-lived process that owns the sharedserver
     reference (e.g. the bridge process).  sharedserver tracks this PID and
     decrements the refcount when it exits.  Without an explicit ``--pid`` the
-    tool defaults to the *caller's* PID, which is the short-lived subprocess
-    spawned by :func:`subprocess.run` — that subprocess exits immediately,
-    causing the refcount to drop to zero and the server to stop.
+    tool defaults to the *caller's* PID, which for async subprocess calls is
+    the same as the bridge process — but we pass it explicitly for clarity.
     """
     from mcp_bridge.config import _interpolate_dict, _interpolate_list, _interpolate_str
 
@@ -102,8 +100,7 @@ def _build_use_cmd(
     if ss.grace_period:
         cmd += ["--grace-period", ss.grace_period]
 
-    # Tie the sharedserver reference to the bridge process, not to the
-    # short-lived subprocess.run() helper process.
+    # Tie the sharedserver reference to the bridge process explicitly.
     cmd += ["--pid", str(pid if pid is not None else os.getpid())]
 
     # Expand env vars in the process environment entries
@@ -130,7 +127,10 @@ class SharedServerManager:
         await mgr.stop_all()
     """
 
-    def __init__(self, config: "BridgeConfig") -> None:
+    def __init__(
+        self,
+        config: "BridgeConfig",
+    ) -> None:
         self._config = config
         self._binary: str | None = None
         # Track which server names we successfully `use`d so we can `unuse` them.
@@ -142,9 +142,14 @@ class SharedServerManager:
         return self._binary
 
     async def start_all(self) -> None:
-        """Call ``sharedserver use`` for every enabled server that has a sharedserver config.
+        """Launch ``sharedserver use`` for every enabled server concurrently.
 
-        After starting, polls the server URL until healthy (or timeout).
+        Each server is started in parallel.  The ``sharedserver use`` command
+        itself is quick (just increments a refcount), but the subsequent
+        health-poll can take up to ``health_timeout`` seconds per server.
+        Running them concurrently keeps total wall-clock time close to the
+        single-longest timeout instead of the sum of all timeouts.
+
         Servers that fail to start or become healthy are logged as warnings —
         the bridge continues mounting other servers.
         """
@@ -160,12 +165,21 @@ class SharedServerManager:
             )
         else:
             logger.warning("No sharedserver-managed servers configured")
+            return
 
+        tasks = []
         for name, srv in self._config.get_enabled_servers().items():
             ss = self._config.resolve_shared_server(name)
             if ss is None:
                 continue
-            await self._start_one(name, ss, srv.url)
+            tasks.append(self._start_one(name, ss, srv.url))
+
+        # Run all sharedserver starts concurrently.
+        # return_exceptions=True ensures one failure doesn't cancel others.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning("sharedserver start failed: %s", result)
 
     async def _start_one(
         self,
@@ -187,21 +201,21 @@ class SharedServerManager:
         )
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=15,
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            if result.returncode != 0:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode != 0:
                 logger.warning(
                     "sharedserver use '%s' exited %d: %s",
                     ss.name,
-                    result.returncode,
-                    result.stderr.strip(),
+                    proc.returncode,
+                    stderr.decode().strip() if stderr else "",
                 )
                 return
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             logger.warning("sharedserver use '%s' timed out", ss.name)
             return
         except OSError as exc:
@@ -248,8 +262,13 @@ class SharedServerManager:
         cmd = [binary, "unuse", name]
         logger.info("sharedserver unuse '%s'", name)
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        except (subprocess.TimeoutExpired, OSError) as exc:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=10)
+        except (asyncio.TimeoutError, OSError) as exc:
             logger.warning("sharedserver unuse '%s' failed: %s", name, exc)
 
 

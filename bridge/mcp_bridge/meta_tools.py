@@ -7,11 +7,14 @@ import logging
 from fastmcp import FastMCP
 
 from mcp_bridge.config import BridgeConfig, ServerStatusInfo
+from mcp_bridge.connections import ConnectionManager
 
 logger = logging.getLogger("mcp-bridge")
 
 
-def register_meta_tools(bridge: FastMCP, config: BridgeConfig) -> None:
+def register_meta_tools(
+    bridge: FastMCP, config: BridgeConfig, conn_manager: ConnectionManager
+) -> None:
     """Register bridge management tools on the FastMCP server."""
 
     @bridge.tool()
@@ -23,7 +26,7 @@ def register_meta_tools(bridge: FastMCP, config: BridgeConfig) -> None:
         return {name: config.get_server_status(name) for name in config.servers}
 
     @bridge.tool()
-    def bridge__enable_server(server_name: str) -> str:
+    async def bridge__enable_server(server_name: str) -> str:
         """Enable a disabled MCP server and mount it on the bridge.
 
         Args:
@@ -42,20 +45,31 @@ def register_meta_tools(bridge: FastMCP, config: BridgeConfig) -> None:
 
         # Try to dynamically mount the proxy
         try:
-            from mcp_bridge.auth import has_valid_oauth_token
+            from mcp_bridge.auth import build_auth
             from mcp_bridge.server import (
-                _needs_oauth,
                 _create_server_proxy,
+                _has_cached_token,
+                _needs_oauth,
                 invalidate_tool_cache,
             )
 
             if _needs_oauth(srv):
-                token_dir = config.oauth.token_dir_path
-                if not has_valid_oauth_token(server_name, token_dir):
+                auth = build_auth(
+                    server_name,
+                    auth_config=srv.auth,
+                    server_url=srv.url,
+                    token_dir=config.oauth.token_dir_path,
+                    cache_tokens=config.oauth.cache_tokens,
+                )
+                if auth and not await _has_cached_token(auth):
                     return (
                         f"Server '{server_name}' enabled but requires OAuth authentication. "
                         "Background auth will be attempted."
                     )
+
+            # Open persistent connection for HTTP/SSE servers
+            if conn_manager.is_http_server(srv):
+                await conn_manager.connect(config, server_name, srv)
 
             proxy = _create_server_proxy(config, server_name, srv)
             bridge.mount(proxy, namespace=server_name)
@@ -67,7 +81,7 @@ def register_meta_tools(bridge: FastMCP, config: BridgeConfig) -> None:
             return f"Server '{server_name}' enabled but failed to mount: {e}"
 
     @bridge.tool()
-    def bridge__disable_server(server_name: str) -> str:
+    async def bridge__disable_server(server_name: str) -> str:
         """Disable an MCP server and unmount it from the bridge.
 
         Args:
@@ -84,6 +98,10 @@ def register_meta_tools(bridge: FastMCP, config: BridgeConfig) -> None:
 
         srv.disabled = True
 
+        # Close persistent connection first (before removing providers)
+        if conn_manager.has_connection(server_name):
+            await conn_manager.disconnect(server_name)
+
         # Remove all providers whose namespace matches server_name.
         # AggregateProvider wraps namespaced providers via wrap_transform(Namespace(...)).
         # The wrapped provider's repr contains the namespace string, so we inspect it.
@@ -93,7 +111,6 @@ def register_meta_tools(bridge: FastMCP, config: BridgeConfig) -> None:
             from mcp_bridge.server import invalidate_tool_cache
 
             before = len(bridge.providers)
-            namespace_prefix = f"{server_name}_"
 
             def _provider_matches(p: object) -> bool:
                 """Return True if provider belongs to server_name's namespace."""

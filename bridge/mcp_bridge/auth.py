@@ -261,36 +261,6 @@ def _build_oauth(
     )
 
 
-def has_valid_oauth_token(
-    server_name: str,
-    token_dir: Path | str,
-) -> bool:
-    """Check if OAuth token files exist for the given server.
-
-    Returns True if token files exist in the cache. Since tokens are now
-    encrypted, we can't easily verify validity without decrypting. We just
-    check for existence and let the OAuth flow handle invalid/expired tokens.
-
-    This is used to decide whether to mount OAuth-protected servers at
-    startup - if no files exist, mounting would definitely block on OAuth flow.
-    """
-    token_dir = Path(token_dir) if isinstance(token_dir, str) else token_dir
-    token_subdir = token_dir / server_name / "mcp-oauth-token"
-
-    if not token_subdir.exists():
-        logger.debug("No token directory for server '%s' at %s", server_name, token_subdir)
-        return False
-
-    # Check if any token files exist (they're encrypted, so we can't read them)
-    token_files = list(token_subdir.glob("*"))
-    if token_files:
-        logger.debug("Found %d token file(s) for server '%s'", len(token_files), server_name)
-        return True
-
-    logger.debug("No token files found for server '%s'", server_name)
-    return False
-
-
 def clear_oauth_cache(
     server_name: str,
     token_dir: Path | str,

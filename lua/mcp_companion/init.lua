@@ -80,6 +80,42 @@ function M.setup(opts)
     end
   end, { desc = "Open MCP Companion log file" })
 
+  vim.api.nvim_create_user_command("MCPToggleServer", function(args)
+    local server_name = args.args
+    if not server_name or server_name == "" then
+      vim.notify("[mcp-companion] Usage: :MCPToggleServer <server_name>", vim.log.levels.WARN)
+      return
+    end
+    local client = bridge.client
+    if not client or not client.connected then
+      vim.notify("[mcp-companion] Bridge not connected", vim.log.levels.WARN)
+      return
+    end
+    vim.notify(string.format("[mcp-companion] Toggling %s...", server_name), vim.log.levels.INFO)
+    client:toggle_server(server_name, function(err, result)
+      if err then
+        vim.notify(string.format("[mcp-companion] Toggle failed: %s", tostring(err)), vim.log.levels.ERROR)
+      else
+        vim.notify(string.format("[mcp-companion] %s", result or "done"), vim.log.levels.INFO)
+      end
+    end)
+  end, {
+    nargs = 1,
+    desc = "Toggle an MCP server enabled/disabled",
+    complete = function()
+      -- Complete with known server names from state
+      local srv_state = require("mcp_companion.state")
+      local servers = srv_state.field("servers") or {}
+      local names = {}
+      for _, srv in ipairs(servers) do
+        if srv.name ~= "_bridge" then
+          table.insert(names, srv.name)
+        end
+      end
+      return names
+    end,
+  })
+
   state.update("setup_state", "completed")
   _setup_done = true
 

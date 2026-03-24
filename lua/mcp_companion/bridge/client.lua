@@ -26,6 +26,7 @@ local log = require("mcp_companion.log")
 --- @field _sse_buf string SSE stream accumulation buffer
 --- @field _sse_reconnect_timer? uv.uv_timer_t SSE reconnect delay timer
 --- @field _sse_connected boolean Whether SSE stream is active
+--- @field _server_health table<string, table> Per-server health data from /health
 --- @field _config MCPCompanion.ClientConfig Original config
 local Client = {}
 Client.__index = Client
@@ -60,6 +61,7 @@ function Client.new(config)
     _sse_buf = "",
     _sse_reconnect_timer = nil,
     _sse_connected = false,
+    _server_health = {},
     _config = config,
   }, Client)
 end
@@ -553,21 +555,61 @@ function Client:connect(callback)
     -- Send initialized notification
     self:notify("notifications/initialized")
 
-    -- Fetch server names from health endpoint for correct tool name parsing
-    self:_fetch_server_names(function()
-      -- Fetch initial capabilities, then start monitoring for changes
-      self:refresh_capabilities(function()
-        -- NOTE: SSE notification stream is currently disabled.
-        -- FastMCP routes subsequent request responses to the SSE stream's
-        -- TCP connection instead of the request's own connection, causing
-        -- tool calls to time out. Use polling as the reliable alternative.
-        --
-        -- Start capability polling for change detection
+    -- Fetch server names and capabilities in parallel.
+    -- Server names are needed by _update_server_state() which runs inside
+    -- refresh_capabilities, so we collect all data first, then update.
+    -- Use a barrier: 4 tasks = 1 health + 3 capability requests.
+    local pending = 4
+    local cap_done = false
+    local health_done = false
+    local function check_all_done()
+      pending = pending - 1
+      if pending == 0 then
+        -- All data collected — run state update once
+        self:_update_server_state()
+        require("mcp_companion.state").emit("servers_updated")
+
+        -- Start SSE notification stream for real-time tool change events
+        self:_start_sse()
+
+        -- Start capability polling as fallback for missed SSE events
         local interval = self._config.poll_interval or 30000
         self:_start_polling(interval)
 
         callback(true)
-      end)
+      end
+    end
+
+    -- Health endpoint (for server names / disabled status)
+    self:_fetch_server_names(check_all_done)
+
+    -- Capability requests (parallel) — skip internal _update_server_state
+    self:request("tools/list", {}, function(req_err, req_result)
+      if not req_err and req_result then
+        self.tools = req_result.tools or {}
+      else
+        log.warn("tools/list failed: %s", tostring(req_err))
+      end
+      check_all_done()
+    end)
+
+    self:request("resources/list", {}, function(req_err2, req_result2)
+      if not req_err2 and req_result2 then
+        self.resources = req_result2.resources or {}
+        self.resource_templates = req_result2.resourceTemplates or {}
+      else
+        log.warn("resources/list failed: %s", tostring(req_err2))
+      end
+      check_all_done()
+    end)
+
+    self:request("prompts/list", {}, function(req_err3, req_result3)
+      if not req_err3 and req_result3 then
+        self.prompts = req_result3.prompts or {}
+      else
+        log.warn("prompts/list failed: %s", tostring(req_err3))
+      end
+      check_all_done()
     end)
   end)
 end
@@ -583,6 +625,7 @@ function Client:disconnect()
   self.resource_templates = {}
   self.prompts = {}
   self._known_server_names = {}
+  self._server_health = {}
   log.debug("Client disconnected")
 end
 
@@ -623,6 +666,8 @@ function Client:_fetch_server_names(callback)
       table.sort(names, function(a, b) return #a > #b end)
 
       self._known_server_names = names
+      -- Store per-server health data (transport, disabled, etc.) for UI state
+      self._server_health = data.servers or {}
       log.debug("Known server names: %s", vim.inspect(names))
       callback()
     end),
@@ -639,39 +684,46 @@ end
 function Client:refresh_capabilities(callback)
   local state = require("mcp_companion.state")
 
-  -- Sequential requests to avoid overwhelming the bridge proxy
+  -- Fire all three requests in parallel, collect results with a counter
+  local pending = 3
+  local function check_done()
+    pending = pending - 1
+    if pending == 0 then
+      -- All responses received — update state once
+      self:_update_server_state()
+      state.emit("servers_updated")
+      if callback then
+        callback()
+      end
+    end
+  end
+
   self:request("tools/list", {}, function(err, result)
     if not err and result then
       self.tools = result.tools or {}
     else
       log.warn("tools/list failed: %s", tostring(err))
     end
+    check_done()
+  end)
 
-    self:request("resources/list", {}, function(err2, result2)
-      if not err2 and result2 then
-        self.resources = result2.resources or {}
-        self.resource_templates = result2.resourceTemplates or {}
-      else
-        log.warn("resources/list failed: %s", tostring(err2))
-      end
+  self:request("resources/list", {}, function(err2, result2)
+    if not err2 and result2 then
+      self.resources = result2.resources or {}
+      self.resource_templates = result2.resourceTemplates or {}
+    else
+      log.warn("resources/list failed: %s", tostring(err2))
+    end
+    check_done()
+  end)
 
-      self:request("prompts/list", {}, function(err3, result3)
-        if not err3 and result3 then
-          self.prompts = result3.prompts or {}
-        else
-          log.warn("prompts/list failed: %s", tostring(err3))
-        end
-
-        -- Emit once after all lists are refreshed — avoids triple re-registration
-        -- on every poll cycle. Individual list_changed events are still emitted
-        -- from SSE notifications (single-list changes) and the initial connect.
-        self:_update_server_state()
-        state.emit("servers_updated")
-        if callback then
-          callback()
-        end
-      end)
-    end)
+  self:request("prompts/list", {}, function(err3, result3)
+    if not err3 and result3 then
+      self.prompts = result3.prompts or {}
+    else
+      log.warn("prompts/list failed: %s", tostring(err3))
+    end
+    check_done()
   end)
 end
 
@@ -768,11 +820,132 @@ function Client:_update_server_state()
   for _, info in pairs(server_map) do
     table.insert(servers, info)
   end
+
+  -- Merge disabled servers from health data (they have no tools mounted)
+  local health = self._server_health or {}
+  for name, info in pairs(health) do
+    if not server_map[name] then
+      -- Server exists in config but has no tools (disabled or disconnected)
+      table.insert(servers, {
+        name = name,
+        status = info.disabled and "disabled" or "disconnected",
+        disabled = info.disabled or false,
+        tools = {},
+        resources = {},
+        resource_templates = {},
+        prompts = {},
+      })
+    end
+  end
+  -- Mark enabled/disabled status on existing servers from health data
+  for _, srv in ipairs(servers) do
+    if health[srv.name] then
+      srv.disabled = health[srv.name].disabled or false
+      if srv.disabled then
+        srv.status = "disabled"
+      end
+    else
+      srv.disabled = false
+    end
+  end
+
   table.sort(servers, function(a, b)
     return a.name < b.name
   end)
 
   state.update("servers", servers)
+end
+
+--- Refresh server health/status from the bridge /health endpoint
+--- Updates _server_health and re-runs _update_server_state to merge disabled info
+--- @param callback? fun()
+function Client:_refresh_server_health(callback)
+  local curl = require("plenary.curl")
+  local url = string.format("http://%s:%d/health", self.host, self.port)
+
+  curl.get(url, {
+    timeout = 5000,
+    callback = vim.schedule_wrap(function(response)
+      if response and response.status == 200 then
+        local ok, data = pcall(vim.json.decode, response.body)
+        if ok and data and data.servers then
+          self._server_health = data.servers
+          -- Update known server names in case servers were added/removed
+          local names = {}
+          for name, _ in pairs(data.servers) do
+            table.insert(names, name)
+          end
+          table.insert(names, "bridge")
+          table.sort(names, function(a, b) return #a > #b end)
+          self._known_server_names = names
+        end
+      else
+        log.warn("Health refresh failed: status=%s", response and response.status or "no response")
+      end
+      if callback then
+        callback()
+      end
+    end),
+    on_error = vim.schedule_wrap(function(err)
+      log.warn("Health refresh error: %s", tostring(err))
+      if callback then
+        callback()
+      end
+    end),
+  })
+end
+
+--- Toggle a server's enabled/disabled state
+--- Calls bridge__enable_server or bridge__disable_server, then refreshes
+--- @param server_name string
+--- @param callback? fun(err?: string, result?: string)
+function Client:toggle_server(server_name, callback)
+  -- Determine current state from health data
+  local health = self._server_health or {}
+  local info = health[server_name]
+  if not info then
+    local msg = "Unknown server: " .. server_name
+    log.warn(msg)
+    if callback then
+      callback(msg)
+    end
+    return
+  end
+
+  local tool_name = info.disabled and "bridge__enable_server" or "bridge__disable_server"
+  local action = info.disabled and "Enabling" or "Disabling"
+  log.info("%s server: %s", action, server_name)
+
+  self:call_tool(tool_name, { server_name = server_name }, function(err, result)
+    if err then
+      log.error("Failed to toggle server %s: %s", server_name, tostring(err))
+      if callback then
+        callback(err)
+      end
+      return
+    end
+
+    -- Extract result text from MCP response
+    local result_text = ""
+    if result and result.content then
+      for _, item in ipairs(result.content) do
+        if item.text then
+          result_text = result_text .. item.text
+        end
+      end
+    end
+    log.info("Toggle result: %s", result_text)
+
+    -- Refresh health data first (to get updated disabled status),
+    -- then refresh capabilities (to get updated tool list)
+    self:_refresh_server_health(function()
+      self:refresh_capabilities(function()
+        if callback then
+          callback(nil, result_text)
+        end
+      end)
+    end)
+  end)
 end
 
 --- Call a tool on the bridge

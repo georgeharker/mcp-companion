@@ -20,10 +20,9 @@ function M.setup(schema)
   local state = require("mcp_companion.state")
 
   -- Start bridge when any chat adapter is created.
-  -- Currently blocks briefly to ensure tools are registered before first submit.
-  -- TODO: For HTTP adapters, could use on_before_submit callback instead to
-  -- avoid blocking chat UI. ACP must block in _establish_session regardless
-  -- since session/new requires MCP server list upfront.
+  -- Block briefly to ensure tools are registered before first submit.
+  -- With parallel requests and "healthy" state, this blocks for
+  -- at most the MCP client connect time (~300ms if bridge already up).
   vim.api.nvim_create_autocmd("User", {
     pattern = "CodeCompanionChatAdapter",
     callback = function()
@@ -109,9 +108,9 @@ function M._start_bridge_async()
   local state = require("mcp_companion.state")
   local config = require("mcp_companion.config")
 
-  -- Already connected or connecting
+  -- Already connected, healthy, or connecting
   local bridge_status = state.get().bridge.status
-  if bridge_status == "connected" or bridge_status == "connecting" then
+  if bridge_status == "connected" or bridge_status == "connecting" or bridge_status == "healthy" then
     return
   end
 
@@ -125,33 +124,42 @@ function M._start_bridge_async()
   require("mcp_companion.bridge").start()
 end
 
---- Wait for bridge to be ready (blocking).
---- Call this before operations that need MCP tools.
+--- Wait for bridge to be fully connected (tools registered).
+--- Used by ChatAdapter to ensure tools are available before first submit.
+--- With parallel requests, the healthy→connected gap is ~200ms.
 --- @param timeout_ms? number Maximum time to wait (default 5000)
---- @return boolean success Whether bridge is ready
+--- @return boolean success Whether bridge is connected
 function M._wait_for_bridge(timeout_ms)
   timeout_ms = timeout_ms or 5000
   local state = require("mcp_companion.state")
 
+  local function is_connected()
+    return state.get().bridge.status == "connected"
+  end
+
   -- Already connected
-  if state.get().bridge.status == "connected" then
+  if is_connected() then
     return true
   end
 
   -- Not even started - start it now
-  if state.get().bridge.status ~= "connecting" then
+  local s = state.get().bridge.status
+  if s ~= "connecting" and s ~= "healthy" then
     M._start_bridge_async()
   end
 
-  -- Wait for bridge to become healthy
-  local ok = vim.wait(timeout_ms, function()
-    return state.get().bridge.status == "connected"
-  end, 50)
+  -- Wait for full connect (tools registered)
+  local ok = vim.wait(timeout_ms, is_connected, 50)
 
   if ok then
-    log.info("CC: bridge ready")
+    log.info("CC: bridge connected")
+    -- Register tools synchronously so they're available on this tick.
+    -- The bridge_ready event also triggers _register_all() via vim.schedule,
+    -- but that runs on the next event loop tick — too late for the first
+    -- chat submit.
+    M._register_all()
   else
-    log.warn("CC: bridge did not become ready in %dms", timeout_ms)
+    log.warn("CC: bridge did not connect in %dms", timeout_ms)
   end
 
   return ok
@@ -191,19 +199,22 @@ function M._register_prompts()
 end
 
 --- Build bridge MCP server entry for ACP session/new
+--- Build bridge MCP server entry for ACP session/new.
+--- The bridge URL is deterministic from config — we don't need to wait for
+--- upstream servers or full MCP client connect. The bridge proxies everything.
 --- @param conn table ACP Connection instance (has _agent_info after initialize)
---- @return table|nil bridge_entry MCP server entry or nil if bridge not ready
+--- @return table|nil bridge_entry MCP server entry or nil if no bridge config
 local function build_bridge_entry(conn)
-  local state = require("mcp_companion.state")
-  local bridge_state = state.get().bridge
+  local config = require("mcp_companion.config").get()
 
-  if bridge_state.status ~= "connected" then
+  -- Need bridge config to know host/port
+  if not config.bridge or not config.bridge.config then
     return nil
   end
 
-  local bridge_url = string.format("http://%s:%d/mcp",
-    bridge_state.host or "127.0.0.1",
-    bridge_state.port or 9741)
+  local host = config.bridge.host or "127.0.0.1"
+  local port = config.bridge.port or 9741
+  local bridge_url = string.format("http://%s:%d/mcp", host, port)
 
   -- Check if agent supports HTTP MCP transport
   local caps = conn._agent_info
@@ -246,14 +257,14 @@ function M._patch_acp()
   end
   Connection._mcp_companion_patched = true
 
-  -- Patch connect_and_initialize to start bridge first
+  -- Patch connect_and_initialize to start bridge (non-blocking warm-up)
   local original_connect = Connection.connect_and_initialize
 
   Connection.connect_and_initialize = function(self)
-    -- Ensure bridge is ready before connecting to ACP agent
-    -- ACP requires MCP servers at session/new time, so we must block here
-    -- (bridge likely already started from ChatAdapter event, this just waits)
-    M._wait_for_bridge(10000)
+    -- Kick off bridge start if not already running (non-blocking).
+    -- Bridge entry is injected from config in _establish_session —
+    -- no need to wait for full connect here.
+    M._start_bridge_async()
 
     -- Call original connect_and_initialize
     return original_connect(self)
@@ -263,7 +274,8 @@ function M._patch_acp()
   local original_establish = Connection._establish_session
 
   Connection._establish_session = function(self)
-    -- Build bridge entry (needs _agent_info which is set after initialize)
+    -- Build bridge entry from config (deterministic URL, no need to wait
+    -- for upstream servers — the bridge proxies everything through us)
     local bridge_entry = build_bridge_entry(self)
 
     if bridge_entry then

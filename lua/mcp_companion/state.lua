@@ -5,14 +5,15 @@ local M = {}
 
 --- @class MCPCompanion.ServerInfo
 --- @field name string Server name (namespace prefix)
---- @field status string "connected"|"disconnected"|"error"
+--- @field status string "connected"|"disconnected"|"error"|"disabled"
+--- @field disabled boolean Whether server is disabled (tools unmounted)
 --- @field tools table[] MCP tool definitions
 --- @field resources table[] MCP resource definitions
 --- @field resource_templates table[] MCP resource template definitions
 --- @field prompts table[] MCP prompt definitions
 
 --- @class MCPCompanion.BridgeState
---- @field status string "disconnected"|"connecting"|"connected"|"error"
+--- @field status string "disconnected"|"connecting"|"healthy"|"connected"|"error"
 --- @field port? number
 --- @field pid? number
 --- @field clients? number Number of sharedserver clients

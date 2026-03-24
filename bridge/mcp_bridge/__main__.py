@@ -123,6 +123,19 @@ def main() -> None:
     if args.oauth_token_dir:
         os.environ["MCP_BRIDGE_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
 
+    # Ensure the mcp-bridge logger outputs INFO+ to stderr.
+    # Without this, only WARNING+ would appear because Python's root logger
+    # defaults to WARNING.  uvicorn sets its own loggers to INFO but that
+    # doesn't affect our "mcp-bridge" logger.
+    bridge_logger = logging.getLogger("mcp-bridge")
+    bridge_logger.setLevel(logging.INFO)
+    if not bridge_logger.handlers:
+        stderr_handler = logging.StreamHandler()
+        stderr_handler.setLevel(logging.INFO)
+        stderr_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        bridge_logger.addHandler(stderr_handler)
+        bridge_logger.propagate = False  # avoid duplicate messages via root
+
     # Configure file logging if requested
     if args.log_file:
         import pathlib
@@ -136,6 +149,10 @@ def main() -> None:
         )
         logging.getLogger().addHandler(file_handler)
         logging.getLogger().setLevel(logging.DEBUG)
+        # Also attach to bridge logger (propagate=False means root handler
+        # won't see its messages)
+        bridge_logger.addHandler(file_handler)
+        bridge_logger.setLevel(logging.DEBUG)
         logger.info("Logging to file: %s", log_path)
 
     # Register cleanup handlers

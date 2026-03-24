@@ -50,6 +50,7 @@ function M.start()
   M._check_existing(function(running)
     if running then
       log.info("Bridge already running on port %d, connecting...", _config.bridge.port)
+      state.update("bridge", { status = "healthy" })
       M._create_client()
     elseif pcall(require, "sharedserver") then
       M._start_with_sharedserver()
@@ -221,6 +222,7 @@ function M._wait_and_connect()
             timer:stop()
             timer:close()
             log.info("Bridge healthy on port %d (after %ds)", _config.bridge.port, attempts)
+            state.update("bridge", { status = "healthy" })
             M._create_client()
           end
         end),
