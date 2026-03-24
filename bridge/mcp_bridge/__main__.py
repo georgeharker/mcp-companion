@@ -6,8 +6,10 @@ import logging
 import os
 import signal
 import sys
+import types
 
 import uvicorn
+from starlette.applications import Starlette
 
 from mcp_bridge.server import create_bridge
 from mcp_bridge.sharedserver import cleanup as cleanup_sharedservers
@@ -16,14 +18,14 @@ from mcp_bridge.sharedserver import register_for_cleanup
 logger = logging.getLogger(__name__)
 
 
-def _signal_handler(signum, frame):
+def _signal_handler(signum: int, frame: types.FrameType | None) -> None:
     """Handle termination signals."""
     logger.info("Received signal %d, cleaning up...", signum)
     cleanup_sharedservers()
     sys.exit(0)
 
 
-def create_app():
+def create_app() -> Starlette:
     """Factory function for creating the bridge ASGI app.
 
     Reads config from environment variables set by main().
@@ -105,6 +107,12 @@ def main() -> None:
             "(default: ~/.cache/mcp-companion/oauth-tokens; overrides config)"
         ),
     )
+    parser.add_argument(
+        "--log-file",
+        metavar="PATH",
+        default=None,
+        help="Write logs to this file in addition to stderr (default: none)",
+    )
 
     args = parser.parse_args()
 
@@ -114,6 +122,21 @@ def main() -> None:
         os.environ["MCP_BRIDGE_OAUTH_CACHE"] = str(args.oauth_cache)
     if args.oauth_token_dir:
         os.environ["MCP_BRIDGE_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
+
+    # Configure file logging if requested
+    if args.log_file:
+        import pathlib
+
+        log_path = pathlib.Path(args.log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(file_handler)
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.info("Logging to file: %s", log_path)
 
     # Register cleanup handlers
     atexit.register(cleanup_sharedservers)

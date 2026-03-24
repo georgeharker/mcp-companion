@@ -8,13 +8,18 @@ import logging
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal, overload
 
 import httpx
 import mcp.types as mt
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.server.middleware.error_handling import (
+    ErrorHandlingMiddleware,
+    RetryMiddleware,
+)
 from fastmcp.tools import Tool
 from fastmcp.tools.tool import ToolResult
 from starlette.requests import Request
@@ -206,27 +211,60 @@ class ToolProcessingMiddleware(Middleware):
     ) -> ToolResult:
         """Wrap tool calls with error handling for resilience.
 
-        If a tool call fails due to upstream errors (connection, auth, etc.),
-        return an error message instead of crashing. For OAuth-related errors,
-        clear the cache so the next attempt triggers fresh authentication.
+        Error strategy:
+        - NotFoundError (unknown/disabled tool): re-raised as a protocol error
+          (-32002). This is a client mistake — the tool name is wrong or the
+          server is disabled. The AI should not retry with the same name.
+        - ToolError already raised upstream: re-raised unchanged so FastMCP
+          converts it to CallToolResult(isError=True) correctly.
+        - All other exceptions (connection, auth, rate-limit, etc.): wrapped
+          as ToolError so FastMCP sets isError=True in the response. This is
+          the correct MCP semantics: "the tool ran but something went wrong".
         """
-        # context.message is CallToolRequestParams, which has .name directly
         tool_name = context.message.name if context.message else "unknown"
         try:
             return await call_next(context)
+        except NotFoundError:
+            # Protocol error — wrong tool name or server disabled. Re-raise
+            # so the MCP layer returns a -32002 JSON-RPC error, not a tool result.
+            raise
+        except ToolError:
+            # Already a proper tool error — re-raise unchanged.
+            raise
         except Exception as e:
-            # Extract server name from namespaced tool name (e.g., "github__list_repos" -> "github")
-            server_name = tool_name.split("__")[0] if "__" in tool_name else None
+            # Extract server name by stripping the known namespace prefix.
+            # FastMCP namespaces as "servername_toolname"; longest match wins
+            # to handle server names that are prefixes of each other.
+            server_name: str | None = None
+            if _bridge_config:
+                for sname in sorted(_bridge_config.servers, key=len, reverse=True):
+                    if tool_name.startswith(sname + "_"):
+                        server_name = sname
+                        break
 
-            # Check if this is a stale OAuth error
+            error_str = str(e)
+
+            # Check for rate limiting (429) — transient, caller should retry
+            if (
+                "429" in error_str
+                or "too many requests" in error_str.lower()
+                or "rate limit" in error_str.lower()
+            ):
+                logger.warning("Tool '%s' rate-limited (429): %s", tool_name, e)
+                raise ToolError(
+                    f"Tool '{tool_name}' is temporarily unavailable due to rate limiting "
+                    f"(HTTP 429). Please wait a moment and retry."
+                ) from e
+
+            # Check if this is a stale OAuth error — clear cache so next
+            # attempt triggers fresh authentication
             if server_name and is_stale_client_error(e):
                 logger.warning(
-                    "Tool '%s' failed with stale OAuth error, clearing cache for server '%s': %s",
+                    "Tool '%s' failed with stale OAuth error, clearing cache for '%s': %s",
                     tool_name,
                     server_name,
                     e,
                 )
-                # Clear OAuth cache so next attempt re-authenticates
                 from mcp_bridge.config import OAuthConfig
 
                 token_dir = OAuthConfig().token_dir_path
@@ -234,10 +272,7 @@ class ToolProcessingMiddleware(Middleware):
                 _failed_servers[server_name] = f"OAuth error: {e}"
 
             logger.error("Tool '%s' failed: %s", tool_name, e)
-
-            # Return error as tool result instead of crashing
-            error_msg = f"Error calling tool '{tool_name}': {e}"
-            return ToolResult(content=[mt.TextContent(type="text", text=error_msg)])
+            raise ToolError(f"Error calling tool '{tool_name}': {e}") from e
 
     @staticmethod
     def _to_clean_tool(tool: Tool) -> Tool:
@@ -391,6 +426,26 @@ async def _background_oauth_auth(bridge: FastMCP) -> None:
         await asyncio.sleep(1)
 
 
+@overload
+def create_bridge(
+    config_path: str,
+    *,
+    oauth_cache_tokens: bool | None = ...,
+    oauth_token_dir: str | None = ...,
+    return_ss_manager: Literal[True],
+) -> tuple[FastMCP, SharedServerManager]: ...
+
+
+@overload
+def create_bridge(
+    config_path: str,
+    *,
+    oauth_cache_tokens: bool | None = ...,
+    oauth_token_dir: str | None = ...,
+    return_ss_manager: Literal[False] = ...,
+) -> FastMCP: ...
+
+
 def create_bridge(
     config_path: str,
     *,
@@ -459,7 +514,21 @@ def create_bridge(
         name="mcp-bridge",
         instructions="MCP Bridge — proxies multiple MCP servers through a single endpoint.",
         dereference_schemas=False,  # Disabled: circular $ref causes infinite recursion
-        middleware=[ToolProcessingMiddleware()],  # Caching, filtering, sanitization, error handling
+        middleware=[
+            # Outermost: catch-all safety net for any unhandled exception
+            ErrorHandlingMiddleware(
+                logger=logger,
+                include_traceback=True,
+            ),
+            # Middle: retry transient upstream failures with exponential backoff
+            RetryMiddleware(
+                max_retries=2,
+                retry_exceptions=(ConnectionError, TimeoutError),
+                logger=logger,
+            ),
+            # Innermost: caching, filtering, sanitization, domain error handling
+            ToolProcessingMiddleware(),
+        ],
         lifespan=_lifespan,
     )
 

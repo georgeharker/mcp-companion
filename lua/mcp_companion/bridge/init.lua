@@ -85,6 +85,10 @@ local function _bridge_cmd()
     "--port", tostring(_config.bridge.port),
     "--host", _config.bridge.host or "127.0.0.1",
   }
+  if _config.bridge.log_file then
+    table.insert(cmd, "--log-file")
+    table.insert(cmd, _config.bridge.log_file)
+  end
   return cmd
 end
 
