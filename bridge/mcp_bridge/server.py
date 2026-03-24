@@ -16,6 +16,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool
+from fastmcp.tools.tool import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -201,11 +202,8 @@ class ToolProcessingMiddleware(Middleware):
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
-        call_next: CallNext[
-            mt.CallToolRequestParams,
-            Sequence[mt.TextContent | mt.ImageContent | mt.AudioContent | mt.EmbeddedResource],
-        ],
-    ) -> Sequence[mt.TextContent | mt.ImageContent | mt.AudioContent | mt.EmbeddedResource]:
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
         """Wrap tool calls with error handling for resilience.
 
         If a tool call fails due to upstream errors (connection, auth, etc.),
@@ -239,7 +237,7 @@ class ToolProcessingMiddleware(Middleware):
 
             # Return error as tool result instead of crashing
             error_msg = f"Error calling tool '{tool_name}': {e}"
-            return [mt.TextContent(type="text", text=error_msg)]
+            return ToolResult(content=[mt.TextContent(type="text", text=error_msg)])
 
     @staticmethod
     def _to_clean_tool(tool: Tool) -> Tool:
