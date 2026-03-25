@@ -83,6 +83,7 @@ local _lines = {}
 --- @param action? function
 --- @param server_name? string
 local function add_line(text, hl, action, server_name)
+  text = text:gsub("\n", " ") -- nvim_buf_set_lines forbids embedded newlines
   local highlights = {}
   if hl then
     table.insert(highlights, { hl, 0, #text })
@@ -99,7 +100,7 @@ local function add_segments(segments, action, server_name)
   local highlights = {}
   for _, seg in ipairs(segments) do
     local start = #text
-    text = text .. seg[1]
+    text = text .. seg[1]:gsub("\n", " ")
     if seg[2] then
       table.insert(highlights, { seg[2], start, #text })
     end
