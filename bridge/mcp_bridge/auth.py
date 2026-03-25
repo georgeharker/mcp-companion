@@ -80,23 +80,21 @@ def _get_or_create_encryption_key(token_dir: Path) -> bytes:
     )
 
 
-def create_encrypted_store(token_dir: Path, server_name: str) -> AsyncKeyValue:
+def create_encrypted_store(storage_dir: Path) -> AsyncKeyValue:
     """Create an encrypted file-based key-value store for a server.
 
     Uses FastMCP's FileTreeStore wrapped with FernetEncryptionWrapper.
-    Each server gets its own subdirectory under token_dir.
 
     Args:
-        token_dir: Base directory for token storage.
-        server_name: Server name (used as subdirectory).
+        storage_dir: Directory for this server's token storage.
+            Caller is responsible for constructing the correct path
+            (e.g. ``token_dir / server_name``).
 
     Returns:
         AsyncKeyValue store with encryption.
     """
-    encryption_key = _get_or_create_encryption_key(token_dir)
+    encryption_key = _get_or_create_encryption_key(storage_dir.parent)
 
-    # Each server gets its own directory
-    storage_dir = token_dir / server_name
     storage_dir.mkdir(parents=True, exist_ok=True)
 
     file_store = FileTreeStore(
@@ -238,11 +236,11 @@ def _build_oauth(
 
     storage: AsyncKeyValue | None = None
     if cache_tokens:
-        storage = create_encrypted_store(base_dir, server_name)
+        storage = create_encrypted_store(base_dir)
         logger.info(
             "Configuring OAuth for server '%s' with encrypted disk token cache at %s",
             server_name,
-            base_dir / server_name,
+            base_dir,
         )
     else:
         logger.info(
@@ -259,6 +257,26 @@ def _build_oauth(
         client_secret=client_secret,
         client_metadata_url=client_metadata_url,
     )
+
+
+def has_cached_oauth_token(
+    server_name: str,
+    token_dir: Path | None = None,
+) -> bool:
+    """Check whether *server_name* has an OAuth token cached on disk.
+
+    This is a **filesystem-level** check — it looks for any non-empty files
+    inside the server's token directory.  It avoids touching private FastMCP
+    internals so it's safe against upstream changes.
+
+    Returns ``True`` when at least one token file exists (we don't validate
+    expiry or encryption — the OAuth flow handles refresh).
+    """
+    base_dir = (token_dir or _DEFAULT_TOKEN_DIR) / server_name
+    if not base_dir.is_dir():
+        return False
+    # Any non-empty file inside the token dir counts
+    return any(f.is_file() and f.stat().st_size > 0 for f in base_dir.rglob("*"))
 
 
 def clear_oauth_cache(

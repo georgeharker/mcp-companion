@@ -29,6 +29,10 @@ def register_meta_tools(
     async def bridge__enable_server(server_name: str) -> str:
         """Enable a disabled MCP server and mount it on the bridge.
 
+        This is also the manual retry path for servers that failed
+        authentication at startup.  It resets any auth-failure flag
+        and attempts a fresh connection.
+
         Args:
             server_name: Name of the server to enable.
 
@@ -38,38 +42,28 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
         srv = config.servers[server_name]
-        if not srv.disabled:
-            return f"Server '{server_name}' is already enabled"
 
+        # Allow re-enable even if not disabled (manual retry for auth-failed).
         srv.disabled = False
 
-        # Try to dynamically mount the proxy
+        # Reset auth-failure so ConnectionManager will attempt reconnect.
+        if conn_manager.is_auth_failed(server_name):
+            conn_manager.reset_auth_failure(server_name)
+
         try:
-            from mcp_bridge.auth import build_auth
             from mcp_bridge.server import (
                 _create_server_proxy,
-                _has_cached_token,
-                _needs_oauth,
                 invalidate_tool_cache,
             )
 
-            if _needs_oauth(srv):
-                auth = build_auth(
-                    server_name,
-                    auth_config=srv.auth,
-                    server_url=srv.url,
-                    token_dir=config.oauth.token_dir_path,
-                    cache_tokens=config.oauth.cache_tokens,
-                )
-                if auth and not await _has_cached_token(auth):
-                    return (
-                        f"Server '{server_name}' enabled but requires OAuth authentication. "
-                        "Background auth will be attempted."
-                    )
-
             # Open persistent connection for HTTP/SSE servers
             if conn_manager.is_http_server(srv):
-                await conn_manager.connect(config, server_name, srv)
+                if conn_manager.has_connection(server_name):
+                    # Already registered — just reconnect
+                    await conn_manager.connect(config, server_name, srv)
+                else:
+                    conn_manager.register(config, server_name, srv)
+                    await conn_manager.connect(config, server_name, srv)
 
             proxy = _create_server_proxy(config, server_name, srv)
             bridge.mount(proxy, namespace=server_name)

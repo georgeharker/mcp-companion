@@ -15,6 +15,17 @@ Design
   reconnection with exponential back-off.
 * Stdio servers are unaffected — they use subprocess pipes which are
   already persistent.
+
+Auth-failure semantics
+----------------------
+* OAuth is attempted **once** per server during ``connect_all()``.
+* If OAuth fails the connection is marked ``_auth_failed`` and the factory
+  raises ``AuthenticationError`` for all subsequent calls — **no new
+  ``OAuth`` instances are created**, no browser windows open.
+* The health-check monitor skips auth-failed connections.
+* The only recovery path is ``bridge__enable_server`` which calls
+  ``reset_auth_failure()`` and then ``connect()`` for a single fresh
+  attempt.
 """
 
 from __future__ import annotations
@@ -23,10 +34,12 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Callable
 
 import httpx
 from fastmcp import Client
+from fastmcp.client.transports.http import StreamableHttpTransport
+from fastmcp.client.transports.sse import SSETransport
 
 from mcp_bridge.auth import build_auth
 from mcp_bridge.config import (
@@ -39,6 +52,9 @@ from mcp_bridge.config import (
 
 logger = logging.getLogger("mcp-bridge")
 
+# The only transport types this module creates.
+HttpClient = Client[StreamableHttpTransport | SSETransport]
+
 # ---------------------------------------------------------------------------
 # Reconnection tuning
 # ---------------------------------------------------------------------------
@@ -46,6 +62,22 @@ _INITIAL_BACKOFF = 2.0  # seconds
 _MAX_BACKOFF = 60.0
 _BACKOFF_MULTIPLIER = 2.0
 _HEALTH_CHECK_INTERVAL = 30.0  # seconds between keepalive pings
+
+# How long the factory waits for an in-flight connect before giving up.
+_FACTORY_WAIT_TIMEOUT = 60.0  # seconds
+
+
+# ---------------------------------------------------------------------------
+# Custom exception so the bridge can distinguish auth errors from transient
+# connection failures.  RetryMiddleware should **not** retry these.
+# ---------------------------------------------------------------------------
+class AuthenticationError(Exception):
+    """Raised when a server is disabled due to an authentication failure.
+
+    This is intentionally *not* a subclass of ``ConnectionError`` so that
+    ``RetryMiddleware(retry_exceptions=(ConnectionError, TimeoutError))``
+    does not catch it.
+    """
 
 
 @dataclass
@@ -56,13 +88,22 @@ class _ManagedConnection:
     config: BridgeConfig
     srv: ServerConfig
     # Mutable client reference — the factory closure reads client_ref[0]
-    client_ref: list[Client | None] = field(default_factory=lambda: [None])
+    client_ref: list[HttpClient | None] = field(default_factory=lambda: [None])
     # Exit stack that owns the ``async with client:`` context
     stack: AsyncExitStack = field(default_factory=AsyncExitStack)
     # Background reconnection / health-check task
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
     # Current back-off delay (reset on successful connect)
     _backoff: float = field(default=_INITIAL_BACKOFF, repr=False)
+    # Set when the connection failed due to an auth error.
+    # When True the monitor stops retrying and get_client_factory raises
+    # instead of creating a new OAuth client.  Cleared by explicit
+    # ``reset_auth_failure()``.
+    _auth_failed: bool = field(default=False, repr=False)
+    _auth_error_msg: str = field(default="", repr=False)
+    # Signalled once the first connect attempt finishes (success or failure).
+    # The factory waits on this so it never falls back to creating new OAuth.
+    _ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
 
 class ConnectionManager:
@@ -71,9 +112,10 @@ class ConnectionManager:
     Typical lifecycle::
 
         mgr = ConnectionManager()
-        mgr.start_all(config)            # non-blocking — kicks off background tasks
+        mgr.register(config, name, srv)      # pre-register
+        await mgr.connect_all(config)         # blocks until all resolved
         # ... bridge runs ...
-        await mgr.close_all()            # called in lifespan finally
+        await mgr.close_all()                 # called in lifespan finally
 
     The optional *on_connected* callback is invoked (from a background task)
     whenever a persistent connection transitions from down → up.  The bridge
@@ -81,7 +123,7 @@ class ConnectionManager:
     up the newly-connected server's tools.
     """
 
-    def __init__(self, on_connected: Any | None = None) -> None:
+    def __init__(self, on_connected: Callable[[str], None] | None = None) -> None:
         self._connections: dict[str, _ManagedConnection] = {}
         self._on_connected = on_connected
         self._background_tasks: list[asyncio.Task[None]] = []
@@ -98,28 +140,61 @@ class ConnectionManager:
     def has_connection(self, name: str) -> bool:
         return name in self._connections
 
-    def get_client_factory(self, name: str) -> Any:
+    def get_client_factory(self, name: str) -> Callable[[], HttpClient]:
         """Return a zero-arg callable that yields the current connected Client.
 
-        If the connection is down (reconnecting), a *disconnected* client is
-        returned so the call falls through to per-call connect/disconnect
-        (graceful degradation instead of hard failure).
+        Semantics:
+        - If ``_auth_failed`` → raise ``AuthenticationError`` (not retried).
+        - If the persistent client is connected → return it.
+        - If a connect is still in flight → **wait** for it (up to timeout).
+        - If the connection is down after waiting → raise ``ConnectionError``.
+
+        This factory **never** creates a new ``Client`` or ``OAuth`` instance.
+        Only ``_open()`` does that — ensuring exactly one OAuth flow per
+        connect attempt.
         """
         conn = self._connections[name]
 
-        def _factory() -> Client:
+        def _factory() -> HttpClient:
+            # Auth-failed: permanent error until manual reset
+            if conn._auth_failed:
+                raise AuthenticationError(
+                    f"Server '{name}' is disabled due to an authentication error: "
+                    f"{conn._auth_error_msg}. "
+                    "Use bridge__enable_server to retry."
+                )
+
             client = conn.client_ref[0]
             if client is not None and client.is_connected():
                 return client
-            # Fallback: return a disconnected copy so ProxyTool.run() does
-            # its own connect/disconnect for this one call.
-            logger.debug(
-                "Persistent connection for '%s' is down — falling back to per-call connect",
-                name,
+
+            # Connection is not ready yet — we cannot create a fallback
+            # because that would spin up a new OAuth instance.
+            if not conn._ready.is_set():
+                raise ConnectionError(
+                    f"Server '{name}' is still connecting. Please retry in a moment."
+                )
+
+            # Ready was set but client is gone (reconnecting after health-check).
+            raise ConnectionError(
+                f"Server '{name}' persistent connection is down. It will reconnect automatically."
             )
-            return _make_disconnected_client(conn.config, name, conn.srv)
 
         return _factory
+
+    def is_auth_failed(self, name: str) -> bool:
+        """Return True if *name* is paused due to an authentication error."""
+        conn = self._connections.get(name)
+        return conn is not None and conn._auth_failed
+
+    def reset_auth_failure(self, name: str) -> None:
+        """Clear the auth-failure flag so the server can be retried."""
+        conn = self._connections.get(name)
+        if conn is not None:
+            conn._auth_failed = False
+            conn._auth_error_msg = ""
+            # Reset ready so the next connect() can signal it again
+            conn._ready = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Connect / disconnect
@@ -130,8 +205,8 @@ class ConnectionManager:
 
         This creates the internal bookkeeping entry so that
         ``has_connection()`` returns True and ``get_client_factory()`` can
-        be called.  The factory will fall back to per-call connect until
-        ``connect()`` or ``connect_all()`` actually opens the session.
+        be called.  The factory will raise until ``connect()`` or
+        ``connect_all()`` finishes the first attempt.
         """
         if name in self._connections:
             return
@@ -150,9 +225,13 @@ class ConnectionManager:
             self._connections[name] = conn
         elif conn.client_ref[0] is not None and conn.client_ref[0].is_connected():
             logger.debug("Connection for '%s' is already open — skipping", name)
+            conn._ready.set()
             return
 
         await self._open(conn)
+
+        # Signal that the first attempt is done (success or failure)
+        conn._ready.set()
 
         # Start the background health/reconnect monitor
         if conn._monitor_task is None or conn._monitor_task.done():
@@ -163,24 +242,30 @@ class ConnectionManager:
     async def connect_all(self, config: BridgeConfig) -> None:
         """Open persistent connections for every registered HTTP/SSE server.
 
-        Connections are opened concurrently but this method does **not**
-        block on them.  Each server connects in a background task so the
-        bridge lifespan can ``yield`` immediately and start serving
-        requests.  The factory graceful-degradation handles any early
-        requests before the persistent connection is ready.
+        Connections are opened **concurrently** and this method **blocks**
+        until every server has either connected or failed.  This ensures
+        that by the time the bridge starts serving requests, every factory
+        will return a connected client or a clear error — never a "still
+        connecting" race.
         """
+        tasks: list[asyncio.Task[None]] = []
         for name, conn in self._connections.items():
             task = asyncio.create_task(
                 self._connect_one(config, name, conn.srv),
                 name=f"conn-open-{name}",
             )
+            tasks.append(task)
             self._background_tasks.append(task)
-        if self._background_tasks:
+
+        if tasks:
             logger.info(
-                "Opening persistent connections in background for %d HTTP server(s): %s",
-                len(self._background_tasks),
+                "Opening persistent connections for %d HTTP server(s): %s",
+                len(tasks),
                 [n for n in self._connections],
             )
+            # Wait for all first-connect attempts to resolve
+            await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info("All persistent connection attempts resolved")
 
     async def _connect_one(self, config: BridgeConfig, name: str, srv: ServerConfig) -> None:
         """Background wrapper around ``connect`` — logs but never raises."""
@@ -188,6 +273,10 @@ class ConnectionManager:
             await self.connect(config, name, srv)
         except Exception as e:
             logger.warning("Background connect for '%s' failed: %s", name, e)
+            # Ensure ready is set even on unexpected errors
+            conn = self._connections.get(name)
+            if conn is not None:
+                conn._ready.set()
 
     async def disconnect(self, name: str) -> None:
         """Tear down the persistent connection for *name*."""
@@ -219,13 +308,21 @@ class ConnectionManager:
     # ------------------------------------------------------------------
 
     async def _open(self, conn: _ManagedConnection) -> None:
-        """Open the ``async with client:`` context and store the live client."""
+        """Open the ``async with client:`` context and store the live client.
+
+        This is the **only** place that creates a ``Client`` (and therefore
+        the only place that creates an ``OAuth`` instance).  All other paths
+        wait for or reuse the result.
+        """
         try:
             client = _make_disconnected_client(conn.config, conn.name, conn.srv)
             # Enter the async-with context — this starts the session runner
+            # and (for OAuth servers) triggers the auth flow.
             await conn.stack.enter_async_context(client)
             conn.client_ref[0] = client
             conn._backoff = _INITIAL_BACKOFF
+            conn._auth_failed = False
+            conn._auth_error_msg = ""
             logger.info("Persistent connection opened: %s", conn.name)
             # Notify the bridge so it can invalidate the tool cache
             if self._on_connected:
@@ -236,6 +333,14 @@ class ConnectionManager:
         except Exception as e:
             logger.warning("Failed to open persistent connection for '%s': %s", conn.name, e)
             conn.client_ref[0] = None
+            if _is_auth_error(e):
+                conn._auth_failed = True
+                conn._auth_error_msg = str(e)
+                logger.warning(
+                    "Auth failure for '%s' — connection disabled until manual retry: %s",
+                    conn.name,
+                    e,
+                )
 
     async def _teardown(self, conn: _ManagedConnection) -> None:
         """Cancel the monitor and close the exit stack."""
@@ -276,6 +381,10 @@ class ConnectionManager:
             while True:
                 await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
 
+                # Don't retry auth-failed connections
+                if conn._auth_failed:
+                    continue
+
                 client = conn.client_ref[0]
                 if client is None or not client.is_connected():
                     logger.warning("Connection to '%s' is down — reconnecting", conn.name)
@@ -293,20 +402,46 @@ class ConnectionManager:
 
 
 # ---------------------------------------------------------------------------
-# Module-level helper
+# Module-level helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_disconnected_client(config: BridgeConfig, name: str, srv: ServerConfig) -> Client:
+def _is_auth_error(exc: BaseException) -> bool:
+    """Return True if *exc* is an OAuth / authentication failure.
+
+    Checks concrete exception types from the MCP SDK and FastMCP rather than
+    fragile substring matching.  Falls back to ``httpx.HTTPStatusError`` with
+    a 401/403 status code for transport-level auth rejections.
+    """
+    from fastmcp.client.auth.oauth import ClientNotFoundError
+    from mcp.client.auth.exceptions import (
+        OAuthFlowError,
+    )  # covers OAuthTokenError, OAuthRegistrationError
+
+    if isinstance(exc, (OAuthFlowError, ClientNotFoundError)):
+        return True
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (401, 403)
+
+    return False
+
+
+def _make_disconnected_client(
+    config: BridgeConfig,
+    name: str,
+    srv: ServerConfig,
+) -> HttpClient:
     """Create a disconnected ``Client`` for the given HTTP/SSE server.
 
-    Ensures that both ``auth`` (httpx.Auth) and static ``headers`` from the
-    server config are applied.  The ``headers`` field is how servers like
+    Ensures that both ``auth`` (``httpx.Auth``) and static ``headers`` from
+    the server config are applied.  The ``headers`` field is how servers like
     GitHub Copilot MCP receive their Bearer token when ``auth`` is not set.
-    """
-    from fastmcp.client.transports.http import StreamableHttpTransport
-    from fastmcp.client.transports.sse import SSETransport
 
+    Only called from ``_open()``.  The factory closure returned by
+    ``get_client_factory()`` never calls this — it either returns the
+    already-connected client or raises.
+    """
     auth: httpx.Auth | None = build_auth(
         name,
         auth_config=srv.auth,
@@ -315,24 +450,18 @@ def _make_disconnected_client(config: BridgeConfig, name: str, srv: ServerConfig
         cache_tokens=config.oauth.cache_tokens,
     )
 
-    url = _interpolate_str(srv.url) if srv.url else ""
+    url: str = _interpolate_str(srv.url) if srv.url else ""
+    headers: dict[str, str] = _interpolate_dict(srv.headers) if srv.headers else {}
 
-    # Resolve env-var references in headers (e.g. ${GITHUB_TOKEN})
-    headers = _interpolate_dict(srv.headers) if srv.headers else {}
+    # Always construct the transport explicitly so the return type is
+    # ``Client[StreamableHttpTransport | SSETransport]`` — not the wide
+    # union that ``Client(str)`` produces.
+    transport: StreamableHttpTransport | SSETransport
+    if srv.transport == Transport.SSE:
+        transport = SSETransport(url=url, headers=headers)
+    else:
+        transport = StreamableHttpTransport(url=url, headers=headers)
 
-    if headers:
-        # Create transport explicitly so we can pass headers.
-        # Client.__init__ doesn't accept headers — they must go on the
-        # transport.  We pass auth to Client so it calls _set_auth()
-        # on the transport for us (avoids double-setting).
-        if srv.transport == Transport.SSE:
-            transport: StreamableHttpTransport | SSETransport = SSETransport(
-                url=url,
-                headers=headers,
-            )
-        else:
-            transport = StreamableHttpTransport(url=url, headers=headers)
+    if auth is not None:
         return Client(transport, auth=auth)
-
-    # No custom headers — plain URL + optional auth
-    return Client(url, auth=auth) if auth else Client(url)
+    return Client(transport)

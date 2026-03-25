@@ -42,7 +42,7 @@ from mcp_bridge.config import (
     _interpolate_dict,  # noqa: PLC2701
     _interpolate_str,  # noqa: PLC2701
 )
-from mcp_bridge.connections import ConnectionManager
+from mcp_bridge.connections import AuthenticationError, ConnectionManager
 from mcp_bridge.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-bridge")
@@ -300,6 +300,15 @@ class ToolProcessingMiddleware(Middleware):
         except ToolError:
             # Already a proper tool error — re-raise unchanged.
             raise
+        except AuthenticationError as e:
+            # Auth-failed servers: convert to ToolError immediately.
+            # This must NOT propagate as a generic exception — RetryMiddleware
+            # would catch it and retry (creating new OAuth instances).
+            logger.warning("Tool '%s' blocked by auth failure: %s", tool_name, e)
+            raise ToolError(
+                f"Tool '{tool_name}' is unavailable — the server's authentication "
+                f"failed. Use bridge__enable_server to retry authentication."
+            ) from e
         except Exception as e:
             # Extract server name by stripping the known namespace prefix.
             # FastMCP namespaces as "servername_toolname"; longest match wins
@@ -426,24 +435,19 @@ def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> 
 
     if auth is not None and srv.url:
         # Auth requires a Client so we can inject httpx.Auth into the transport.
-        # If the server also has custom headers, create the transport explicitly
-        # so headers are not lost.
+        # Always construct transport explicitly for a precise return type.
+        from fastmcp.client.transports.http import StreamableHttpTransport
+        from fastmcp.client.transports.sse import SSETransport
+
         url = _interpolate_str(srv.url)
         headers = _interpolate_dict(srv.headers) if srv.headers else {}
-        if headers:
-            from fastmcp.client.transports.http import StreamableHttpTransport
-            from fastmcp.client.transports.sse import SSETransport
 
-            if srv.transport == Transport.SSE:
-                transport: StreamableHttpTransport | SSETransport = SSETransport(
-                    url=url,
-                    headers=headers,
-                )
-            else:
-                transport = StreamableHttpTransport(url=url, headers=headers)
-            client = Client(transport, auth=auth)
+        transport: StreamableHttpTransport | SSETransport
+        if srv.transport == Transport.SSE:
+            transport = SSETransport(url=url, headers=headers)
         else:
-            client = Client(url, auth=auth)
+            transport = StreamableHttpTransport(url=url, headers=headers)
+        client = Client(transport, auth=auth)
         return create_proxy(client, name=name)
 
     # No auth — use the standard config-dict path (preserves headers)
@@ -455,85 +459,9 @@ def _needs_oauth(srv: ServerConfig) -> bool:
     """Check if a server requires OAuth authentication."""
     if srv.auth == "oauth":
         return True
-    if isinstance(srv.auth, dict) and srv.auth.get("type") == "oauth":
+    if isinstance(srv.auth, dict) and "oauth" in srv.auth:
         return True
     return False
-
-
-async def _has_cached_token(auth: httpx.Auth) -> bool:
-    """Check if an OAuth auth object has a cached token.
-
-    Uses the same ``TokenStorageAdapter`` that the OAuth flow reads/writes,
-    so we query the exact same encrypted file store — no path guessing.
-
-    Returns ``True`` when a token entry is found (we don't validate expiry;
-    the OAuth flow handles refresh).
-    """
-    from fastmcp.client.auth.oauth import OAuth
-
-    # NOTE: auth._bound is a private fastmcp attr that indicates the OAuth
-    # object has been associated with a server URL.  Pin fastmcp version or
-    # verify on upgrade.
-    if not isinstance(auth, OAuth) or not auth._bound:
-        return False
-    try:
-        token = await auth.token_storage_adapter.get_tokens()
-        return token is not None
-    except Exception:
-        logger.debug("Could not read cached token (will re-auth)", exc_info=True)
-        return False
-
-
-# Track pending OAuth servers for background auth
-_pending_oauth_servers: dict[str, tuple[BridgeConfig, str, ServerConfig, httpx.Auth]] = {}
-_oauth_task: asyncio.Task[None] | None = None
-
-
-async def _background_oauth_auth(bridge: FastMCP) -> None:
-    """Background task to authenticate OAuth servers and mount them when ready."""
-    global _pending_oauth_servers
-
-    while _pending_oauth_servers:
-        # Process one server at a time to avoid concurrent OAuth flows
-        name, (config, name, srv, auth) = next(iter(_pending_oauth_servers.items()))
-
-        logger.info("Starting background OAuth for server: %s", name)
-        try:
-            # Create client with OAuth auth and connect to trigger the flow
-            # This will open browser for user authentication
-            url = _interpolate_str(srv.url) if srv.url else None
-            if not url:
-                logger.warning("No URL for OAuth server '%s'", name)
-                del _pending_oauth_servers[name]
-                continue
-
-            async with Client(url, auth=auth) as client:
-                # List tools to ensure we're fully authenticated
-                await client.list_tools()
-
-            # If we get here, auth succeeded - create and mount the proxy
-            # Register with ConnectionManager for persistent connection
-            if _conn_manager and _conn_manager.is_http_server(srv):
-                _conn_manager.register(config, name, srv)
-                await _conn_manager.connect(config, name, srv)
-            proxy = _create_server_proxy(config, name, srv)
-            bridge.mount(proxy, namespace=name)
-            logger.info("Background OAuth succeeded, mounted server: %s", name)
-
-            # Invalidate tool cache so next tools/list includes this server.
-            # This also sends ToolListChangedNotification to connected clients.
-            invalidate_tool_cache()
-
-            # Remove from pending
-            del _pending_oauth_servers[name]
-
-        except Exception as e:
-            logger.warning("Background OAuth failed for server '%s': %s", name, e)
-            # Remove from pending - will retry on next bridge restart
-            del _pending_oauth_servers[name]
-
-        # Small delay between servers
-        await asyncio.sleep(1)
 
 
 @overload
@@ -568,9 +496,18 @@ def create_bridge(
     Reads servers.json, creates a proxy for each enabled server,
     mounts them under namespaced prefixes, and adds meta-tools + health.
 
-    OAuth servers without cached tokens are skipped at startup and queued
-    for background authentication. When auth completes, they are mounted
-    and the tool cache is invalidated.
+    Startup semantics for HTTP/OAuth servers:
+
+    * Every enabled server is **mounted immediately** (proxy created).
+    * HTTP/SSE servers are registered with the ``ConnectionManager``.
+    * ``connect_all()`` opens persistent connections and **blocks** until
+      every server has either connected or failed.  This guarantees that
+      by the time the bridge serves its first request, no OAuth race
+      conditions exist.
+    * If an OAuth server fails authentication, it is marked
+      ``_auth_failed`` and the factory raises ``AuthenticationError``
+      (not retried by ``RetryMiddleware``).
+    * The only way to retry is ``bridge__enable_server`` (manual toggle).
 
     CLI overrides (when provided) take precedence over the ``oauth`` section
     of the config file:
@@ -581,7 +518,7 @@ def create_bridge(
     If *return_ss_manager* is True, returns a tuple of (bridge, ss_manager)
     so the caller can explicitly call stop_all() on shutdown.
     """
-    global _pending_oauth_servers, _oauth_task, _bridge_config
+    global _bridge_config
     global _conn_manager
 
     config = BridgeConfig.load(config_path)
@@ -598,35 +535,18 @@ def create_bridge(
         on_connected=lambda name: invalidate_tool_cache(),
     )
     _conn_manager = conn_manager
-    _pending_oauth_servers = {}
 
     @asynccontextmanager
     async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
-        global _oauth_task
         await ss_manager.start_all()
 
-        # Mount each enabled server, checking OAuth tokens asynchronously
+        # Mount every enabled server.  OAuth servers are mounted even if
+        # they don't have a cached token — the persistent connection attempt
+        # in connect_all() (below) handles the single auth flow.  If it
+        # fails, ConnectionManager marks _auth_failed and the factory
+        # raises AuthenticationError for all subsequent calls.
         enabled = config.get_enabled_servers()
         for name, srv in enabled.items():
-            if _needs_oauth(srv):
-                auth = build_auth(
-                    name,
-                    auth_config=srv.auth,
-                    server_url=srv.url,
-                    token_dir=config.oauth.token_dir_path,
-                    cache_tokens=config.oauth.cache_tokens,
-                )
-                if auth is None:
-                    logger.warning("No auth built for OAuth server '%s'", name)
-                    continue
-                if not await _has_cached_token(auth):
-                    logger.info(
-                        "OAuth server '%s' has no cached token - deferring to background auth",
-                        name,
-                    )
-                    _pending_oauth_servers[name] = (config, name, srv, auth)
-                    continue
-
             # Pre-register HTTP/SSE servers for persistent connections.
             if conn_manager.is_http_server(srv):
                 conn_manager.register(config, name, srv)
@@ -638,27 +558,17 @@ def create_bridge(
             except Exception:
                 logger.exception("Failed to mount server '%s'", name)
 
-        # Open persistent connections to HTTP/SSE upstreams
+        # Open persistent connections to HTTP/SSE upstreams.
+        # This BLOCKS until every server has connected or failed.
+        # OAuth servers get exactly one auth attempt here.  If it fails
+        # the connection is marked _auth_failed — no retry until manual
+        # toggle via bridge__enable_server.
         await conn_manager.connect_all(config)
-
-        # Start background OAuth task if there are pending servers
-        if _pending_oauth_servers:
-            logger.info(
-                "Starting background OAuth for %d servers: %s",
-                len(_pending_oauth_servers),
-                list(_pending_oauth_servers.keys()),
-            )
-            _oauth_task = asyncio.create_task(_background_oauth_auth(server))
+        logger.info("All connection attempts resolved — bridge is ready")
 
         try:
             yield
         finally:
-            if _oauth_task and not _oauth_task.done():
-                _oauth_task.cancel()
-                try:
-                    await _oauth_task
-                except asyncio.CancelledError:
-                    pass
             await conn_manager.close_all()
             await ss_manager.stop_all()
 
@@ -695,11 +605,12 @@ def create_bridge(
         server_statuses: dict[str, ServerStatusInfo] = {
             name: config.get_server_status(name) for name in config.servers
         }
+        auth_failed = [n for n in conn_manager._connections if conn_manager.is_auth_failed(n)]
         response = HealthResponse(
             status="ok",
             servers=server_statuses,
             config_path=config.config_path,
-            pending_oauth=list(_pending_oauth_servers.keys()),
+            pending_oauth=auth_failed,
         )
         return JSONResponse(response.model_dump(mode="json"))
 

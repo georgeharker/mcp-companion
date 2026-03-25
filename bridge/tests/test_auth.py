@@ -22,7 +22,7 @@ class TestEncryptedStore:
 
     @pytest.fixture
     def store(self, tmp_path: Path):
-        return create_encrypted_store(tmp_path, "test-server")
+        return create_encrypted_store(tmp_path / "test-server")
 
     @pytest.mark.anyio
     async def test_get_missing_key(self, store) -> None:
@@ -64,8 +64,8 @@ class TestEncryptedStore:
     def test_derives_encryption_key_from_machine_id(self, tmp_path: Path) -> None:
         """Encryption key is derived deterministically from machine ID + username."""
         # Create two stores - they should use the same derived key
-        store1 = create_encrypted_store(tmp_path, "srv1")
-        store2 = create_encrypted_store(tmp_path, "srv2")
+        store1 = create_encrypted_store(tmp_path / "srv1")
+        store2 = create_encrypted_store(tmp_path / "srv2")
         # No .key file should be created (key is derived, not stored)
         key_file = tmp_path / ".key"
         assert not key_file.exists()
