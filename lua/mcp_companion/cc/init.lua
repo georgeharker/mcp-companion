@@ -23,10 +23,12 @@ function M.setup(schema)
   -- Block briefly to ensure tools are registered before first submit.
   -- With parallel requests and "healthy" state, this blocks for
   -- at most the MCP client connect time (~300ms if bridge already up).
+  -- Use a generous timeout (30s) to accommodate OAuth browser flows on first
+  -- connection — the wait resolves immediately once the bridge is healthy.
   vim.api.nvim_create_autocmd("User", {
     pattern = "CodeCompanionChatAdapter",
     callback = function()
-      M._wait_for_bridge(5000)
+      M._wait_for_bridge(30000)
     end,
   })
 

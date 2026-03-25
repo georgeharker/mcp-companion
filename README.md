@@ -281,6 +281,7 @@ When `client_id` is provided, dynamic client registration is skipped.
 | `scopes` | `string\|string[]` | — | OAuth scopes to request |
 | `client_metadata_url` | `string` | — | CIMD URL (alternative to dynamic registration) |
 | `cache_tokens` | `boolean` | `true` | Persist tokens to disk for this server (overrides global setting) |
+| `callback_port` | `integer` | — | Local port for the OAuth redirect callback (e.g. `9876`). Required when the auth provider validates redirect URIs strictly (Google, GitHub, etc.) — must match the URI registered in your OAuth app. |
 
 ### OAuth token caching
 
@@ -330,6 +331,105 @@ python -m mcp_bridge --config servers.json --oauth-cache
 ```
 
 Priority order (highest to lowest): CLI flag → config `oauth` section → built-in default.
+
+### External OAuth provider mode
+
+Some MCP servers support an "external OAuth provider" mode where the server
+does **not** run its own OAuth flow — it simply validates bearer tokens issued
+by the upstream identity provider (e.g. Google). In this mode the bridge holds
+the real OAuth token and passes it on every request. The server is stateless: it
+can restart freely without invalidating any sessions.
+
+**How it works:**
+
+1. The MCP server is configured to advertise the identity provider (e.g.
+   Google) via RFC 9728 `/.well-known/oauth-protected-resource` and returns
+   `401` on unauthenticated requests.
+2. The bridge's OAuth client follows the discovery document, performs the PKCE
+   authorization code flow **directly against the identity provider**, and
+   caches the resulting access + refresh token in the bridge's encrypted token
+   store.
+3. Every subsequent request to the MCP server carries
+   `Authorization: Bearer <real-token>`. The MCP server validates it against
+   the provider's API — no local state required.
+4. When the access token expires, the bridge silently refreshes it using the
+   cached refresh token. No re-authentication required unless the refresh token
+   itself expires.
+
+**When to use this vs. standard OAuth 2.1:**
+
+| | Standard OAuth 2.1 | External provider mode |
+|---|---|---|
+| Token issued by | MCP server (JWT) | Identity provider directly |
+| MCP server restart | Loses client registrations → re-auth needed | Transparent (stateless) |
+| Requires `client_id` | Only if provider doesn't support DCR | Yes (Google/GitHub don't support DCR) |
+| Redirect URI to register | Automatically negotiated | Must match `callback_port` |
+
+**Configuration example — Google Workspace MCP:**
+
+Enable external provider mode on the GWS server:
+
+```json
+{
+  "sharedServers": {
+    "goog_ws": {
+      "command": "uvx",
+      "args": ["workspace-mcp", "--transport", "streamable-http"],
+      "env": {
+        "WORKSPACE_MCP_PORT": "8002",
+        "MCP_ENABLE_OAUTH21": "true",
+        "EXTERNAL_OAUTH21_PROVIDER": "true",
+        "WORKSPACE_MCP_STATELESS_MODE": "true",
+        "GOOGLE_OAUTH_CLIENT_ID": "${env:GOOGLE_OAUTH_CLIENT_ID}",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "${env:GOOGLE_OAUTH_CLIENT_SECRET}"
+      },
+      "grace_period": "30m",
+      "health_timeout": 30
+    }
+  },
+  "mcpServers": {
+    "gws": {
+      "url": "http://localhost:8002/mcp",
+      "sharedServer": "goog_ws",
+      "auth": {
+        "oauth": {
+          "client_id": "${env:GOOGLE_OAUTH_CLIENT_ID}",
+          "client_secret": "${env:GOOGLE_OAUTH_CLIENT_SECRET}",
+          "callback_port": 9876
+        }
+      }
+    }
+  }
+}
+```
+
+**Google Console setup** (one-time):
+
+1. Go to [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials)
+2. Create an **OAuth 2.0 Client ID** of type **Web application**
+3. Under "Authorized redirect URIs" add: `http://localhost:9876/callback`
+   (use `localhost`, not `127.0.0.1`)
+4. Add your Google account as a test user on the OAuth consent screen
+
+On first connection the bridge opens a browser tab for the Google consent
+screen. After you approve it, the access and refresh tokens are cached
+in `~/.cache/mcp-companion/oauth-tokens/gws/`. Subsequent restarts of
+GWS (or even the bridge) will silently re-use the cached token without
+prompting again.
+
+**Notes:**
+
+- `callback_port` must match the redirect URI registered in your OAuth app
+  exactly. Google and most providers reject unregistered URIs.
+- The `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` env vars are
+  needed by both GWS (for token validation) and the bridge (for the OAuth
+  flow). Use your shell environment or a secrets manager such as 1Password
+  CLI (`op run --`) to supply them.
+- The `OAUTHLIB_INSECURE_TRANSPORT=1` env var is only needed when GWS itself
+  runs over plain HTTP (the default in local development) — it is not needed
+  by the bridge.
+
+---
 
 ### Token encryption
 

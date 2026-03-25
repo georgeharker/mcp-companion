@@ -242,11 +242,13 @@ class ConnectionManager:
     async def connect_all(self, config: BridgeConfig) -> None:
         """Open persistent connections for every registered HTTP/SSE server.
 
-        Connections are opened **concurrently** and this method **blocks**
-        until every server has either connected or failed.  This ensures
-        that by the time the bridge starts serving requests, every factory
-        will return a connected client or a clear error — never a "still
-        connecting" race.
+        Connections are opened **concurrently** in background tasks.  This
+        method returns immediately so the bridge can start serving other
+        servers without waiting for OAuth flows that require user interaction.
+
+        Each server's ``_ready`` event gates the factory — callers that
+        arrive before a connection resolves will wait up to
+        ``_FACTORY_CONNECT_TIMEOUT`` seconds before raising ``ConnectionError``.
         """
         tasks: list[asyncio.Task[None]] = []
         for name, conn in self._connections.items():
@@ -263,9 +265,6 @@ class ConnectionManager:
                 len(tasks),
                 [n for n in self._connections],
             )
-            # Wait for all first-connect attempts to resolve
-            await asyncio.gather(*tasks, return_exceptions=True)
-            logger.info("All persistent connection attempts resolved")
 
     async def _connect_one(self, config: BridgeConfig, name: str, srv: ServerConfig) -> None:
         """Background wrapper around ``connect`` — logs but never raises."""

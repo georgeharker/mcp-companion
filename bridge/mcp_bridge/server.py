@@ -558,13 +558,13 @@ def create_bridge(
             except Exception:
                 logger.exception("Failed to mount server '%s'", name)
 
-        # Open persistent connections to HTTP/SSE upstreams.
-        # This BLOCKS until every server has connected or failed.
-        # OAuth servers get exactly one auth attempt here.  If it fails
-        # the connection is marked _auth_failed — no retry until manual
-        # toggle via bridge__enable_server.
+        # Start persistent connections to HTTP/SSE upstreams in the background.
+        # OAuth servers get exactly one auth attempt here.  The bridge starts
+        # serving immediately; servers requiring OAuth are available once the
+        # user completes the browser flow.  If auth fails the connection is
+        # marked _auth_failed — no retry until manual toggle via bridge__enable_server.
         await conn_manager.connect_all(config)
-        logger.info("All connection attempts resolved — bridge is ready")
+        logger.info("Connection tasks started — bridge is ready")
 
         try:
             yield

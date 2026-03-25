@@ -201,6 +201,7 @@ def build_auth(
             client_id=oauth_opts.get("client_id"),
             client_secret=oauth_opts.get("client_secret"),
             client_metadata_url=oauth_opts.get("client_metadata_url"),
+            callback_port=oauth_opts.get("callback_port"),
             cache_tokens=effective_cache,
         )
 
@@ -216,6 +217,7 @@ def _build_oauth(
     client_id: str | None = None,
     client_secret: str | None = None,
     client_metadata_url: str | None = None,
+    callback_port: int | None = None,
     cache_tokens: bool = True,
 ) -> OAuth:
     """Construct a FastMCP ``OAuth`` provider.
@@ -256,6 +258,7 @@ def _build_oauth(
         client_id=client_id,
         client_secret=client_secret,
         client_metadata_url=client_metadata_url,
+        callback_port=callback_port,
     )
 
 
