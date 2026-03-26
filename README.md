@@ -498,7 +498,7 @@ dependency of mcp-companion so load order is correct:
 -- sharedserver: builds the Rust binary that manages bridge process lifecycle
 {
     "georgeharker/sharedserver",
-    build = "cargo build --release",
+    build = "cargo install --path rust",
     lazy = false,
 },
 
