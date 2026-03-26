@@ -21,6 +21,7 @@ import os
 import platform
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 from cryptography.fernet import Fernet
@@ -109,6 +110,40 @@ def create_encrypted_store(storage_dir: Path) -> AsyncKeyValue:
         fernet=Fernet(key=encryption_key),
         raise_on_decryption_error=False,
     )
+
+
+_GOOGLE_ACCOUNTS_HOST = "accounts.google.com"
+
+
+class _RefreshTokenOAuth(OAuth):
+    """OAuth subclass that ensures a ``refresh_token`` is issued where possible.
+
+    The standard MCP OAuth client never requests offline access, so providers
+    like Google do not issue a ``refresh_token``.  Without one the bridge must
+    open a browser every time the short-lived access token expires.
+
+    Currently handles:
+
+    * **Google** (``accounts.google.com``) — injects ``access_type=offline``
+      and ``prompt=consent``.  ``access_type=offline`` is a Google-specific
+      extension (not part of the OAuth 2.0 spec); other providers use the
+      standard ``offline_access`` scope instead and would need separate
+      handling.  ``prompt=consent`` forces Google to re-issue a refresh token
+      even when the user previously consented.
+    """
+
+    async def redirect_handler(self, authorization_url: str) -> None:
+        parsed = urlparse(authorization_url)
+        if _GOOGLE_ACCOUNTS_HOST in parsed.netloc:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            params.setdefault("access_type", ["offline"])
+            params.setdefault("prompt", ["consent"])
+            new_query = urlencode({k: v[0] for k, v in params.items()})
+            authorization_url = urlunparse(parsed._replace(query=new_query))
+            logger.debug(
+                "Injected access_type=offline into Google authorization URL for refresh token"
+            )
+        await super().redirect_handler(authorization_url)
 
 
 class _BearerAuth(httpx.Auth):
@@ -219,7 +254,7 @@ def _build_oauth(
     client_metadata_url: str | None = None,
     callback_port: int | None = None,
     cache_tokens: bool = True,
-) -> OAuth:
+) -> _RefreshTokenOAuth:
     """Construct a FastMCP ``OAuth`` provider.
 
     When *cache_tokens* is ``True`` (default) an encrypted file store is
@@ -229,6 +264,10 @@ def _build_oauth(
     When *cache_tokens* is ``False`` ``token_storage=None`` is passed, which
     tells FastMCP to use an in-memory store.  Tokens are lost on restart and the
     OAuth browser flow will run again on next startup.
+
+    Returns a :class:`_RefreshTokenOAuth` instance which automatically injects
+    ``access_type=offline`` for Google authorization URLs so that a
+    ``refresh_token`` is included in the response.
     """
     scope_str: str | None = None
     if isinstance(scopes, list):
@@ -250,7 +289,7 @@ def _build_oauth(
             server_name,
         )
 
-    return OAuth(
+    return _RefreshTokenOAuth(
         mcp_url=server_url,
         scopes=scope_str,
         client_name=f"mcp-companion ({server_name})",
