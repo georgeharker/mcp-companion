@@ -11,6 +11,46 @@ local M = {}
 
 local log = require("mcp_companion.log")
 
+--- Build bridge MCP server entry for ACP session/new.
+--- The bridge URL is deterministic from config — we don't need to wait for
+--- upstream servers or full MCP client connect. The bridge proxies everything.
+--- @param agent_capabilities table|nil agentCapabilities from ACP INITIALIZE RPC
+--- @return table|nil bridge_entry MCP server entry or nil if no bridge config
+local function build_bridge_entry(agent_capabilities)
+  local config = require("mcp_companion.config").get()
+
+  -- Need bridge config to know host/port
+  if not config.bridge or not config.bridge.config then
+    return nil
+  end
+
+  local host = config.bridge.host or "127.0.0.1"
+  local port = config.bridge.port or 9741
+  local bridge_url = string.format("http://%s:%d/mcp", host, port)
+
+  -- Check if agent supports HTTP MCP transport
+  local caps = agent_capabilities and agent_capabilities.mcpCapabilities
+
+  if caps and caps.http then
+    log.debug("CC ACP: using HTTP transport for bridge")
+    return {
+      type = "http",
+      name = "mcp-bridge",
+      url = bridge_url,
+      headers = {},
+    }
+  else
+    -- Fallback: stdio via mcp-remote
+    log.debug("CC ACP: using stdio mcp-remote transport for bridge")
+    return {
+      name = "mcp-bridge",
+      command = "npx",
+      args = { "-y", "mcp-remote", bridge_url },
+      env = {},
+    }
+  end
+end
+
 --- Called by CodeCompanion when the extension is loaded.
 --- Sets up event listeners that trigger (re)registration when the bridge
 --- connects or capabilities change.
@@ -40,8 +80,51 @@ function M.setup(schema)
     end,
   })
 
-  -- Patch ACP to inject bridge into session/new (blocks there if needed)
-  M._patch_acp()
+  -- Inject bridge into ACP session/new when the pre-session event fires.
+  -- CodeCompanion fires CodeCompanionACPSessionPre after connect_and_authenticate()
+  -- succeeds but before _establish_session() reads adapter_modified.defaults.mcpServers.
+  -- Event data contains adapter_modified (mutable reference) and agent_capabilities.
+  vim.api.nvim_create_autocmd("User", {
+    pattern = "CodeCompanionACPSessionPre",
+    callback = function(args)
+      local adapter_modified = args.data and args.data.adapter_modified
+      local agent_capabilities = args.data and args.data.agent_capabilities
+      if not adapter_modified then
+        log.warn("CC ACP: CodeCompanionACPSessionPre fired but adapter_modified is nil")
+        return
+      end
+
+      -- Kick off bridge warm-up (non-blocking) — bridge entry uses the
+      -- deterministic config URL, so it doesn't need to wait for full connect.
+      M._start_bridge_async()
+
+      -- Build and inject bridge entry into adapter defaults
+      local bridge_entry = build_bridge_entry(agent_capabilities)
+      if bridge_entry then
+        local defaults = adapter_modified.defaults
+        if defaults then
+          defaults.mcpServers = defaults.mcpServers or {}
+          if type(defaults.mcpServers) ~= "table" then
+            defaults.mcpServers = {}
+          end
+
+          -- Check if already present (idempotent)
+          local already = false
+          for _, s in ipairs(defaults.mcpServers) do
+            if s.name == "mcp-bridge" then
+              already = true
+              break
+            end
+          end
+
+          if not already then
+            table.insert(defaults.mcpServers, bridge_entry)
+            log.info("CC ACP: bridge injected into adapter defaults")
+          end
+        end
+      end
+    end,
+  })
 
   -- When bridge connects and capabilities are populated, register everything
   state.on("bridge_ready", function()
@@ -198,117 +281,6 @@ function M._register_prompts()
   else
     log.warn("Failed to load cc.slash_commands: %s", tostring(cmds))
   end
-end
-
---- Build bridge MCP server entry for ACP session/new
---- Build bridge MCP server entry for ACP session/new.
---- The bridge URL is deterministic from config — we don't need to wait for
---- upstream servers or full MCP client connect. The bridge proxies everything.
---- @param conn table ACP Connection instance (has _agent_info after initialize)
---- @return table|nil bridge_entry MCP server entry or nil if no bridge config
-local function build_bridge_entry(conn)
-  local config = require("mcp_companion.config").get()
-
-  -- Need bridge config to know host/port
-  if not config.bridge or not config.bridge.config then
-    return nil
-  end
-
-  local host = config.bridge.host or "127.0.0.1"
-  local port = config.bridge.port or 9741
-  local bridge_url = string.format("http://%s:%d/mcp", host, port)
-
-  -- Check if agent supports HTTP MCP transport
-  local caps = conn._agent_info
-      and conn._agent_info.agentCapabilities
-      and conn._agent_info.agentCapabilities.mcpCapabilities
-
-  if caps and caps.http then
-    log.debug("CC ACP: using HTTP transport for bridge")
-    return {
-      type = "http",
-      name = "mcp-bridge",
-      url = bridge_url,
-      headers = {},
-    }
-  else
-    -- Fallback: stdio via mcp-remote
-    log.debug("CC ACP: using stdio mcp-remote transport for bridge")
-    return {
-      name = "mcp-bridge",
-      command = "npx",
-      args = { "-y", "mcp-remote", bridge_url },
-      env = {},
-    }
-  end
-end
-
---- Patch ACP Connection to:
---- 1. Start bridge before connect_and_initialize
---- 2. Inject bridge into session/new mcpServers
-function M._patch_acp()
-  local ok, Connection = pcall(require, "codecompanion.acp")
-  if not ok then
-    log.warn("CC ACP module not available — skipping bridge injection: %s", tostring(Connection))
-    return
-  end
-
-  -- Idempotency guard
-  if Connection._mcp_companion_patched then
-    return
-  end
-  Connection._mcp_companion_patched = true
-
-  -- Patch connect_and_initialize to start bridge (non-blocking warm-up)
-  local original_connect = Connection.connect_and_initialize
-
-  Connection.connect_and_initialize = function(self)
-    -- Kick off bridge start if not already running (non-blocking).
-    -- Bridge entry is injected from config in _establish_session —
-    -- no need to wait for full connect here.
-    M._start_bridge_async()
-
-    -- Call original connect_and_initialize
-    return original_connect(self)
-  end
-
-  -- Patch _establish_session to inject bridge into mcpServers
-  local original_establish = Connection._establish_session
-
-  Connection._establish_session = function(self)
-    -- Build bridge entry from config (deterministic URL, no need to wait
-    -- for upstream servers — the bridge proxies everything through us)
-    local bridge_entry = build_bridge_entry(self)
-
-    if bridge_entry then
-      -- Inject into adapter defaults so it gets picked up by session_args
-      local defaults = self.adapter_modified and self.adapter_modified.defaults
-      if defaults then
-        defaults.mcpServers = defaults.mcpServers or {}
-        if type(defaults.mcpServers) ~= "table" then
-          defaults.mcpServers = {}
-        end
-
-        -- Check if already present
-        local already = false
-        for _, s in ipairs(defaults.mcpServers) do
-          if s.name == "mcp-bridge" then
-            already = true
-            break
-          end
-        end
-
-        if not already then
-          table.insert(defaults.mcpServers, bridge_entry)
-          log.info("CC ACP: bridge injected into adapter defaults")
-        end
-      end
-    end
-
-    return original_establish(self)
-  end
-
-  log.debug("CC ACP: Connection patched for bridge injection")
 end
 
 --- Extension exports (accessible via CodeCompanion.extensions.mcp_companion)
