@@ -302,8 +302,54 @@ function M.stop()
 end
 
 --- Restart the bridge (stop then start)
-function M.restart()
-  M.stop()
+--- @param opts? {force?: boolean} If force=true, kill the bridge even if other clients are attached
+function M.restart(opts)
+  opts = opts or {}
+  local ss_ok, ss = pcall(require, "sharedserver")
+
+  if ss_ok then
+    local info = ss.status("mcp-bridge")
+    local refcount = info and info.refcount or 0
+
+    if not opts.force and refcount > 1 then
+      -- We're not the sole owner — a normal stop won't actually restart the bridge
+      vim.notify(
+        string.format(
+          "[mcp-companion] Bridge has %d clients attached. "
+            .. "Use :MCPRestart! to force restart (affects all clients).",
+          refcount
+        ),
+        vim.log.levels.WARN
+      )
+      return
+    end
+
+    if opts.force and refcount > 1 then
+      vim.notify(
+        string.format(
+          "[mcp-companion] Force-restarting bridge (%d other clients will reconnect).",
+          refcount - 1
+        ),
+        vim.log.levels.WARN
+      )
+    end
+  end
+
+  if opts.force and ss_ok then
+    -- Force kill via sharedserver admin kill — ignores refcount
+    local client = M.client
+    if client then
+      client:disconnect()
+      M.client = nil
+    end
+    pcall(ss.stop, "mcp-bridge")
+    -- Also kill the underlying process to ensure a fresh start
+    local sharedserver_mod = require("sharedserver")
+    pcall(sharedserver_mod._call_sharedserver, { "admin", "kill", "mcp-bridge" })
+  else
+    M.stop()
+  end
+
   -- Small delay to allow port release
   vim.defer_fn(function()
     M.start()

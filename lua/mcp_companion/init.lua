@@ -67,9 +67,9 @@ function M.setup(opts)
     ui.toggle()
   end, { desc = "Toggle MCP Companion status window" })
 
-  vim.api.nvim_create_user_command("MCPRestart", function()
-    bridge.restart()
-  end, { desc = "Restart MCP bridge" })
+  vim.api.nvim_create_user_command("MCPRestart", function(args)
+    bridge.restart({ force = args.bang })
+  end, { bang = true, desc = "Restart MCP bridge (use ! to force when other clients attached)" })
 
   vim.api.nvim_create_user_command("MCPLog", function()
     local log_path = log.get_log_path()
