@@ -312,6 +312,11 @@ class ConnectionManager:
         This is the **only** place that creates a ``Client`` (and therefore
         the only place that creates an ``OAuth`` instance).  All other paths
         wait for or reuse the result.
+
+        ``SystemExit`` is caught explicitly because the vendored uvicorn
+        callback server calls ``sys.exit(1)`` when it cannot bind the OAuth
+        callback port (e.g. address already in use).  Without this guard a
+        transient port conflict would kill the entire bridge process.
         """
         try:
             client = _make_disconnected_client(conn.config, conn.name, conn.srv)
@@ -329,6 +334,16 @@ class ConnectionManager:
                     self._on_connected(conn.name)
                 except Exception:
                     pass
+        except SystemExit as e:
+            # uvicorn calls sys.exit(1) when it can't bind the callback
+            # port.  Treat this as a transient auth error — the health-check
+            # will retry later.
+            logger.warning(
+                "OAuth callback server exited for '%s' (port conflict?): %s",
+                conn.name,
+                e,
+            )
+            conn.client_ref[0] = None
         except Exception as e:
             logger.warning("Failed to open persistent connection for '%s': %s", conn.name, e)
             conn.client_ref[0] = None
