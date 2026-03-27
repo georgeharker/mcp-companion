@@ -50,6 +50,14 @@ function M.start()
   M._check_existing(function(running)
     if running then
       log.info("Bridge already running on port %d, connecting...", _config.bridge.port)
+      -- Still register with sharedserver so this Neovim instance holds a
+      -- refcount.  Without this, only the instance that originally started
+      -- the bridge keeps it alive — when that instance exits the bridge
+      -- dies even though other instances are still connected.
+      local ss_ok, ss = pcall(require, "sharedserver")
+      if ss_ok and ss.start then
+        pcall(ss.start, "mcp-bridge")
+      end
       state.update("bridge", { status = "healthy" })
       M._create_client()
     elseif pcall(require, "sharedserver") then
