@@ -27,6 +27,13 @@ import httpx
 from cryptography.fernet import Fernet
 from fastmcp.client.auth import OAuth
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
+from mcp.client.auth.utils import (
+    build_oauth_authorization_server_metadata_discovery_urls,
+    build_protected_resource_metadata_discovery_urls,
+    create_oauth_metadata_request,
+    handle_auth_metadata_response,
+    handle_protected_resource_response,
+)
 from key_value.aio.protocols import AsyncKeyValue
 from key_value.aio.stores.filetree import (
     FileTreeStore,
@@ -131,6 +138,90 @@ class _RefreshTokenOAuth(OAuth):
       handling.  ``prompt=consent`` forces Google to re-issue a refresh token
       even when the user previously consented.
     """
+
+    async def _initialize(self) -> None:
+        """Load cached tokens and ensure OAuth metadata is available.
+
+        The upstream ``_initialize()`` restores tokens and client info from
+        disk but **not** the OAuth authorization-server metadata.  Without
+        it, the SDK falls back to ``urljoin(server_url, "/token")`` for
+        refresh requests — which 404s when the MCP server is a proxy (e.g.
+        workspace-mcp) that doesn't expose a ``/token`` endpoint itself.
+
+        After calling ``super()._initialize()`` we perform a lightweight
+        metadata discovery (protected-resource → auth-server → OAuth AS
+        metadata) so that ``_get_token_endpoint()`` uses the real provider
+        token endpoint (e.g. ``https://oauth2.googleapis.com/token``).
+        """
+        await super()._initialize()
+
+        # Only discover metadata when we have cached tokens but no metadata
+        ctx = self.context
+        if not ctx.oauth_metadata and ctx.is_token_valid():
+            try:
+                await self._discover_oauth_metadata()
+            except Exception:
+                logger.debug(
+                    "OAuth metadata discovery failed during init — will be resolved on next 401",
+                    exc_info=True,
+                )
+
+    async def _discover_oauth_metadata(self) -> None:
+        """Fetch protected-resource + OAuth AS metadata for the server."""
+        ctx = self.context
+        server_url = str(ctx.server_url)
+
+        async with httpx.AsyncClient() as http:
+            # 1. Discover protected resource metadata
+            prm_urls = build_protected_resource_metadata_discovery_urls(
+                www_auth_url=None,
+                server_url=server_url,
+            )
+            prm = None
+            for url in prm_urls:
+                try:
+                    resp = await http.send(create_oauth_metadata_request(url))
+                    prm = await handle_protected_resource_response(resp)
+                    if prm:
+                        break
+                except Exception:
+                    continue
+
+            if not prm or not prm.authorization_servers:
+                logger.debug(
+                    "No protected-resource metadata or authorization servers found for %s",
+                    server_url,
+                )
+                return
+
+            auth_server = str(prm.authorization_servers[0])
+            ctx.protected_resource_metadata = prm
+            ctx.auth_server_url = auth_server
+
+            # 2. Discover OAuth authorization-server metadata
+            as_urls = build_oauth_authorization_server_metadata_discovery_urls(
+                auth_server_url=auth_server,
+                server_url=server_url,
+            )
+            for url in as_urls:
+                try:
+                    resp = await http.send(create_oauth_metadata_request(url))
+                    ok, metadata = await handle_auth_metadata_response(resp)
+                    if ok and metadata:
+                        ctx.oauth_metadata = metadata
+                        logger.info(
+                            "Discovered OAuth metadata for '%s': token_endpoint=%s",
+                            server_url,
+                            metadata.token_endpoint,
+                        )
+                        return
+                except Exception:
+                    continue
+
+            logger.debug(
+                "Could not discover OAuth AS metadata for auth server %s",
+                auth_server,
+            )
 
     async def redirect_handler(self, authorization_url: str) -> None:
         parsed = urlparse(authorization_url)
