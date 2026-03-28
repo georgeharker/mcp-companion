@@ -50,12 +50,15 @@ function M.start()
   M._check_existing(function(running)
     if running then
       log.info("Bridge already running on port %d, connecting...", _config.bridge.port)
-      -- Still register with sharedserver so this Neovim instance holds a
+      -- Register + start via sharedserver so this Neovim instance holds a
       -- refcount.  Without this, only the instance that originally started
       -- the bridge keeps it alive — when that instance exits the bridge
       -- dies even though other instances are still connected.
+      -- Registration must come before start() so sharedserver has the server
+      -- definition for this instance even though the process is already up.
       local ss_ok, ss = pcall(require, "sharedserver")
       if ss_ok and ss.start then
+        M._register_with_sharedserver(ss)
         pcall(ss.start, "mcp-bridge")
       end
       state.update("bridge", { status = "healthy" })
@@ -114,15 +117,21 @@ local function _bridge_env()
   return env
 end
 
---- Start via sharedserver Lua plugin (shared process across Neovim instances)
-function M._start_with_sharedserver()
-  local ss = require("sharedserver")
+--- Register mcp-bridge with sharedserver if not already registered.
+--- Safe to call multiple times; no-ops when already registered.
+--- @param ss table sharedserver module
+function M._register_with_sharedserver(ss)
+  if ss.is_registered and ss.is_registered("mcp-bridge") then
+    log.debug("mcp-bridge already registered with sharedserver, skipping re-registration")
+    return
+  end
+
   local cmd_parts = _bridge_cmd()
   local env = _bridge_env()
   local log_file = vim.fn.stdpath("log") .. "/mcp-bridge.log"
 
   -- Register with lazy=true to prevent auto-start on VimEnter;
-  -- we call ss.start() explicitly below so we can handle failures.
+  -- ss.start() is called explicitly by each call-site.
   ss.register("mcp-bridge", {
     command = cmd_parts[1],
     args = vim.list_slice(cmd_parts, 2),
@@ -135,18 +144,28 @@ function M._start_with_sharedserver()
     end,
     on_exit = function(code)
       vim.schedule(function()
-        local state = require("mcp_companion.state")
+        local _state = require("mcp_companion.state")
         if code ~= 0 then
           log.error("mcp-bridge exited with code %d", code)
-          state.update("bridge", { status = "error", error = "Process exited: code " .. code })
-          state.emit("bridge_error", "Process exited with code " .. code)
+          _state.update("bridge", { status = "error", error = "Process exited: code " .. code })
+          _state.emit("bridge_error", "Process exited with code " .. code)
         else
           log.info("mcp-bridge exited normally")
-          state.update("bridge", { status = "disconnected" })
+          _state.update("bridge", { status = "disconnected" })
         end
       end)
     end,
   })
+
+  log.debug("mcp-bridge registered with sharedserver")
+end
+
+--- Start via sharedserver Lua plugin (shared process across Neovim instances)
+function M._start_with_sharedserver()
+  local ss = require("sharedserver")
+  local log_file = vim.fn.stdpath("log") .. "/mcp-bridge.log"
+
+  M._register_with_sharedserver(ss)
 
   log.info("Starting bridge via sharedserver Lua plugin (log: %s)", log_file)
 

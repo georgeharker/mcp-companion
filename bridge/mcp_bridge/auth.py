@@ -329,6 +329,18 @@ class _RefreshTokenOAuth(OAuth):
             from mcp.shared.auth import OAuthToken
 
             token_response = OAuthToken.model_validate_json(resp.content)
+
+            # Google (and some other providers) don't re-issue
+            # refresh_token in refresh responses.  Preserve the
+            # original so we can keep refreshing silently.
+            if not token_response.refresh_token and ctx.current_tokens:
+                original_rt = ctx.current_tokens.refresh_token
+                if original_rt:
+                    token_response = token_response.model_copy(
+                        update={"refresh_token": original_rt}
+                    )
+                    logger.debug("Preserved original refresh_token in proactive refresh")
+
             ctx.current_tokens = token_response
             ctx.update_token_expiry(token_response)
             await ctx.storage.set_tokens(token_response)
@@ -421,14 +433,65 @@ class _RefreshTokenOAuth(OAuth):
         ``token_expiry_time`` on the context.  We persist it so subsequent
         ``_initialize()`` calls can restore it.
         """
+        ctx = self.context
+        tv = ctx.is_token_valid()
+        cr = ctx.can_refresh_token()
+        exp = ctx.token_expiry_time
+        now = time.time()
+        remaining = (exp - now) if exp else None
+        has_access = bool(ctx.current_tokens and ctx.current_tokens.access_token)
+        has_refresh = bool(ctx.current_tokens and ctx.current_tokens.refresh_token)
+        has_ci = bool(ctx.client_info)
+
+        if not tv:
+            logger.info(
+                "Token NOT valid before auth flow: "
+                "can_refresh=%s expiry=%s remaining=%.0fs "
+                "has_access=%s has_refresh=%s has_client_info=%s",
+                cr,
+                exp,
+                remaining or 0,
+                has_access,
+                has_refresh,
+                has_ci,
+            )
+        else:
+            logger.debug(
+                "Token valid before auth flow: remaining=%.0fs",
+                remaining or 0,
+            )
+
+        # Snapshot refresh_token before the SDK flow — Google (and some
+        # other providers) don't re-issue it in refresh responses, but
+        # the SDK replaces current_tokens wholesale, losing it.
+        original_refresh_token = ctx.current_tokens.refresh_token if ctx.current_tokens else None
+
         flow = super().async_auth_flow(request)
-        request = await flow.__anext__()
+        request_out = await flow.__anext__()
+        cycle = 0
         while True:
-            response = yield request
+            response = yield request_out
+            cycle += 1
+            logger.debug(
+                "Auth flow cycle %d: %s %s → %d",
+                cycle,
+                request_out.method,
+                request_out.url,
+                response.status_code,
+            )
             try:
-                request = await flow.asend(response)
+                request_out = await flow.asend(response)
             except StopAsyncIteration:
                 break
+
+        # Restore refresh_token if the SDK lost it during a token refresh.
+        if original_refresh_token and ctx.current_tokens and not ctx.current_tokens.refresh_token:
+            ctx.current_tokens = ctx.current_tokens.model_copy(
+                update={"refresh_token": original_refresh_token}
+            )
+            await ctx.storage.set_tokens(ctx.current_tokens)
+            logger.info("Preserved refresh_token after SDK token refresh")
+
         # The flow is done — token_expiry_time may have been updated by a
         # refresh or re-auth.  Persist the current value.
         await self._save_token_expiry()
