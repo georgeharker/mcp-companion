@@ -50,12 +50,10 @@ function M.start()
   M._check_existing(function(running)
     if running then
       log.info("Bridge already running on port %d, connecting...", _config.bridge.port)
-      -- Register + start via sharedserver so this Neovim instance holds a
-      -- refcount.  Without this, only the instance that originally started
-      -- the bridge keeps it alive — when that instance exits the bridge
-      -- dies even though other instances are still connected.
-      -- Registration must come before start() so sharedserver has the server
-      -- definition for this instance even though the process is already up.
+      -- Register with sharedserver so this Neovim instance holds a refcount.
+      -- Without this, only the instance that originally started the bridge
+      -- keeps it alive — when that instance exits the bridge dies even though
+      -- other instances are still connected.
       local ss_ok, ss = pcall(require, "sharedserver")
       if ss_ok and ss.start then
         M._register_with_sharedserver(ss)
