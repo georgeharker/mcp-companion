@@ -13,7 +13,6 @@ mcp-bridge --config /path/to/servers.json --port 9741
 ## Development
 
 ```bash
-uv venv .venv --python 3.12
-uv pip install -e ".[dev]" --python .venv/bin/python
+uv sync
 pytest
 ```

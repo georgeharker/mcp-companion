@@ -38,7 +38,7 @@ independently of Neovim — any MCP client that speaks HTTP can use it.
 ```bash
 # Install dependencies
 cd bridge
-uv venv --python 3.14 .venv && uv sync --frozen
+uv sync --frozen
 
 # Run the bridge
 uv run python -m mcp_bridge --config ~/.config/mcp/servers.json --port 9741
@@ -511,7 +511,7 @@ dependency of mcp-companion so load order is correct:
         "olimorris/codecompanion.nvim",
         "georgeharker/sharedserver",
     },
-    build = "cd bridge && uv venv --python 3.14 .venv && uv sync --frozen",
+    build = "cd bridge && uv sync --frozen",
     config = function()
         require("mcp_companion").setup({
             bridge = {
@@ -793,7 +793,7 @@ The bridge aggregates N MCP servers through a single HTTP endpoint. A
 
 ```bash
 cd bridge
-uv venv --python 3.14 .venv && uv sync --frozen
+uv sync --frozen
 pytest tests/ -v
 mypy --strict mcp_bridge/ tests/
 ```
