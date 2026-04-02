@@ -666,6 +666,27 @@ The status window shows bridge state, connected servers, and tool/resource/promp
 counts. Press `<CR>` on a server to expand/collapse it. Press `l` for the logs
 view, `q` to close.
 
+### Logging
+
+MCP companion writes logs to two locations:
+
+| Log | Default path | Purpose |
+|---|---|---|
+| Plugin log | `~/.local/state/nvim/mcp-companion.log` | Lua-side events (bridge lifecycle, server connections, errors) |
+| Bridge log | set via `bridge.log_file` | Python bridge output (server communication, OAuth, tool calls) |
+| sharedserver logs | `$XDG_RUNTIME_DIR/sharedserver` or `/tmp/sharedserver` | All processes managed by sharedserver |
+
+Use `:MCPLog` to open the plugin log directly in a Neovim buffer.
+
+By default the bridge produces no log file. To enable bridge logging, set `bridge.log_file` in
+your [plugin configuration](#plugin-configuration).
+
+When the bridge is managed by [sharedserver](https://github.com/georgeharker/sharedserver.nvim),
+sharedserver writes its own logs to `$XDG_RUNTIME_DIR/sharedserver` (or `/tmp/sharedserver` if
+`XDG_RUNTIME_DIR` is not set).
+
+OAuth tokens are cached at `~/.cache/mcp-companion/oauth-tokens/<server>/`.
+
 ### Manual bridge control
 
 ```lua
@@ -707,9 +728,11 @@ require("mcp_companion").setup({
         startup_timeout = 30,           -- seconds to wait for bridge health
         request_timeout = 60,           -- default MCP request timeout in seconds
         token_key = nil,                -- encryption key for OAuth tokens (or use MCP_BRIDGE_TOKEN_KEY env)
+        log_file = nil,                 -- path to write bridge stdout/stderr (e.g. vim.fn.stdpath("log") .. "/mcp-bridge.log")
+        global_env = {},                -- extra environment variables passed to the bridge process
     },
     log = {
-        level = "info",                 -- file log level: "debug", "info", "warn", "error"
+        level = "warn",                 -- file log level: "debug", "info", "warn", "error"
         notify = "error",               -- vim.notify level (default: errors only)
         file = true,                    -- write to ~/.local/state/nvim/mcp-companion.log
     },
