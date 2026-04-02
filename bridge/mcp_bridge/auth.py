@@ -27,6 +27,7 @@ from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import anyio
+import enum
 import httpx
 from cryptography.fernet import Fernet
 from fastmcp.client.auth import OAuth
@@ -49,6 +50,39 @@ from key_value.aio.stores.memory import MemoryStore
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
 logger = logging.getLogger("mcp-bridge")
+
+
+class _RefreshOutcome(enum.Enum):
+    """Result of a proactive token-refresh attempt."""
+
+    SUCCESS = "success"
+    NETWORK_ERROR = "network_error"  # transient — token may still be usable
+    AUTH_ERROR = "auth_error"  # permanent — need full re-auth
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """Return True if *exc* looks like a transient network failure.
+
+    These are errors where the token itself is not at fault — the request
+    could not be sent or received at all.  We distinguish them from auth
+    rejections (4xx) so callers can avoid triggering a full re-auth when
+    the network is merely temporarily unavailable.
+    """
+    # httpx transport-level errors (no TCP connection, DNS failure, etc.)
+    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError, httpx.TimeoutException)):
+        return True
+    # anyio / trio / asyncio transport errors bubble up as ConnectionError
+    if isinstance(exc, (ConnectionError, OSError, TimeoutError)):
+        return True
+    return False
+
+
+# When a proactive token refresh fails due to network unavailability we
+# grant the existing (expired) token a short grace window so the SDK does
+# not immediately fall back to a full browser re-auth.  The next real
+# request will trigger a normal refresh attempt through the SDK flow.
+_NETWORK_ERROR_GRACE_SECONDS = 300.0  # 5 minutes
+
 
 # Default token storage directory (XDG cache convention)
 _DEFAULT_TOKEN_DIR = Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
@@ -269,7 +303,7 @@ class _RefreshTokenOAuth(OAuth):
             logger.debug("Failed to load persisted token expiry", exc_info=True)
         return None
 
-    async def _proactive_refresh(self) -> None:
+    async def _proactive_refresh(self) -> _RefreshOutcome:
         """Refresh the access token proactively using the refresh_token.
 
         This is called during ``_initialize()`` when we have cached tokens
@@ -279,9 +313,14 @@ class _RefreshTokenOAuth(OAuth):
         unreliable — e.g. the MCP proxy may not validate token expiry), we
         send the refresh request immediately and update the context.
 
-        On success the caller should persist the sidecar afterwards.
-        On failure we log but don't raise — the SDK's normal flow will handle
-        it (e.g. full re-auth on 401).
+        Returns a :class:`_RefreshOutcome` indicating success, a transient
+        network failure, or a permanent auth rejection.
+
+        * ``SUCCESS`` — token refreshed and persisted.
+        * ``NETWORK_ERROR`` — the network was unreachable; the existing token
+          is preserved and callers should **not** trigger a full re-auth.
+        * ``AUTH_ERROR`` — the server rejected the refresh (4xx); the caller
+          may fall through to the SDK's normal re-auth flow.
         """
         ctx = self.context
 
@@ -290,13 +329,18 @@ class _RefreshTokenOAuth(OAuth):
         if not ctx.oauth_metadata:
             try:
                 await self._discover_oauth_metadata()
-            except Exception:
+            except Exception as exc:
+                if _is_network_error(exc):
+                    logger.warning(
+                        "Cannot proactively refresh — metadata discovery failed (network error)"
+                    )
+                    return _RefreshOutcome.NETWORK_ERROR
                 logger.warning("Cannot proactively refresh — metadata discovery failed")
-                return
+                return _RefreshOutcome.AUTH_ERROR
 
         if not ctx.oauth_metadata or not ctx.oauth_metadata.token_endpoint:
             logger.warning("Cannot proactively refresh — no token endpoint in metadata")
-            return
+            return _RefreshOutcome.AUTH_ERROR
 
         token_url = str(ctx.oauth_metadata.token_endpoint)
         refresh_data: dict[str, str] = {
@@ -324,7 +368,7 @@ class _RefreshTokenOAuth(OAuth):
                     token_url,
                     body,
                 )
-                return
+                return _RefreshOutcome.AUTH_ERROR
 
             from mcp.shared.auth import OAuthToken
 
@@ -353,8 +397,16 @@ class _RefreshTokenOAuth(OAuth):
                 (ctx.token_expiry_time or 0) - time.time(),
                 self.token_storage_adapter._server_url,
             )
-        except Exception:
+            return _RefreshOutcome.SUCCESS
+        except Exception as exc:
+            if _is_network_error(exc):
+                logger.warning(
+                    "Proactive token refresh failed — network unreachable (will retry later): %s",
+                    exc,
+                )
+                return _RefreshOutcome.NETWORK_ERROR
             logger.warning("Proactive token refresh error", exc_info=True)
+            return _RefreshOutcome.AUTH_ERROR
 
     async def _initialize(self) -> None:
         """Load cached tokens and ensure OAuth metadata is available.
@@ -410,7 +462,19 @@ class _RefreshTokenOAuth(OAuth):
                         "Restored absolute token expiry (expired %.0fs ago — refreshing)",
                         -remaining,
                     )
-                    await self._proactive_refresh()
+                    outcome = await self._proactive_refresh()
+                    if outcome == _RefreshOutcome.NETWORK_ERROR:
+                        # Network is down — preserve the token so the SDK
+                        # does not fall through to a full browser re-auth.
+                        # Grant a short validity window; the next real request
+                        # will trigger a refresh attempt via the SDK flow.
+                        ctx.token_expiry_time = time.time() + _NETWORK_ERROR_GRACE_SECONDS
+                        logger.warning(
+                            "Network unreachable during init — granting %.0fs grace window "
+                            "to avoid triggering full re-auth (server: %s)",
+                            _NETWORK_ERROR_GRACE_SECONDS,
+                            self.token_storage_adapter._server_url,
+                        )
                 else:
                     logger.info(
                         "Restored absolute token expiry (expired %.0fs ago — no refresh token)",
@@ -421,7 +485,15 @@ class _RefreshTokenOAuth(OAuth):
                 # Proactively refresh so we get a fresh access token AND a
                 # real absolute expiry that we can persist.
                 logger.info("No persisted token expiry — proactively refreshing")
-                await self._proactive_refresh()
+                outcome = await self._proactive_refresh()
+                if outcome == _RefreshOutcome.NETWORK_ERROR:
+                    ctx.token_expiry_time = time.time() + _NETWORK_ERROR_GRACE_SECONDS
+                    logger.warning(
+                        "Network unreachable during init — granting %.0fs grace window "
+                        "to avoid triggering full re-auth (server: %s)",
+                        _NETWORK_ERROR_GRACE_SECONDS,
+                        self.token_storage_adapter._server_url,
+                    )
 
     async def async_auth_flow(
         self, request: httpx.Request

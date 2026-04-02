@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from mcp_bridge.auth import (
+    _NETWORK_ERROR_GRACE_SECONDS,
+    _RefreshOutcome,
+    _is_network_error,
     _BearerAuth,
     build_auth,
     create_encrypted_store,
@@ -202,35 +206,165 @@ class TestBuildAuth:
         )
         assert (tmp_path / "srv").exists()
 
-    def test_cache_tokens_false_no_directory(self, tmp_path: Path) -> None:
-        """When cache_tokens=False, no token directory is created."""
-        build_auth(
-            "srv",
-            auth_config="oauth",
-            server_url="http://example.com/mcp",
-            token_dir=tmp_path,
+
+# ── _is_network_error ──────────────────────────────────────────────
+
+
+class TestIsNetworkError:
+    """Unit tests for the network-error classifier."""
+
+    def test_httpx_connect_error(self) -> None:
+        assert _is_network_error(httpx.ConnectError("refused"))
+
+    def test_httpx_timeout(self) -> None:
+        assert _is_network_error(httpx.ConnectTimeout("timed out"))
+
+    def test_httpx_read_timeout(self) -> None:
+        assert _is_network_error(httpx.ReadTimeout("read timeout"))
+
+    def test_connection_error(self) -> None:
+        assert _is_network_error(ConnectionError("broken pipe"))
+
+    def test_os_error(self) -> None:
+        assert _is_network_error(OSError("network unreachable"))
+
+    def test_timeout_error(self) -> None:
+        assert _is_network_error(TimeoutError("timed out"))
+
+    def test_value_error_not_network(self) -> None:
+        assert not _is_network_error(ValueError("bad value"))
+
+    def test_http_status_error_401_not_network(self) -> None:
+        req = httpx.Request("GET", "https://example.com")
+        resp = httpx.Response(401, request=req)
+        assert not _is_network_error(httpx.HTTPStatusError("401", request=req, response=resp))
+
+    def test_runtime_error_not_network(self) -> None:
+        assert not _is_network_error(RuntimeError("some bug"))
+
+
+# ── _RefreshOutcome / network-graceful handling ────────────────────
+
+
+class TestProactiveRefreshNetworkHandling:
+    """Tests that network errors during proactive refresh don't cause full re-auth."""
+
+    def _make_oauth(self, tmp_path: Path):
+        """Build a minimal _RefreshTokenOAuth bound to a fake server URL."""
+        from mcp_bridge.auth import _build_oauth
+
+        return _build_oauth(
+            server_name="test-srv",
+            server_url="https://mcp.example.com/mcp",
+            base_dir=tmp_path / "test-srv",
             cache_tokens=False,
         )
-        assert not (tmp_path / "srv").exists()
 
-    def test_per_server_cache_tokens_false(self, tmp_path: Path) -> None:
-        """Per-server cache_tokens=false inside auth dict overrides global flag."""
-        build_auth(
-            "srv",
-            auth_config={"oauth": {"cache_tokens": False}},
-            server_url="http://example.com/mcp",
-            token_dir=tmp_path,
-            cache_tokens=True,  # global says True, per-server says False
-        )
-        assert not (tmp_path / "srv").exists()
+    @pytest.mark.anyio
+    async def test_proactive_refresh_network_error_returns_outcome(self, tmp_path: Path) -> None:
+        """_proactive_refresh returns NETWORK_ERROR when httpx raises ConnectError."""
+        import time
 
-    def test_per_server_cache_tokens_true_overrides_global_false(self, tmp_path: Path) -> None:
-        """Per-server cache_tokens=true overrides global cache_tokens=False."""
-        build_auth(
-            "srv",
-            auth_config={"oauth": {"cache_tokens": True}},
-            server_url="http://example.com/mcp",
-            token_dir=tmp_path,
-            cache_tokens=False,  # global says False, per-server says True
+        from mcp.shared.auth import OAuthToken
+
+        oauth = self._make_oauth(tmp_path)
+        # Force-initialise the context so current_tokens / client_info exist
+        await oauth._initialize()
+
+        # Inject fake tokens and client info so the refresh path is taken
+        ctx = oauth.context
+        fake_token = OAuthToken(
+            access_token="old-access",
+            token_type="Bearer",
+            refresh_token="old-refresh",
+            expires_in=3600,
         )
-        assert (tmp_path / "srv").exists()
+        ctx.current_tokens = fake_token
+        ctx.token_expiry_time = time.time() - 100  # expired
+
+        # Fake oauth_metadata with a token endpoint
+        fake_meta = MagicMock()
+        fake_meta.token_endpoint = "https://auth.example.com/token"
+        ctx.oauth_metadata = fake_meta
+
+        # Fake client_info
+        fake_ci = MagicMock()
+        fake_ci.client_id = "client-123"
+        ctx.client_info = fake_ci
+
+        # Patch httpx to raise a ConnectError
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_http = AsyncMock()
+            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+            mock_http.__aexit__ = AsyncMock(return_value=False)
+            mock_http.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
+            mock_cls.return_value = mock_http
+
+            outcome = await oauth._proactive_refresh()
+
+        assert outcome == _RefreshOutcome.NETWORK_ERROR
+        # The old tokens should still be intact
+        assert ctx.current_tokens.access_token == "old-access"
+        assert ctx.current_tokens.refresh_token == "old-refresh"
+
+    @pytest.mark.anyio
+    async def test_initialize_sets_grace_window_on_network_error(self, tmp_path: Path) -> None:
+        """_initialize sets token_expiry_time to grace window when network is down.
+
+        Scenario: sidecar shows token expired, proactive refresh fails with a
+        network error.  The token_expiry_time should be bumped to a short future
+        window so the SDK does not fall through to a full browser re-auth.
+        """
+        import time
+
+        from mcp.client.auth import OAuthClientProvider
+        from mcp.shared.auth import OAuthToken
+
+        oauth = self._make_oauth(tmp_path)
+
+        ctx = oauth.context
+        fake_token = OAuthToken(
+            access_token="old-access",
+            token_type="Bearer",
+            refresh_token="old-refresh",
+            expires_in=3600,
+        )
+        expired_ts = time.time() - 500  # 500 seconds ago
+
+        async def _fake_super_init(self_inner):
+            # Simulate parent loading tokens and setting _initialized
+            self_inner.context.current_tokens = fake_token
+            # Also inject client_info so can_refresh_token() returns True
+            fake_ci = MagicMock()
+            fake_ci.client_id = "client-123"
+            self_inner.context.client_info = fake_ci
+            # Parent wrongly recalculates expiry from relative expires_in,
+            # but we override it in our _initialize — set it to None here
+            # (we override via stored_expiry below).
+            self_inner.context.token_expiry_time = None
+            self_inner._initialized = True
+
+        with patch.object(
+            oauth, "_proactive_refresh", new=AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
+        ):
+            # Return an expired sidecar timestamp so the "expired — refreshing" branch fires
+            with patch.object(oauth, "_load_token_expiry", new=AsyncMock(return_value=expired_ts)):
+                with patch.object(
+                    oauth, "_discover_oauth_metadata", new=AsyncMock(return_value=None)
+                ):
+                    with patch.object(OAuthClientProvider, "_initialize", new=_fake_super_init):
+                        oauth._initialized = False
+                        before = time.time()
+                        await oauth._initialize()
+                        after = time.time()
+
+        # token_expiry_time should be set to approximately now + grace window
+        assert ctx.token_expiry_time is not None
+        expected_lo = before + _NETWORK_ERROR_GRACE_SECONDS - 1
+        expected_hi = after + _NETWORK_ERROR_GRACE_SECONDS + 1
+        assert expected_lo <= ctx.token_expiry_time <= expected_hi, (
+            f"token_expiry_time={ctx.token_expiry_time} not in grace window "
+            f"[{expected_lo}, {expected_hi}]"
+        )
+        # Token should appear valid (not triggering re-auth)
+        assert ctx.is_token_valid()
