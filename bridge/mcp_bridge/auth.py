@@ -586,7 +586,9 @@ class _RefreshTokenOAuth(OAuth):
                     prm = await handle_protected_resource_response(resp)
                     if prm:
                         break
-                except Exception:
+                except Exception as exc:
+                    if _is_network_error(exc):
+                        raise
                     continue
 
             if not prm or not prm.authorization_servers:
@@ -617,7 +619,9 @@ class _RefreshTokenOAuth(OAuth):
                             metadata.token_endpoint,
                         )
                         return
-                except Exception:
+                except Exception as exc:
+                    if _is_network_error(exc):
+                        raise
                     continue
 
             logger.debug(
