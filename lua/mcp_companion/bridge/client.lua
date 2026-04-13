@@ -633,15 +633,23 @@ end
 --- Used for correct tool name parsing (servers may have hyphens in names)
 --- @param callback fun()
 function Client:_fetch_server_names(callback)
-  -- Use plenary.curl for health endpoint (it's not an MCP request)
-  local curl = require("plenary.curl")
+  -- Use mcp_companion.http for health endpoint (it's not an MCP request)
+  local http = require("mcp_companion.http")
   local url = string.format("http://%s:%d/health", self.host, self.port)
-  
-  curl.get(url, {
+
+  http.request({
+    url = url,
+    method = "get",
     timeout = 5000,
-    callback = vim.schedule_wrap(function(response)
-      if not response or response.status ~= 200 then
-        log.warn("Failed to fetch server names: status=%s", response and response.status or "no response")
+    callback = function(response)
+      if response.status == 0 then
+        log.warn("Failed to fetch server names: %s", response.body)
+        self._known_server_names = {}
+        callback()
+        return
+      end
+      if response.status ~= 200 then
+        log.warn("Failed to fetch server names: status=%s", response.status)
         self._known_server_names = {}
         callback()
         return
@@ -670,12 +678,7 @@ function Client:_fetch_server_names(callback)
       self._server_health = data.servers or {}
       log.debug("Known server names: %s", vim.inspect(names))
       callback()
-    end),
-    on_error = vim.schedule_wrap(function(err)
-      log.warn("Failed to fetch server names: %s", vim.inspect(err))
-      self._known_server_names = {}
-      callback()
-    end),
+    end,
   })
 end
 
@@ -860,13 +863,15 @@ end
 --- Updates _server_health and re-runs _update_server_state to merge disabled info
 --- @param callback? fun()
 function Client:_refresh_server_health(callback)
-  local curl = require("plenary.curl")
+  local http = require("mcp_companion.http")
   local url = string.format("http://%s:%d/health", self.host, self.port)
 
-  curl.get(url, {
+  http.request({
+    url = url,
+    method = "get",
     timeout = 5000,
-    callback = vim.schedule_wrap(function(response)
-      if response and response.status == 200 then
+    callback = function(response)
+      if response.status == 200 then
         local ok, data = pcall(vim.json.decode, response.body)
         if ok and data and data.servers then
           self._server_health = data.servers
@@ -879,19 +884,15 @@ function Client:_refresh_server_health(callback)
           table.sort(names, function(a, b) return #a > #b end)
           self._known_server_names = names
         end
+      elseif response.status == 0 then
+        log.warn("Health refresh error: %s", response.body)
       else
-        log.warn("Health refresh failed: status=%s", response and response.status or "no response")
+        log.warn("Health refresh failed: status=%s", response.status)
       end
       if callback then
         callback()
       end
-    end),
-    on_error = vim.schedule_wrap(function(err)
-      log.warn("Health refresh error: %s", tostring(err))
-      if callback then
-        callback()
-      end
-    end),
+    end,
   })
 end
 

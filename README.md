@@ -468,7 +468,6 @@ MCP capabilities as native editor features.
 
 - Neovim 0.10+
 - Python 3.12+ with [`uv`](https://github.com/astral-sh/uv)
-- [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) — async utilities
 - [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) v19+
 - [sharedserver](https://github.com/georgeharker/sharedserver) — manages the bridge
   process lifecycle across multiple Neovim instances
@@ -507,7 +506,6 @@ dependency of mcp-companion so load order is correct:
     "georgeharker/mcp-companion",
     lazy = false,
     dependencies = {
-        "nvim-lua/plenary.nvim",
         "olimorris/codecompanion.nvim",
         "georgeharker/sharedserver",
     },

@@ -4,7 +4,7 @@
 local M = {}
 
 local log = require("mcp_companion.log")
-local curl = require("plenary.curl")
+local http = require("mcp_companion.http")
 
 --- @type MCPCompanion.Config
 local _config ---@diagnostic disable-line: missing-fields
@@ -74,14 +74,13 @@ end
 --- @param callback fun(running: boolean)
 function M._check_existing(callback)
   local url = string.format("http://%s:%d/health", _config.bridge.host, _config.bridge.port)
-  curl.get(url, {
+  http.request({
+    url = url,
+    method = "get",
     timeout = 1000,
-    callback = vim.schedule_wrap(function(response)
-      callback(response and response.status == 200)
-    end),
-    on_error = vim.schedule_wrap(function(_)
-      callback(false)
-    end),
+    callback = function(response)
+      callback(response.status == 200)
+    end,
   })
 end
 
@@ -240,20 +239,21 @@ function M._wait_and_connect()
         return
       end
 
-      curl.get(url, {
+      http.request({
+        url = url,
+        method = "get",
         timeout = 1000,
-        callback = vim.schedule_wrap(function(response)
-          if response and response.status == 200 then
+        callback = function(response)
+          if response.status == 200 then
             timer:stop()
             timer:close()
             log.info("Bridge healthy on port %d (after %ds)", _config.bridge.port, attempts)
             state.update("bridge", { status = "healthy" })
             M._create_client()
+          else
+            -- Connection failed or non-200 - just wait for next attempt
+            log.debug("Health check attempt %d failed (status=%s)", attempts, response.status)
           end
-        end),
-        on_error = function(_)
-          -- Connection failed - just wait for next attempt
-          log.debug("Health check attempt %d failed (connection refused)", attempts)
         end,
       })
     end)
