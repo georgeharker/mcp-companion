@@ -30,21 +30,22 @@ local function _fingerprint(servers)
 end
 
 --- Build the cmds handler for a bridge tool.
---- CC calls cmds[i](self, action, cmd_opts) where action is the parsed
---- tool input from the LLM and cmd_opts.output_cb is the result callback.
---- @param client table MCPCompanion.Client
+--- CC calls cmds[i](self, action, cmd_opts) where self is the CodeCompanion.Tools
+--- object (self.chat is the active CC chat). action is the parsed tool input from
+--- the LLM and cmd_opts.output_cb is the result callback.
+--- @param singleton_client table MCPCompanion.Client  Fallback client (singleton)
 --- @param namespaced_name string Full bridge tool name (e.g. "everything_echo")
 --- @param display_name string Short name for logging
 --- @param server_name string Server that owns this tool (for approval checks)
 --- @return function
-local function _make_bridge_cmd(client, namespaced_name, display_name, server_name)
-    return function(_self, action, cmd_opts)
+local function _make_bridge_cmd(singleton_client, namespaced_name, display_name, server_name)
+    return function(self, action, cmd_opts) -- luacheck: ignore 212/self
         -- action is the raw tool input table from the LLM
         local params = type(action) == "table" and action or {}
 
         -- Check approval before executing
         local approval = require("mcp_companion.cc.approval")
-        approval.check(server_name, display_name, _self, function(approved)
+        approval.check(server_name, display_name, self, function(approved)
             if not approved then
                 vim.schedule(function()
                     cmd_opts.output_cb({ status = "error", data = "Tool call denied by user." })
@@ -52,7 +53,9 @@ local function _make_bridge_cmd(client, namespaced_name, display_name, server_na
                 return
             end
 
-            -- Execute the tool via bridge client
+            -- Execute the tool via per-chat client if available, else singleton.
+            -- self is the CodeCompanion.Tools object; self.chat is the active chat.
+            local client = (self and self.chat and self.chat._mcp_client) or singleton_client
             client:call_tool(namespaced_name, params, function(err, result)
                 vim.schedule(function()
                     if err then
@@ -84,22 +87,22 @@ end
 --- @return table
 local function _make_output(display_name)
     return {
-        rejected = function(_self, rejected_msg)
+        rejected = function(_self, rejected_msg) -- luacheck: ignore 212/_self
             return string.format("**`%s` Tool Rejected**: %s", display_name, rejected_msg or "No reason given")
         end,
-        error = function(_self, error_msg)
+        error = function(_self, error_msg) -- luacheck: ignore 212/_self
             return string.format("**`%s` Tool Error**: %s", display_name, error_msg or "Unknown error")
         end,
-        success = function(_self, stdout, meta)
+        success = function(self, stdout, meta) -- luacheck: ignore 212/self
             local chat = meta and meta.tools and meta.tools.chat
             if not chat then return end
             local out = stdout and (stdout[#stdout] or {}) or {}
             local text = type(out) == "table" and (out.data or "") or tostring(out)
             if text == "" then
-                chat:add_tool_output(_self, string.format("**`%s` Tool**: Completed with no output.", display_name))
+                chat:add_tool_output(self, string.format("**`%s` Tool**: Completed with no output.", display_name))
             else
                 chat:add_tool_output(
-                    _self,
+                    self,
                     string.format("**`%s` Tool**: Returned:\n```\n%s\n```", display_name, text)
                 )
             end
@@ -216,7 +219,46 @@ function M.register()
     end
 
     log.info("CC tools registered: %d tools across %d servers", registered_tools, registered_servers)
+
+    -- Register an aggregate "bridge" group containing every tool key from every
+    -- server.  This lets users type @mcp-bridge in a chat to enable all MCP
+    -- tools at once, mirroring the single-bridge philosophy used on the ACP side.
+    -- Per-server groups (mcp__github, mcp__filesystem, etc.) remain registered
+    -- for fine-grained @-mention addressing.
+    local all_tool_keys = {}
+    for _, server in ipairs(servers) do
+        if server.name ~= "_bridge" then
+            for _, tool in ipairs(server.tools or {}) do
+                table.insert(all_tool_keys, tool._namespaced or tool.name)
+            end
+        end
+    end
+
+    if #all_tool_keys > 0 then
+        local bridge_group = {
+            description = "All tools from all MCP servers via the bridge",
+            tools = all_tool_keys,
+            system_prompt = function(_group_config, _ctx)
+                return string.format(
+                    "You have access to %d MCP tool(s) across %d server(s) via the MCP bridge.\n",
+                    #all_tool_keys,
+                    registered_servers
+                )
+            end,
+            opts = { collapse_tools = true },
+        }
+        cc_mcp.register_tools("bridge", {}, bridge_group)
+        log.debug("CC tools: registered aggregate bridge group (%d tools)", #all_tool_keys)
+    end
+
     _last_fingerprint = fp
+end
+
+--- Clear the registration fingerprint so the next register() call is not skipped.
+--- Used when session-scoped changes require forced re-registration even though
+--- the global tool list hasn't changed.
+function M.clear_fingerprint()
+    _last_fingerprint = nil
 end
 
 --- Unregister all previously registered tools

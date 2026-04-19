@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 
 from mcp_bridge.config import BridgeConfig, ServerStatusInfo
 from mcp_bridge.connections import ConnectionManager
@@ -136,3 +136,135 @@ def register_meta_tools(
         except Exception as e:
             logger.exception("Failed to unmount server '%s' on disable", server_name)
             return f"Server '{server_name}' disabled but failed to unmount: {e}"
+
+    @bridge.tool()
+    async def bridge__session_disable_server(
+        server_name: str, ctx: Context, chat_id: str | None = None
+    ) -> str:
+        """Disable an MCP server for the current session only.
+
+        Unlike bridge__disable_server (which affects all sessions globally),
+        this only hides the server's tools from the calling MCP client session.
+        Other sessions are unaffected.  The change is automatically reverted
+        when the session ends.
+
+        Args:
+            server_name: Name of the server to disable for this session.
+            chat_id: Optional chat identifier for per-chat filtering when multiple
+                     chats share a single MCP connection (e.g., HTTP adapter).
+
+        Returns:
+            JSON with session_id/chat_id and updated disabled_servers list.
+        """
+        if server_name not in config.servers:
+            return f"Error: Server '{server_name}' not found"
+
+        from mcp_bridge.server import _session_disabled
+
+        # Use chat_id if provided, otherwise fall back to MCP session_id
+        sid = chat_id if chat_id else ctx.session_id
+        if sid not in _session_disabled:
+            _session_disabled[sid] = set()
+        _session_disabled[sid].add(server_name)
+
+        # Notify this session only so its tool list refreshes immediately.
+        # (Only effective when using ctx.session_id, not chat_id)
+        if not chat_id:
+            try:
+                await ctx.session.send_tool_list_changed()
+            except Exception:
+                logger.debug("Failed to notify session of tool list change", exc_info=True)
+
+        logger.info("Session %s: disabled server '%s'", sid, server_name)
+
+        import json
+        return json.dumps({
+            "session_id": sid,
+            "action": "disabled",
+            "server": server_name,
+            "disabled_servers": sorted(_session_disabled.get(sid, set())),
+        })
+
+    @bridge.tool()
+    async def bridge__session_enable_server(
+        server_name: str, ctx: Context, chat_id: str | None = None
+    ) -> str:
+        """Re-enable an MCP server that was disabled for the current session.
+
+        Reverses the effect of bridge__session_disable_server for the
+        calling session.  Has no effect if the server was not session-disabled.
+
+        Args:
+            server_name: Name of the server to re-enable for this session.
+            chat_id: Optional chat identifier for per-chat filtering when multiple
+                     chats share a single MCP connection (e.g., HTTP adapter).
+
+        Returns:
+            JSON with session_id/chat_id and updated disabled_servers list.
+        """
+        if server_name not in config.servers:
+            return f"Error: Server '{server_name}' not found"
+
+        from mcp_bridge.server import _session_disabled
+
+        # Use chat_id if provided, otherwise fall back to MCP session_id
+        sid = chat_id if chat_id else ctx.session_id
+        blocked = _session_disabled.get(sid)
+        if not blocked or server_name not in blocked:
+            import json
+            return json.dumps({
+                "session_id": sid,
+                "action": "no_change",
+                "server": server_name,
+                "message": f"Server '{server_name}' is not session-disabled",
+                "disabled_servers": sorted(_session_disabled.get(sid, set())),
+            })
+
+        blocked.discard(server_name)
+        # Clean up empty sets
+        if not blocked:
+            _session_disabled.pop(sid, None)
+
+        # Notify this session only so its tool list refreshes immediately.
+        if not chat_id:
+            try:
+                await ctx.session.send_tool_list_changed()
+            except Exception:
+                logger.debug("Failed to notify session of tool list change", exc_info=True)
+
+        logger.info("Session %s: re-enabled server '%s'", sid, server_name)
+
+        import json
+        return json.dumps({
+            "session_id": sid,
+            "action": "enabled",
+            "server": server_name,
+            "disabled_servers": sorted(_session_disabled.get(sid, set())),
+        })
+
+    @bridge.tool()
+    async def bridge__session_status(ctx: Context, chat_id: str | None = None) -> str:
+        """Get the session-disabled server list for the current MCP session.
+
+        Args:
+            chat_id: Optional chat identifier for per-chat filtering when multiple
+                     chats share a single MCP connection (e.g., HTTP adapter).
+
+        Returns a JSON object with:
+          - session_id: the MCP session identifier (or chat_id if provided)
+          - disabled_servers: list of server names disabled for this session
+
+        Returns:
+            JSON string with session status.
+        """
+        from mcp_bridge.server import _session_disabled
+
+        sid = chat_id if chat_id else ctx.session_id
+        blocked = list(_session_disabled.get(sid, set()))
+        blocked.sort()
+
+        import json
+        return json.dumps({
+            "session_id": sid,
+            "disabled_servers": blocked,
+        })

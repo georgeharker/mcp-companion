@@ -290,6 +290,28 @@ function M._create_client()
   end)
 end
 
+--- Create a lightweight per-chat MCP client for session mapping.
+--- The client establishes an MCP session for the token but skips capability
+--- fetching, SSE, and polling (lite mode). Used by HTTP-adapter chats to route
+--- tool calls through their own session so the bridge applies per-chat filters.
+--- Token is sent via X-MCP-Bridge-Session header. When bridge.token_in_url is
+--- true, the token is also embedded in the URL path as a fallback.
+--- @param token string UUID token for this chat session
+--- @return MCPCompanion.Client
+function M.new_per_chat_client(token)
+  local Client = require("mcp_companion.bridge.client")
+  local token_in_url = _config.bridge and _config.bridge.token_in_url
+  local base_path = token_in_url and ("/mcp/" .. token) or "/mcp"
+  return Client.new({
+    host = _config.bridge.host or "127.0.0.1",
+    port = _config.bridge.port,
+    base_path = base_path,
+    token = token,
+    request_timeout = _config.bridge.request_timeout,
+    lite = true,
+  })
+end
+
 --- Stop the bridge
 function M.stop()
   local state = require("mcp_companion.state")

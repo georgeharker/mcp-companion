@@ -58,13 +58,15 @@ curl http://127.0.0.1:9741/health
 
 ### Using with other MCP clients
 
-Any MCP client that supports HTTP transport can connect directly:
+When using ACP adapters (OpenCode, Claude Code) through CodeCompanion, no
+manual configuration is needed — the bridge is automatically injected into
+the agent's session.
+
+Any MCP client that supports HTTP transport can also connect directly for
+standalone use outside CodeCompanion:
 
 ```bash
-# OpenCode, Claude Code, or any ACP agent
-# Point it at http://127.0.0.1:9741
-
-# Or use curl to call tools directly
+# Direct HTTP access (standalone / debugging)
 curl -X POST http://127.0.0.1:9741/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
@@ -560,9 +562,31 @@ them in before the prompt messages are injected into the chat.
 #### ACP forwarding
 
 When using an ACP adapter (OpenCode, Claude Code), the bridge is automatically
-injected into the ACP session via `session/new` and `session/load`. The agent
-connects to the bridge directly over HTTP (or via `mcp-remote` stdio fallback)
-and can call all MCP tools autonomously without extra configuration.
+injected into the ACP session via `session/new`. The agent connects to the
+bridge directly over HTTP (or via `mcp-remote` stdio fallback) and can call
+all MCP tools autonomously without extra configuration.
+
+The injection adapts to however the adapter's `mcpServers` is configured in
+CodeCompanion:
+
+| `defaults.mcpServers` value | How bridge is injected |
+|---|---|
+| `"inherit_from_config"` | CC calls `transform_to_acp()` to build the server list from `config.mcp.servers`. Our patch wraps that function to also include HTTP servers (upstream only handles stdio) and appends the bridge entry. |
+| `{}` (empty table) | Bridge entry is inserted directly into the table during `ACPSessionPre`, before `_establish_session` reads it. |
+| `{ ... }` (table with entries) | Same as empty table — bridge entry is appended if not already present. User-configured servers are preserved. |
+
+Most ACP adapters ship with `defaults.mcpServers = {}`. Some (e.g. Copilot ACP)
+use `"inherit_from_config"` to pick up servers from the global CC MCP config.
+Both paths are handled automatically — no adapter-specific configuration is
+needed.
+
+> **Note:** Upstream `transform_to_acp()` only translates stdio-type servers.
+> Our patch also translates HTTP servers from `config.mcp.servers` that are
+> listed in `config.mcp.opts.default_servers`, so they are not silently dropped
+> for ACP agents.
+
+Individual servers can be hidden from the agent for the current chat session
+using `/mcp-session` — see [Per-session server gating](#per-session-server-gating).
 
 #### Tool approval flow
 
@@ -607,7 +631,8 @@ file.
 The bridge exposes management tools that the LLM can call:
 
 - `bridge__status` — list all configured servers and their state
-- `bridge__enable_server` / `bridge__disable_server` — toggle servers at runtime
+- `bridge__enable_server` / `bridge__disable_server` — toggle servers globally (all sessions)
+- `bridge__session_disable_server` / `bridge__session_enable_server` — toggle a server for the calling session only
 
 ### Usage
 
@@ -727,6 +752,7 @@ require("mcp_companion").setup({
         request_timeout = 60,           -- default MCP request timeout in seconds
         token_key = nil,                -- encryption key for OAuth tokens (or use MCP_BRIDGE_TOKEN_KEY env)
         log_file = nil,                 -- path to write bridge stdout/stderr (e.g. vim.fn.stdpath("log") .. "/mcp-bridge.log")
+        token_in_url = false,           -- embed session token in URL path; see Troubleshooting below
         global_env = {},                -- extra environment variables passed to the bridge process
     },
     log = {
@@ -736,6 +762,17 @@ require("mcp_companion").setup({
     },
     auto_approve = false,               -- true, false, or function(tool, server, ctx) -> bool
     system_prompt_resources = nil,       -- true (all), or {"pattern1", "pattern2"} to match
+    cc = {
+        -- Controls which MCP tool groups are added to new chats automatically.
+        -- true (default): add the aggregate @mcp-bridge group (all servers, one context entry)
+        -- false: do not auto-add; user manually @-mentions groups in each chat
+        -- string[]: add only the named per-server groups, e.g. {"github", "filesystem"}
+        auto_http_tools = true,
+        -- true (default): inject bridge as MCP server into ACP agent sessions
+        -- false or {}: inject bridge but disable all servers by default (use /mcp-session to enable)
+        -- string[]: inject bridge but only expose the named servers, e.g. {"github"}
+        auto_acp_tools = true,
+    },
     ui = {
         enabled = true,
         width = 0.8,                    -- fraction of screen
@@ -773,9 +810,164 @@ system_prompt_resources = true
 system_prompt_resources = { "ai%-assistant%-guide", "project%-context" }
 ```
 
----
+#### MCP tool group addressing (non-ACP chats)
 
-## Architecture
+When using a standard HTTP/LLM adapter (not ACP), MCP tools are available via
+`@`-mention in CodeCompanion chats. Two levels of granularity are supported:
+
+| Mention | Effect |
+|---|---|
+| `@mcp-bridge` | Enable **all** MCP tools from all connected servers (one context block entry) |
+| `@mcp__github` | Enable tools from a single server only (replace `github` with any server name) |
+
+With `cc.auto_http_tools = true` (the default), `@mcp-bridge` is added
+automatically to every new chat and all servers are enabled on the bridge for
+that session. With `false`, no tool groups are added and all servers are
+disabled on the bridge — use `/mcp-session` or type `@mcp__<server>` manually
+to enable tools on demand.
+
+```lua
+-- Default: all servers enabled automatically as a single group
+cc = { auto_http_tools = true }
+
+-- Opt-in only: type @mcp-bridge or @mcp__github manually in each chat
+cc = { auto_http_tools = false }
+
+-- Selective: auto-enable specific servers only
+cc = { auto_http_tools = { "github", "filesystem" } }
+```
+
+You can also hide individual servers mid-conversation with `/mcp-session` —
+see [Per-session server gating](#per-session-server-gating) below.
+
+#### MCP tool availability in ACP chats
+
+When using an ACP adapter (OpenCode, Claude Code, Cline), the bridge is
+injected as a single MCP server entry into the agent's `session/new` call.
+The agent discovers tools directly from the bridge — `@`-mention and tool
+groups are not used.
+
+`cc.auto_acp_tools` controls whether and which servers the bridge exposes to ACP
+agents:
+
+```lua
+cc = {
+  auto_acp_tools = true,                          -- (default) all servers visible
+  auto_acp_tools = false,                         -- bridge injected, but no servers enabled by default
+  auto_acp_tools = {},                            -- same as false
+  auto_acp_tools = { "github", "filesystem" },    -- only these servers visible
+}
+```
+
+When `auto_acp_tools` is `false`, `{}`, or a list, the bridge is still injected but unlisted
+servers are automatically session-disabled for the ACP agent's bridge
+connection once it is established. The filter is applied via the bridge's
+REST session API and cleaned up when the chat closes.
+
+**Per-session server gating** allows selectively hiding individual upstream
+MCP servers from the ACP agent mid-conversation, without affecting other open
+chats — see [Per-session server gating](#per-session-server-gating) below.
+
+#### Per-session server gating
+
+`/mcp-session` lets you hide or restore individual MCP servers for the current
+chat session only. It works identically with both ACP and non-ACP (HTTP/LLM)
+adapters:
+
+```
+/mcp-session
+```
+
+A picker lists all connected servers with their current session status
+(`[ON]` / `[OFF]`). Selecting a server toggles it for the current chat only.
+
+**What happens on toggle:**
+
+- **ACP chats** — the agent receives a `notifications/tools/list_changed`
+  signal and sees the updated tool list immediately.
+- **Non-ACP chats** — the server's tool group is removed from (or re-added
+  to) the CC tool registry and context block. Tools from a hidden server
+  disappear from `@`-mention suggestions and the LLM's available tools.
+- **`:MCPStatus`** — shows `[session off]` next to servers hidden in the
+  currently focused chat.
+
+When the chat session ends the state is automatically cleaned up.
+
+##### How it works
+
+Filtering is enforced at two layers:
+
+1. **Bridge-side** (source of truth) — each chat gets a unique session token.
+   When you toggle a server, the plugin calls the bridge's REST filter API
+   (`/sessions/token/<token>/filter`) which controls which servers the session
+   can execute tools on. This prevents tool calls from reaching a disabled
+   server regardless of what the client sends.
+
+2. **Neovim-side** (mirrors bridge state) — for non-ACP chats, the plugin also
+   adds or removes tool groups from the CC `tool_registry` so the LLM's
+   available tools stay in sync. For ACP chats, the bridge sends a
+   `notifications/tools/list_changed` notification and the agent re-fetches
+   tools directly.
+
+The initial filter for a new chat is derived from the config:
+- `auto_http_tools = false` → all servers disabled on the bridge for that session
+- `auto_http_tools = {"github"}` → only `github` enabled; all others disabled
+- `auto_http_tools = true` → no filter; all servers enabled
+- For ACP chats, `auto_acp_tools` controls the same behavior
+
+##### Bridge meta-tools
+
+The underlying bridge tools are callable by the agent directly (e.g., in an
+ACP session where the agent has autonomous tool access):
+
+**`bridge__session_disable_server`** — hide a server from this session
+
+| Parameter | Type | Description |
+|---|---|---|
+| `server_name` | `string` (required) | Name of the server to disable |
+| `chat_id` | `string` (optional) | Chat identifier for per-chat filtering when multiple chats share one MCP connection |
+
+Returns JSON: `{ "session_id": "...", "action": "disabled", "server": "...", "disabled_servers": [...] }`
+
+**`bridge__session_enable_server`** — restore a hidden server for this session
+
+| Parameter | Type | Description |
+|---|---|---|
+| `server_name` | `string` (required) | Name of the server to re-enable |
+| `chat_id` | `string` (optional) | Same as above |
+
+Returns JSON: `{ "session_id": "...", "action": "enabled", "server": "...", "disabled_servers": [...] }`
+
+**`bridge__session_status`** — get the current session's disabled server list
+
+| Parameter | Type | Description |
+|---|---|---|
+| `chat_id` | `string` (optional) | Same as above |
+
+Returns JSON: `{ "session_id": "...", "disabled_servers": [...] }`
+
+These complement the global `bridge__enable_server` / `bridge__disable_server`
+tools, which affect all sessions simultaneously.
+
+##### Example workflow
+
+```
+1. Open a chat with auto_http_tools = { "github" }
+   → only github tools available; other servers disabled on the bridge
+
+2. Mid-conversation, run /mcp-session
+   → picker shows:  [ ON] github   [OFF] todoist   [OFF] filesystem
+
+3. Select todoist to toggle it ON
+   → bridge enables todoist for this session
+   → todoist tools appear in tool suggestions
+   → other chats are unaffected
+
+4. Close the chat
+   → session filter is automatically cleaned up on the bridge
+```
+
+---
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -805,6 +997,32 @@ system_prompt_resources = { "ai%-assistant%-guide", "project%-context" }
 The bridge aggregates N MCP servers through a single HTTP endpoint. A
 `SanitizeSchemaMiddleware` handles servers with circular `$ref` schemas
 (e.g. Todoist) that would otherwise crash Pydantic serialization.
+
+---
+
+## Troubleshooting
+
+### ACP agent cannot call MCP tools (per-chat session not established)
+
+Per-chat sessions rely on the `X-MCP-Bridge-Session` header to map a token to
+an MCP session on the bridge. The ACP spec requires HTTP MCP transports to
+forward custom headers, but some agent SDKs may strip them.
+
+**Symptom:** Tools fail or the bridge logs show no `Token mapped` entry for
+the agent's session.
+
+**Fix:** Enable the URL-path fallback so the token is embedded in the URL
+itself:
+
+```lua
+bridge = {
+    token_in_url = true,
+}
+```
+
+If you need this workaround, please open an issue at
+<https://github.com/geohar/mcp-companion/issues> with the name and version of
+the ACP agent so we can track which SDKs need it.
 
 ---
 

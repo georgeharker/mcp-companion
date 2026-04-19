@@ -13,6 +13,8 @@ local log = require("mcp_companion.log")
 --- @class MCPCompanion.Client
 --- @field host string
 --- @field port number
+--- @field base_path string URL path prefix for MCP (default: "/mcp")
+--- @field token? string Session token sent as X-MCP-Bridge-Session header
 --- @field session_id? string MCP session ID
 --- @field request_id number Monotonic counter
 --- @field connected boolean
@@ -36,6 +38,9 @@ Client.__index = Client
 --- @field port? number
 --- @field request_timeout? number
 --- @field poll_interval? number
+--- @field base_path? string  URL path prefix for MCP (default: "/mcp")
+--- @field token? string      Session token sent as X-MCP-Bridge-Session header on every request
+--- @field lite? boolean      If true, skip SSE/polling/capability fetching (lightweight session-only client)
 
 --- Create a new MCP HTTP client
 --- @param config MCPCompanion.ClientConfig
@@ -44,6 +49,8 @@ function Client.new(config)
   return setmetatable({
     host = config.host or "127.0.0.1",
     port = config.port or 9741,
+    base_path = config.base_path or "/mcp",
+    token = config.token or nil,
     session_id = nil,
     request_id = 0,
     connected = false,
@@ -292,6 +299,10 @@ function Client:_http_request(method, path, body, timeout_ms, callback)
       table.insert(headers, "Mcp-Session-Id: " .. self.session_id)
     end
 
+    if self.token then
+      table.insert(headers, "X-MCP-Bridge-Session: " .. self.token)
+    end
+
     if body then
       table.insert(headers, "Content-Length: " .. #body)
     else
@@ -423,7 +434,7 @@ function Client:request(method, params, callback)
 
   if callback then
     -- Async mode
-    self:_http_request("POST", "/mcp", payload, timeout_ms, function(err, resp)
+    self:_http_request("POST", self.base_path, payload, timeout_ms, function(err, resp)
       if err then
         callback(err)
         return
@@ -457,7 +468,7 @@ function Client:request(method, params, callback)
     local error_val = nil
     local done = false
 
-    self:_http_request("POST", "/mcp", payload, timeout_ms, function(err, resp)
+    self:_http_request("POST", self.base_path, payload, timeout_ms, function(err, resp)
       if err then
         error_val = err
         done = true
@@ -516,13 +527,13 @@ function Client:notify(method, params)
   })
 
   -- Fire-and-forget: short timeout, ignore response
-  self:_http_request("POST", "/mcp", payload, 5000, function(err, _resp)
+  self:_http_request("POST", self.base_path, payload, 5000, function(err, resp)
     if err then
       log.debug("Notification %s delivery: %s", method, tostring(err))
     else
       -- Capture session ID from notify response too
-      if _resp and _resp.headers["mcp-session-id"] then
-        self.session_id = _resp.headers["mcp-session-id"]
+      if resp and resp.headers["mcp-session-id"] then
+        self.session_id = resp.headers["mcp-session-id"]
       end
     end
   end)
@@ -555,13 +566,18 @@ function Client:connect(callback)
     -- Send initialized notification
     self:notify("notifications/initialized")
 
+    -- Lite mode: just establish the session (for per-chat token clients).
+    -- Skip capability fetching, SSE, and polling — only tool calls are needed.
+    if self._config.lite then
+      callback(true)
+      return
+    end
+
     -- Fetch server names and capabilities in parallel.
     -- Server names are needed by _update_server_state() which runs inside
     -- refresh_capabilities, so we collect all data first, then update.
     -- Use a barrier: 4 tasks = 1 health + 3 capability requests.
     local pending = 4
-    local cap_done = false
-    local health_done = false
     local function check_all_done()
       pending = pending - 1
       if pending == 0 then
@@ -789,16 +805,16 @@ function Client:_update_server_state()
   -- Resource URIs use arbitrary schemes (e.g. "ui://", "memory://") that don't
   -- correspond to server names. Match by looking for a known server name in the
   -- URI path, falling back to _bridge.
-  local known_servers = {}
+  local known_server_set = {} -- luacheck: ignore 421
   for name in pairs(server_map) do
-    known_servers[name] = true
+    known_server_set[name] = true
   end
 
   for _, res in ipairs(self.resources) do
     local assigned = "_bridge"
     if res.uri then
       -- Check if any known server name appears as a path component in the URI
-      for name in pairs(known_servers) do
+      for name in pairs(known_server_set) do
         if name ~= "_bridge" and res.uri:find("/" .. name .. "/", 1, true) then
           assigned = name
           break
@@ -1101,7 +1117,7 @@ function Client:_start_sse()
 
     -- Build GET request for SSE stream — keep-alive, NOT close
     local headers = {
-      string.format("GET /mcp HTTP/1.1"),
+      string.format("GET %s HTTP/1.1", self.base_path),
       string.format("Host: %s:%d", self.host, self.port),
       "Accept: text/event-stream",
       "Connection: keep-alive",

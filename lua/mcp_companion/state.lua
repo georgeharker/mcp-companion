@@ -6,7 +6,7 @@ local M = {}
 --- @class MCPCompanion.ServerInfo
 --- @field name string Server name (namespace prefix)
 --- @field status string "connected"|"disconnected"|"error"|"disabled"
---- @field disabled boolean Whether server is disabled (tools unmounted)
+--- @field disabled? boolean Whether server is disabled (tools unmounted)
 --- @field tools table[] MCP tool definitions
 --- @field resources table[] MCP resource definitions
 --- @field resource_templates table[] MCP resource template definitions
@@ -35,9 +35,6 @@ local _state = {
   errors = {}, -- Recent errors (max 50)
   logs = {}, -- Recent log entries (max 500)
 }
-
---- Valid subscriber channels
-local _valid_channels = { bridge = true, servers = true, ui = true, all = true, errors = true, logs = true }
 
 --- Subscribers by channel
 --- @type table<string, function[]>

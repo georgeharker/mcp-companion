@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 import weakref
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -67,6 +68,26 @@ _tool_cache_time: float = 0
 # automatically removed when the session is garbage-collected.
 _active_sessions: weakref.WeakSet[ServerSession] = weakref.WeakSet()
 
+# Per-session server blocklist.
+# Maps a session ID string to the set of server names disabled for that session.
+# Entries are explicitly removed via the /sessions/{id}/filter DELETE endpoint
+# or by the meta-tools.  The REST API also supports external management by
+# session ID (used by the Neovim plugin for ACP session filtering).
+_session_disabled: dict[str, set[str]] = {}
+
+# Token registry: token -> bridge session_id.
+# The Neovim plugin generates a UUID token per chat and embeds it as the MCP
+# URL path (/mcp/<token>).  TokenRewriteMiddleware rewrites the path to /mcp
+# and records token -> mcp-session-id from the FastMCP response header.
+# GET /sessions/token/{token} lets the Lua side look up the bridge session_id.
+_token_sessions: dict[str, str] = {}
+
+# Pending token filters: token -> set of disabled server names.
+# Stored when Lua POSTs a filter before the remote client has connected
+# (i.e. before the token is mapped to a session_id).  Applied immediately
+# by TokenRewriteMiddleware when the token is first seen.
+_pending_token_filters: dict[str, set[str]] = {}
+
 # Strong references to in-flight notification tasks so they aren't GC'd
 # before completion.
 _notification_tasks: set[asyncio.Task[None]] = set()
@@ -89,6 +110,18 @@ async def _notify_tool_list_changed() -> None:
             await session.send_tool_list_changed()
         except Exception:
             logger.debug("Failed to notify session of tool list change", exc_info=True)
+
+
+async def _notify_session_by_id(session_id: str) -> None:
+    """Send ``notifications/tools/list_changed`` to a specific session by ID."""
+    for session in list(_active_sessions):
+        try:
+            sid = getattr(session, "_fastmcp_state_prefix", None) or str(id(session))
+            if sid == session_id:
+                await session.send_tool_list_changed()
+                return
+        except Exception:
+            logger.debug("Failed to notify session %s", session_id, exc_info=True)
 
 
 # Global config reference for tool filtering
@@ -208,11 +241,29 @@ class ToolProcessingMiddleware(Middleware):
         context: MiddlewareContext[mt.Request[Any, Any]],
         call_next: CallNext[mt.Request[Any, Any], Any],
     ) -> Any:
-        """Track active sessions for ToolListChanged notifications."""
+        """Track active sessions and notify session watches of new connections."""
         if context.fastmcp_context is not None:
             try:
                 session = context.fastmcp_context.session
+                sid = context.fastmcp_context.session_id
+                is_new = session not in _active_sessions
                 _active_sessions.add(session)
+
+                if is_new:
+                    try:
+                        cp = getattr(session, "client_params", None)
+                        ci = getattr(cp, "clientInfo", None) if cp else None
+                        client_name = getattr(ci, "name", None) if ci else None
+                        client_version = getattr(ci, "version", None) if ci else None
+                        logger.info(
+                            "New MCP session: id=%s client=%s version=%s",
+                            sid,
+                            client_name,
+                            client_version,
+                        )
+                    except Exception:
+                        logger.info("New MCP session: id=%s (no client info)", sid)
+
             except (RuntimeError, AttributeError):
                 pass  # Session not yet established
         return await call_next(context)
@@ -271,6 +322,28 @@ class ToolProcessingMiddleware(Middleware):
         _tool_cache_time = now
         logger.info("tools/list: cached %d tools", len(filtered))
 
+        # Apply per-session server blocklist on top of the global cache.
+        # This does not modify _tool_cache — each session gets a filtered view.
+        if context.fastmcp_context is not None:
+            try:
+                sid = context.fastmcp_context.session_id
+                blocked = _session_disabled.get(sid)
+                if blocked:
+                    pre = len(filtered)
+                    filtered = [
+                        t
+                        for t in filtered
+                        if _find_server_for_tool(str(t.name) if t.name else "")[0] not in blocked
+                    ]
+                    if len(filtered) < pre:
+                        logger.debug(
+                            "tools/list: session filter removed %d tool(s) for blocked servers %s",
+                            pre - len(filtered),
+                            blocked,
+                        )
+            except (RuntimeError, AttributeError):
+                pass
+
         return filtered
 
     async def on_call_tool(
@@ -291,6 +364,24 @@ class ToolProcessingMiddleware(Middleware):
           the correct MCP semantics: "the tool ran but something went wrong".
         """
         tool_name = context.message.name if context.message else "unknown"
+        # Per-session blocklist check: if the calling session has disabled
+        # the server that owns this tool, reject immediately.
+        if context.fastmcp_context is not None:
+            try:
+                sid = context.fastmcp_context.session_id
+                blocked = _session_disabled.get(sid)
+                if blocked:
+                    sess_server, _ = _find_server_for_tool(str(tool_name))
+                    if sess_server in blocked:
+                        raise NotFoundError(
+                            f"Tool '{tool_name}' is unavailable — server '{sess_server}' "
+                            "is disabled for this session. Use bridge__session_enable_server "
+                            "to re-enable it."
+                        )
+            except NotFoundError:
+                raise
+            except (RuntimeError, AttributeError):
+                pass
         try:
             return await call_next(context)
         except NotFoundError:
@@ -613,6 +704,283 @@ def create_bridge(
             pending_oauth=auth_failed,
         )
         return JSONResponse(response.model_dump(mode="json"))
+
+    # --- Session management REST API ---
+    # These endpoints allow external clients (e.g. the Neovim plugin) to
+    # list active MCP sessions and manage per-session server filters by
+    # session ID, without needing to be the session owner.
+
+    @bridge.custom_route("/sessions", methods=["GET"])
+    async def list_sessions(request: Request) -> JSONResponse:
+        """List active MCP sessions with their IDs, client info, and filter state."""
+        sessions_out: list[dict[str, Any]] = []
+        for sess in list(_active_sessions):
+            try:
+                sid = getattr(sess, "_fastmcp_state_prefix", None) or str(id(sess))
+            except AttributeError:
+                sid = str(id(sess))
+            blocked = _session_disabled.get(sid, set())
+            # Extract client info from the MCP initialize handshake
+            client_info: dict[str, Any] | None = None
+            try:
+                cp = getattr(sess, "client_params", None)
+                ci = getattr(cp, "clientInfo", None) if cp else None
+                if ci:
+                    client_info = {
+                        "name": getattr(ci, "name", None),
+                        "version": getattr(ci, "version", None),
+                    }
+            except Exception:
+                pass
+            entry: dict[str, Any] = {
+                "session_id": sid,
+                "disabled_servers": sorted(blocked),
+            }
+            if client_info:
+                entry["client_info"] = client_info
+            sessions_out.append(entry)
+        return JSONResponse({"sessions": sessions_out})
+
+    @bridge.custom_route("/sessions/{session_id}/filter", methods=["GET", "POST", "DELETE"])
+    async def manage_session_filter(request: Request) -> JSONResponse:
+        """Manage per-session server blocklist by session ID.
+
+        GET: Get current disabled servers for a session.
+        POST: Set disabled servers for a session.
+              Body: { "disabled_servers": ["server1", "server2"] }
+              Or:   { "allowed_servers": ["server1"] } — inverts to disable all others
+        DELETE: Clear all session filters for a session.
+        """
+        session_id = request.path_params.get("session_id", "")
+        if not session_id:
+            return JSONResponse({"error": "session_id required"}, status_code=400)
+
+        if request.method == "GET":
+            disabled = _session_disabled.get(session_id, set())
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "disabled_servers": sorted(disabled),
+                }
+            )
+
+        if request.method == "DELETE":
+            removed = _session_disabled.pop(session_id, None)
+            # Notify the session so its tool list refreshes
+            await _notify_session_by_id(session_id)
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "action": "cleared",
+                    "previously_disabled": sorted(removed) if removed else [],
+                }
+            )
+
+        # POST — manage disabled servers
+        # Accepts:
+        #   { "disabled_servers": ["srv1", "srv2"] } — set explicit disable list
+        #   { "allowed_servers": ["srv1"] } — allow list, inverts to disable all others
+        #   { "enable": "srv1" } — enable a single server (remove from disabled)
+        #   { "disable": "srv1" } — disable a single server (add to disabled)
+        # Note: allowed_servers=[] means disable ALL servers (not "allow all")
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        # Handle single-server toggle operations first
+        enable_server = body.get("enable")
+        disable_server = body.get("disable")
+
+        if enable_server is not None:
+            if enable_server not in config.servers:
+                return JSONResponse({"error": f"Unknown server: {enable_server}"}, status_code=400)
+            current = _session_disabled.get(session_id, set())
+            current.discard(enable_server)
+            if current:
+                _session_disabled[session_id] = current
+            else:
+                _session_disabled.pop(session_id, None)
+            await _notify_session_by_id(session_id)
+            logger.info("REST: session %s enabled server %s", session_id, enable_server)
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "action": "enabled",
+                    "server": enable_server,
+                    "disabled_servers": sorted(_session_disabled.get(session_id, set())),
+                }
+            )
+
+        if disable_server is not None:
+            if disable_server not in config.servers:
+                return JSONResponse({"error": f"Unknown server: {disable_server}"}, status_code=400)
+            current = _session_disabled.setdefault(session_id, set())
+            current.add(disable_server)
+            await _notify_session_by_id(session_id)
+            logger.info("REST: session %s disabled server %s", session_id, disable_server)
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "action": "disabled",
+                    "server": disable_server,
+                    "disabled_servers": sorted(_session_disabled.get(session_id, set())),
+                }
+            )
+
+        # Bulk operations: allowed_servers or disabled_servers
+        allowed = body.get("allowed_servers")
+        disabled = body.get("disabled_servers")
+
+        # If allowed_servers is provided, compute disabled as inverse
+        if allowed is not None:
+            if not isinstance(allowed, list):
+                return JSONResponse({"error": "allowed_servers must be a list"}, status_code=400)
+            allowed_set = set(allowed)
+            # Disable all servers not in allowed list (except _bridge meta-server)
+            disabled_list = [s for s in config.servers if s not in allowed_set and s != "_bridge"]
+        elif disabled is None:
+            disabled_list = []
+        else:
+            disabled_list = list(disabled) if isinstance(disabled, list) else []
+
+        if not isinstance(disabled_list, list):
+            return JSONResponse({"error": "disabled_servers must be a list"}, status_code=400)
+
+        # Validate server names
+        unknown = [s for s in disabled_list if s not in config.servers]
+        if unknown:
+            return JSONResponse({"error": f"Unknown servers: {unknown}"}, status_code=400)
+
+        if disabled_list:
+            _session_disabled[session_id] = set(disabled_list)
+        else:
+            _session_disabled.pop(session_id, None)
+
+        # Notify the target session
+        await _notify_session_by_id(session_id)
+
+        logger.info(
+            "REST: session %s filter set to disabled=%s",
+            session_id,
+            disabled_list,
+        )
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "disabled_servers": sorted(_session_disabled.get(session_id, set())),
+            }
+        )
+
+    @bridge.custom_route("/sessions/token/{token}", methods=["GET"])
+    async def lookup_session_token(request: Request) -> JSONResponse:
+        """Look up the bridge session_id associated with a token.
+
+        The token is a UUID generated by the Neovim plugin per chat and
+        embedded as the URL path suffix (/mcp/<token>).
+        TokenRewriteMiddleware records the mapping when FastMCP assigns the
+        session_id on the first initialize response.
+        """
+        token = request.path_params.get("token", "")
+        session_id = _token_sessions.get(token)
+        if session_id is None:
+            return JSONResponse({"error": "token not found"}, status_code=404)
+        logger.debug("Token lookup: %s -> %s", token, session_id)
+        return JSONResponse({"token": token, "session_id": session_id})
+
+    @bridge.custom_route("/sessions/token/{token}/filter", methods=["GET", "POST", "DELETE"])
+    async def manage_token_filter(request: Request) -> JSONResponse:
+        """Manage per-session server blocklist by token.
+
+        The token is the stable identifier the Lua plugin holds for both ACP
+        and HTTP adapter sessions.  If the token is already mapped to a
+        session_id the operation is applied immediately; otherwise it is stored
+        as pending and applied by TokenRewriteMiddleware when the client connects.
+
+        GET:    Returns current or pending filter state.
+        POST:   Same body format as /sessions/{session_id}/filter.
+                If the session is not yet connected, stores as pending.
+        DELETE: Clears filter (and any pending state).
+        """
+        token = request.path_params.get("token", "")
+        if not token:
+            return JSONResponse({"error": "token required"}, status_code=400)
+
+        session_id = _token_sessions.get(token)
+
+        if request.method == "GET":
+            if session_id:
+                disabled = _session_disabled.get(session_id, set())
+                return JSONResponse({"token": token, "session_id": session_id,
+                                     "disabled_servers": sorted(disabled)})
+            pending = _pending_token_filters.get(token, set())
+            return JSONResponse({"token": token, "session_id": None,
+                                 "pending": True, "disabled_servers": sorted(pending)})
+
+        if request.method == "DELETE":
+            _pending_token_filters.pop(token, None)
+            if session_id:
+                removed = _session_disabled.pop(session_id, None)
+                await _notify_session_by_id(session_id)
+                return JSONResponse({"token": token, "session_id": session_id,
+                                     "action": "cleared",
+                                     "previously_disabled": sorted(removed) if removed else []})
+            return JSONResponse({"token": token, "session_id": None, "action": "cleared"})
+
+        # POST — parse body (same format as /sessions/{id}/filter)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        # Resolve to a disabled set using the same logic as manage_session_filter
+        enable_server = body.get("enable")
+        disable_server = body.get("disable")
+        allowed = body.get("allowed_servers")
+        disabled_list = body.get("disabled_servers")
+
+        def _resolve_disabled(current: set[str]) -> set[str] | None:
+            """Return new disabled set or None to clear."""
+            if enable_server is not None:
+                current.discard(enable_server)
+                return current if current else None
+            if disable_server is not None:
+                current.add(disable_server)
+                return current
+            if allowed is not None:
+                allowed_set = set(allowed)
+                d = {s for s in config.servers if s not in allowed_set and s != "_bridge"}
+                return d if d else None
+            if disabled_list is not None:
+                return set(disabled_list) if disabled_list else None
+            return current if current else None
+
+        if session_id:
+            # Session already connected — apply immediately
+            current = set(_session_disabled.get(session_id, set()))
+            new_disabled = _resolve_disabled(current)
+            if new_disabled:
+                _session_disabled[session_id] = new_disabled
+            else:
+                _session_disabled.pop(session_id, None)
+            await _notify_session_by_id(session_id)
+            logger.info("REST token filter: token=%s session=%s disabled=%s",
+                        token, session_id,
+                        sorted(_session_disabled.get(session_id, set())))
+            return JSONResponse({"token": token, "session_id": session_id,
+                                 "disabled_servers": sorted(_session_disabled.get(session_id, set()))})
+
+        # Session not yet connected — store as pending
+        current = set(_pending_token_filters.get(token, set()))
+        new_disabled = _resolve_disabled(current)
+        if new_disabled:
+            _pending_token_filters[token] = new_disabled
+        else:
+            _pending_token_filters.pop(token, None)
+        logger.info("REST token filter (pending): token=%s disabled=%s",
+                    token, sorted(new_disabled) if new_disabled else [])
+        return JSONResponse({"token": token, "session_id": None, "pending": True,
+                             "disabled_servers": sorted(new_disabled) if new_disabled else []})
 
     if return_ss_manager:
         return bridge, ss_manager

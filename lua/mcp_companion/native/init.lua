@@ -1,5 +1,6 @@
 --- mcp-companion.nvim — Native server registry
 --- @module mcp_companion.native
+-- luacheck: ignore 212 (unused arguments in interface stubs)
 
 local M = {}
 

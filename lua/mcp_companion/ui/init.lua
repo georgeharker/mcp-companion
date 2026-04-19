@@ -16,6 +16,9 @@ local _view = "status" -- "status" | "logs"
 local _expanded = {}
 --- @type number|nil Autocmd group
 local _augroup = nil
+--- @type number|nil Bufnr of the CC chat window that was focused when the status
+--- window was opened.  Used to show per-session server state.
+local _source_bufnr = nil
 
 -- ─────────────────────────────────────────────────────────────────
 -- Symbols and formatting helpers
@@ -142,7 +145,8 @@ end
 
 --- Render a single server
 --- @param srv MCPCompanion.ServerInfo
-local function render_server(srv)
+--- @param session_disabled? table<string,boolean> Per-session disabled set for the source chat
+local function render_server(srv, session_disabled)
   local icon, hl = status_icon(srv.status or "connected")
   local tools_n = srv.tools and #srv.tools or 0
   local res_n = srv.resources and #srv.resources or 0
@@ -150,6 +154,7 @@ local function render_server(srv)
   local is_expanded = _expanded[srv.name]
   local arrow = is_expanded and icons.collapse or icons.expand
   local disabled_label = srv.disabled and " [disabled]" or ""
+  local session_off = session_disabled and session_disabled[srv.name]
 
   -- Server header line (clickable)
   local header_segments = {
@@ -164,6 +169,9 @@ local function render_server(srv)
       string.format("  %d %s  %d %s  %d %s", tools_n, icons.tool, res_n, icons.resource, prompts_n, icons.prompt),
       "Comment",
     })
+  end
+  if session_off then
+    table.insert(header_segments, { " [session off]", "DiagnosticWarn" })
   end
   add_segments(header_segments, function()
     _expanded[srv.name] = not _expanded[srv.name]
@@ -219,11 +227,34 @@ end
 local function build_status_view(state)
   _lines = {}
 
+  -- Resolve per-session disabled state for the source chat buffer (if any)
+  local session_disabled = nil
+  if _source_bufnr then
+    local ok, sc = pcall(require, "mcp_companion.cc.session_commands")
+    if ok then
+      session_disabled = sc.get_session_state(_source_bufnr)
+    end
+  end
+
   -- Header
   add_line("")
   render_bridge(state)
   add_line("")
   add_separator()
+
+  -- Session context hint
+  if session_disabled and next(session_disabled) then
+    add_line("")
+    add_line(" Session (current chat):", "Title")
+    add_line("   Some servers are hidden from this chat session.", "Comment")
+    add_line("")
+    add_separator()
+  elseif _source_bufnr then
+    add_line("")
+    add_line(" Session (current chat): all servers active", "Comment")
+    add_line("")
+    add_separator()
+  end
 
   -- Bridge servers
   local servers = state.servers or {}
@@ -236,7 +267,7 @@ local function build_status_view(state)
     add_line("")
     for _, srv in ipairs(servers) do
       if srv.name ~= "_bridge" then
-        render_server(srv)
+        render_server(srv, session_disabled)
       end
     end
   end
@@ -355,6 +386,15 @@ function M.open()
     return
   end
 
+  -- Capture the current window's buffer before opening the float (the float
+  -- takes focus and nvim_get_current_win would return the float afterwards).
+  local cur_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+  if vim.bo[cur_buf].filetype == "codecompanion" then
+    _source_bufnr = cur_buf
+  else
+    _source_bufnr = nil
+  end
+
   local config = require("mcp_companion.config").get()
 
   -- Create buffer
@@ -398,7 +438,7 @@ function M.open()
   end, "Close")
 
   map("r", function()
-    M.render()
+    M._fetch_and_render()
   end, "Refresh")
 
   map("R", function()
@@ -448,7 +488,7 @@ function M.open()
     end
     -- Show feedback
     vim.notify(string.format("[mcp-companion] Toggling %s...", srv_name), vim.log.levels.INFO)
-    client:toggle_server(srv_name, function(err, result)
+    client:toggle_server(srv_name or "", function(err, result)
       if err then
         vim.notify(string.format("[mcp-companion] Toggle failed: %s", tostring(err)), vim.log.levels.ERROR)
       else
@@ -487,7 +527,37 @@ function M.open()
     end,
   })
 
+  -- Fetch fresh session status from bridge before initial render
+  M._fetch_and_render()
+end
+
+--- Fetch session status from bridge and re-render.
+--- Used on open and can be called to refresh.
+function M._fetch_and_render()
+  -- Initial render with cached/empty state
   M.render()
+
+  -- If we have a source chat buffer, fetch live session status
+  if _source_bufnr then
+    local cc_ok, codecompanion = pcall(require, "codecompanion")
+    local chat = cc_ok and codecompanion.buf_get_chat(_source_bufnr)
+    if chat then
+      local sc_ok, sc = pcall(require, "mcp_companion.cc.session_commands")
+      if sc_ok and sc.fetch_session_status then
+        sc.fetch_session_status(chat, function(err, _)
+          if not err then
+            -- State is cached in _session_state by fetch_session_status
+            -- Re-render to show updated state
+            vim.schedule(function()
+              if _buf and vim.api.nvim_buf_is_valid(_buf) then
+                M.render()
+              end
+            end)
+          end
+        end)
+      end
+    end
+  end
 end
 
 --- Clean up resources without closing window
@@ -502,6 +572,7 @@ function M._cleanup()
   end
   _win = nil
   _buf = nil
+  _source_bufnr = nil
 end
 
 --- Close the status window

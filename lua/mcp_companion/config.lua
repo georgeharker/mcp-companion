@@ -13,9 +13,25 @@ local M = {}
 --- @field request_timeout number Default timeout for MCP requests in seconds. Default 60.
 --- @field token_key? string Encryption key for OAuth token storage (or set MCP_BRIDGE_TOKEN_KEY env var)
 --- @field log_file? string Path for bridge Python-side log file (default: nil — relies on sharedserver stderr capture)
+--- @field token_in_url? boolean Include session token in URL path (/mcp/<token>) instead of header only.
+---   Default false: token is sent via X-MCP-Bridge-Session header only (cleaner, per ACP spec).
+---   Set true if your ACP agent does not forward custom HTTP headers to MCP servers.
+---   If tools fail in a specific agent, try enabling this and please report at
+---   https://github.com/geohar/mcp-companion/issues with the agent name.
+
+--- @class MCPCompanion.CCConfig
+--- @field auto_http_tools boolean|string[] Controls which MCP tool groups are added to new chats.
+---   true (default): add the aggregate @mcp-bridge group (all servers, one context block entry).
+---   false: register tools but do not auto-add; user manually @-mentions groups in each chat.
+---   string[]: add only the named server groups (e.g. {"github","filesystem"}).
+--- @field auto_acp_tools boolean|string[] Whether to inject the bridge as an MCP server into ACP sessions.
+---   true (default): bridge is offered to ACP agents; all MCP servers visible.
+---   false: bridge is not injected; ACP agents have no MCP tools from this plugin.
+---   string[]: bridge is injected but only the named servers are visible (e.g. {"github","filesystem"}).
 
 --- @class MCPCompanion.Config
 --- @field bridge MCPCompanion.BridgeConfig
+--- @field cc MCPCompanion.CCConfig
 --- @field native_servers table<string, {enabled: boolean}>
 --- @field auto_approve boolean|fun(tool_name: string, server_name: string, tool_ctx: table): boolean
 --- @field system_prompt_resources? boolean|string[] Resource name patterns to inject into system prompt
@@ -37,10 +53,16 @@ M.defaults = {
     request_timeout = 60,
     token_key = nil,
     log_file = nil,
+    token_in_url = false,
   },
 
   native_servers = {
     neovim = { enabled = true },
+  },
+
+  cc = {
+    auto_http_tools = true,
+    auto_acp_tools = true,
   },
 
   auto_approve = false,

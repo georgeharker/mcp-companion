@@ -343,10 +343,16 @@ class _RefreshTokenOAuth(OAuth):
             return _RefreshOutcome.AUTH_ERROR
 
         token_url = str(ctx.oauth_metadata.token_endpoint)
+        if not ctx.current_tokens or not ctx.current_tokens.refresh_token:
+            logger.warning("Cannot proactively refresh — no refresh token available")
+            return _RefreshOutcome.AUTH_ERROR
+        if not ctx.client_info or not ctx.client_info.client_id:
+            logger.warning("Cannot proactively refresh — no client_id available")
+            return _RefreshOutcome.AUTH_ERROR
         refresh_data: dict[str, str] = {
             "grant_type": "refresh_token",
-            "refresh_token": ctx.current_tokens.refresh_token,  # type: ignore[union-attr]
-            "client_id": ctx.client_info.client_id,  # type: ignore[union-attr]
+            "refresh_token": ctx.current_tokens.refresh_token,
+            "client_id": ctx.client_info.client_id,
         }
 
         # Include resource param if protocol version supports it

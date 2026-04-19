@@ -161,6 +161,22 @@ and forwards prompts; OpenCode handles tool execution independently.
 State is updated by `bridge/client.lua` after each capability refresh. Subscribers
 receive events via `state.on(event, callback)`.
 
+## Per-Chat Session Filtering
+
+Each CC chat session gets its own MCP session on the bridge, identified by a UUID token.
+The bridge can disable individual servers per-session so a chat only sees the servers
+it is allowed to use.
+
+- **ACP adapters**: token injected into the `mcpServers` URL (`/mcp/<token>`), filter
+  applied via `POST /sessions/token/<token>/filter` in `ACPSessionPost`.
+- **HTTP adapters**: a lightweight "lite" per-chat MCP client connects to `/mcp/<token>`;
+  filter applied immediately after connect; tool calls routed through the per-chat client.
+- `/mcp-session` slash command toggles servers for the current chat using the same
+  token endpoint for both adapter types.
+
+For full implementation details see
+[`docs/designs/per-chat-session-filtering.md`](designs/per-chat-session-filtering.md).
+
 ## File Structure
 
 ```
@@ -168,28 +184,29 @@ mcp-companion.nvim/
 ├── bridge/                     Python FastMCP bridge
 │   ├── pyproject.toml
 │   └── mcp_bridge/
-│       ├── server.py           FastMCP proxy server
+│       ├── server.py           FastMCP proxy server + filter REST API
 │       ├── config.py           MCP server config loader (VS Code format)
-│       ├── meta_tools.py       Bridge meta-tools (_status, _list_servers, _reload_config)
-│       └── __main__.py         CLI entry point
+│       ├── meta_tools.py       Bridge meta-tools (status, enable/disable servers)
+│       └── __main__.py         CLI entry point + TokenRewriteMiddleware
 ├── lua/mcp_companion/
 │   ├── init.lua                Public API + setup()
 │   ├── config.lua              Config schema + defaults + auto-detection
 │   ├── state.lua               Shared state + event bus
 │   ├── log.lua                 Logger
 │   ├── bridge/
-│   │   ├── init.lua            Bridge process lifecycle
-│   │   └── client.lua          HTTP client (vim.uv TCP)
+│   │   ├── init.lua            Bridge process lifecycle + per-chat client factory
+│   │   └── client.lua          HTTP client (vim.uv TCP) with lite mode
 │   ├── cc/
-│   │   ├── init.lua            CC extension entry point + ACP injection
-│   │   ├── tools.lua           MCP tools → CC tools registration
-│   │   ├── variables.lua       [STUB] MCP resources → CC # variables
-│   │   ├── slash_commands.lua  [STUB] MCP prompts → CC / slash commands
+│   │   ├── init.lua            CC extension entry point + ACP injection + per-chat filtering
+│   │   ├── tools.lua           MCP tools → CC tools registration + per-chat call routing
+│   │   ├── session_commands.lua  /mcp-session slash command
+│   │   ├── editor_context.lua  MCP resources → CC #editor_context entries
+│   │   ├── slash_commands.lua  MCP prompts → CC / slash commands
 │   │   └── approval.lua        [STUB] Tool approval flow
 │   ├── native/
 │   │   └── init.lua            [STUB] Pure-Lua MCP server registration
 │   └── ui/
-│       └── init.lua            Status floating window (not wired)
+│       └── init.lua            Status floating window
 └── tests/
     └── (pytest suite for bridge Python code)
 ```
@@ -197,8 +214,8 @@ mcp-companion.nvim/
 ## Known Limitations
 
 - No tool approval flow (all tools auto-execute)
-- Resources and prompts are not yet registered with CC
-- Status UI exists but is not accessible via any command or keybind
 - Native (pure-Lua) MCP server registration is not implemented
-- Bridge must be running before CC connects; there is no retry on connection failure
-- 180 tools on session/new means OpenCode's first connect takes a few seconds
+- `transform_to_acp` (upstream CC) has no HTTP server branch and no nil guard on
+  `cfg.cmd`; our patch adds HTTP support but the upstream should be fixed
+- Pending token filters are held in memory — if the bridge restarts between
+  `ACPSessionPre` and the ACP agent's first connect, the filter is lost

@@ -4,18 +4,168 @@ import argparse
 import atexit
 import logging
 import os
+import re
 import signal
 import sys
 import types
 
 import uvicorn
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response
 
-from mcp_bridge.server import create_bridge
+from mcp_bridge.server import _pending_token_filters, _token_sessions, create_bridge
 from mcp_bridge.sharedserver import cleanup as cleanup_sharedservers
 from mcp_bridge.sharedserver import register_for_cleanup
 
 logger = logging.getLogger(__name__)
+
+_mcp_log = logging.getLogger("mcp-bridge.requests")
+
+# Header name the Neovim plugin sets on ACP-injected mcpServers entries.
+_ACP_TOKEN_HEADER = "x-mcp-bridge-session"
+
+# UUID pattern: validates tokens from both header and URL path.
+_TOKEN_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+# Match /mcp/<uuid>[/...] in the URL path.
+_MCP_TOKEN_PATH_RE = re.compile(
+    r"^/mcp/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(/.*)?$"
+)
+
+
+class TokenRewriteMiddleware(BaseHTTPMiddleware):
+    """Map token -> MCP session-id and apply pending filters on connect.
+
+    Accepts the token from two sources:
+      1. URL path: /mcp/<token>[/...] — rewrites to /mcp so FastMCP sees a plain request.
+      2. HTTP header: X-MCP-Bridge-Session — fallback.
+
+    On first request carrying a token, records token->session_id from the response
+    header.  If a pending filter was stored via POST /sessions/token/<token>/filter
+    before the client connected, it is applied immediately.
+    """
+
+    async def dispatch(
+        self, request: StarletteRequest, call_next: RequestResponseEndpoint
+    ) -> Response:
+        path = request.url.path
+
+        # --- Source 1: token in URL path ---
+        url_token: str | None = None
+        path_match = _MCP_TOKEN_PATH_RE.match(path)
+        if path_match:
+            url_token = path_match.group(1)
+            remainder = path_match.group(2) or ""
+            new_path = f"/mcp{remainder}"
+            logger.info(
+                "Token in URL path: token=%s  %s -> %s",
+                url_token,
+                path,
+                new_path,
+            )
+            # Mutate scope in-place; BaseHTTPMiddleware passes the same scope dict
+            # to call_next so FastMCP receives the rewritten path.
+            request.scope["path"] = new_path
+            request.scope["raw_path"] = new_path.encode()
+
+        # --- Source 2: token in header ---
+        header_token: str | None = request.headers.get(_ACP_TOKEN_HEADER)
+        if header_token and not _TOKEN_RE.match(header_token):
+            header_token = None
+
+        token = url_token or header_token
+
+        if token is None:
+            return await call_next(request)
+
+        already_mapped = token in _token_sessions
+        if not already_mapped:
+            logger.info(
+                "Token not yet mapped: token=%s  source=%s  method=%s",
+                token,
+                "url" if url_token else "header",
+                request.method,
+            )
+        else:
+            logger.debug(
+                "Token already mapped: token=%s  session=%s",
+                token,
+                _token_sessions[token],
+            )
+
+        response = await call_next(request)
+
+        if not already_mapped:
+            sid = response.headers.get("mcp-session-id")
+            if sid:
+                _token_sessions[token] = sid
+                logger.info(
+                    "Token mapped: token=%s  session=%s  source=%s",
+                    token,
+                    sid,
+                    "url" if url_token else "header",
+                )
+                # Apply any pending filter that was stored before the client connected
+                pending = _pending_token_filters.pop(token, None)
+                if pending:
+                    from mcp_bridge.server import _session_disabled
+
+                    _session_disabled[sid] = pending
+                    logger.info(
+                        "Pending token filter applied: token=%s  session=%s  disabled=%s",
+                        token,
+                        sid,
+                        sorted(pending),
+                    )
+            else:
+                logger.debug(
+                    "Token seen but no mcp-session-id in response: token=%s  status=%d  source=%s",
+                    token,
+                    response.status_code,
+                    "url" if url_token else "header",
+                )
+
+        return response
+
+
+class MCPRequestLogMiddleware(BaseHTTPMiddleware):
+    """Log /mcp requests: debug-level detail on every request, warnings on non-2xx."""
+
+    async def dispatch(
+        self, request: StarletteRequest, call_next: RequestResponseEndpoint
+    ) -> Response:
+        path = request.url.path
+        is_mcp = path == "/mcp" or path.startswith("/mcp/")
+        if is_mcp and _mcp_log.isEnabledFor(logging.DEBUG):
+            session_id = request.headers.get("mcp-session-id", "-")
+            acp_token_hdr = request.headers.get(_ACP_TOKEN_HEADER, "-")
+            user_agent = request.headers.get("user-agent", "-")
+            accept = request.headers.get("accept", "-")
+            _mcp_log.debug(
+                "%s %s  session=%s  acp-token-hdr=%s  ua=%s  accept=%s  all_headers=%s",
+                request.method,
+                path,
+                session_id,
+                acp_token_hdr,
+                user_agent,
+                accept,
+                dict(request.headers),
+            )
+        response = await call_next(request)
+        if is_mcp and response.status_code >= 400:
+            session_id = request.headers.get("mcp-session-id", "-")
+            user_agent = request.headers.get("user-agent", "-")
+            _mcp_log.warning(
+                "%s %s  => %d  session=%s  ua=%s",
+                request.method,
+                path,
+                response.status_code,
+                session_id,
+                user_agent,
+            )
+        return response
 
 
 def _signal_handler(signum: int, frame: types.FrameType | None) -> None:
@@ -55,6 +205,11 @@ def create_app() -> Starlette:
         path="/mcp",
         stateless_http=False,
     )
+    app.add_middleware(MCPRequestLogMiddleware)
+    # TokenRewriteMiddleware is outermost (last-added in Starlette = outermost).
+    # It extracts the ACP token from /mcp/<token> URL paths and rewrites to /mcp
+    # before the log middleware and FastMCP see the request.
+    app.add_middleware(TokenRewriteMiddleware)
     return app
 
 
