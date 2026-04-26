@@ -9,6 +9,7 @@
 
 local M = {}
 
+local config = require("mcp_companion.config")
 local log = require("mcp_companion.log")
 
 --- Fingerprint of the last successful registration (tool count + sorted names).
@@ -171,14 +172,14 @@ function M.register()
                         cmds = {
                             _make_bridge_cmd(client, captured_namespaced, captured_display, server.name),
                         },
-                        system_prompt = function(_group_config, _ctx)
+                        system_prompt = config.get().cc.tool_system_prompts and function(_group_config, _ctx)
                             return string.format(
                                 "You can use the `%s` tool from the `%s` MCP server to: %s\n",
                                 captured_display,
                                 server.name,
                                 captured_description
                             )
-                        end,
+                        end or nil,
                         output = _make_output(captured_display),
                         schema = {
                             type = "function",
@@ -201,13 +202,13 @@ function M.register()
             local group = {
                 description = string.format("All tools from the `%s` MCP server", server.name),
                 tools = tool_keys,
-                system_prompt = function(_group_config, _ctx)
+                system_prompt = config.get().cc.tool_system_prompts and function(_group_config, _ctx)
                     return string.format(
                         "You have access to the `%s` MCP server with %d tool(s).\n",
                         server.name,
                         #tool_keys
                     )
-                end,
+                end or nil,
                 opts = { collapse_tools = true },
             }
 
@@ -238,13 +239,13 @@ function M.register()
         local bridge_group = {
             description = "All tools from all MCP servers via the bridge",
             tools = all_tool_keys,
-            system_prompt = function(_group_config, _ctx)
+            system_prompt = config.get().cc.tool_system_prompts and function(_group_config, _ctx)
                 return string.format(
                     "You have access to %d MCP tool(s) across %d server(s) via the MCP bridge.\n",
                     #all_tool_keys,
                     registered_servers
                 )
-            end,
+            end or nil,
             opts = { collapse_tools = true },
         }
         cc_mcp.register_tools("bridge", {}, bridge_group)

@@ -28,6 +28,9 @@ local M = {}
 ---   true (default): bridge is offered to ACP agents; all MCP servers visible.
 ---   false: bridge is not injected; ACP agents have no MCP tools from this plugin.
 ---   string[]: bridge is injected but only the named servers are visible (e.g. {"github","filesystem"}).
+--- @field tool_system_prompts boolean Whether to add per-tool natural-language system messages alongside
+---   the tools array. Default false: tool descriptions are already present in the schema and duplicating
+---   them as system messages significantly inflates token usage (one message per tool).
 
 --- @class MCPCompanion.Config
 --- @field bridge MCPCompanion.BridgeConfig
@@ -63,6 +66,7 @@ M.defaults = {
   cc = {
     auto_http_tools = true,
     auto_acp_tools = true,
+    tool_system_prompts = false,
   },
 
   auto_approve = false,
