@@ -409,7 +409,12 @@ class ConnectionManager:
                 try:
                     await asyncio.wait_for(client.ping(), timeout=10.0)
                 except Exception as e:
-                    logger.warning("Health-check failed for '%s': %s — reconnecting", conn.name, e)
+                    logger.warning(
+                        "Health-check failed for '%s': %s (%s) — reconnecting",
+                        conn.name,
+                        type(e).__name__,
+                        e or "no message",
+                    )
                     await self._reconnect(conn)
         except asyncio.CancelledError:
             return

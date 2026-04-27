@@ -10,7 +10,7 @@ import uuid
 import weakref
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, Literal, overload
+from typing import Any, ClassVar, Literal, overload
 
 import httpx
 import mcp.types as mt
@@ -236,6 +236,15 @@ class ToolProcessingMiddleware(Middleware):
 
     CACHE_TTL = 300  # 5 minutes max cache age
 
+    # Single-flight coalescing for concurrent cache misses.
+    # When the cache is empty/stale and many sessions request tools/list at
+    # once (e.g. after a tools_list_changed broadcast), only the first caller
+    # issues the upstream fetch — every other caller awaits the same result.
+    # Without this, N concurrent flows hit the same OAuth-backed Client and
+    # race the SDK's auth-context lock.
+    _inflight: ClassVar[asyncio.Future[list[Tool]] | None] = None
+    _inflight_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+
     async def on_request(
         self,
         context: MiddlewareContext[mt.Request[Any, Any]],
@@ -273,35 +282,73 @@ class ToolProcessingMiddleware(Middleware):
         context: MiddlewareContext[mt.ListToolsRequest],
         call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
     ) -> Sequence[Tool]:
-        global _tool_cache, _tool_cache_time
-
         now = time.time()
         cache_age = now - _tool_cache_time
 
-        # Use cache if valid
         if _tool_cache is not None and cache_age < self.CACHE_TTL:
             logger.warning(
                 "tools/list: CACHE HIT (%d tools, %.1fs old)",
                 len(_tool_cache),
                 cache_age,
             )
-            return _tool_cache
+            return self._apply_session_filter(context, _tool_cache)
 
-        # Cache miss or expired - fetch fresh
+        tools = await self._fetch_or_join(context, call_next, cache_age)
+        return self._apply_session_filter(context, tools)
+
+    async def _fetch_or_join(
+        self,
+        context: MiddlewareContext[mt.ListToolsRequest],
+        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
+        cache_age: float,
+    ) -> list[Tool]:
+        """Single-flight cache fill. First caller fetches; others await its result."""
+        cls = type(self)
+
+        async with cls._inflight_lock:
+            fut = cls._inflight
+            if fut is None or fut.done():
+                fut = asyncio.get_running_loop().create_future()
+                cls._inflight = fut
+                is_owner = True
+            else:
+                is_owner = False
+
+        if not is_owner:
+            logger.debug("tools/list: joining in-flight fetch")
+            return await fut
+
         logger.warning("tools/list: CACHE MISS - fetching fresh (cache_age=%.1fs)", cache_age)
         try:
-            tools = list(await call_next(context))
+            tools = await self._do_fetch(context, call_next)
+            fut.set_result(tools)
+            return tools
+        except Exception as exc:
+            fut.set_exception(exc)
+            raise
+        finally:
+            async with cls._inflight_lock:
+                if cls._inflight is fut:
+                    cls._inflight = None
+
+    async def _do_fetch(
+        self,
+        context: MiddlewareContext[mt.ListToolsRequest],
+        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
+    ) -> list[Tool]:
+        """Fetch upstream, sanitize, filter, populate the global cache."""
+        global _tool_cache, _tool_cache_time
+
+        try:
+            raw = list(await call_next(context))
         except Exception as e:
-            # If fetching fails, return stale cache or empty list
-            # This prevents one failing server from breaking tools/list entirely
             logger.error("tools/list: upstream error, returning stale cache: %s", e)
             if _tool_cache is not None:
                 return _tool_cache
             return []
 
-        # Sanitize and cache
         sanitized: list[Tool] = []
-        for tool in tools:
+        for tool in raw:
             try:
                 tool.model_dump(by_alias=True, mode="json", exclude_none=True)
                 sanitized.append(tool)
@@ -309,7 +356,6 @@ class ToolProcessingMiddleware(Middleware):
                 logger.warning("Replacing circular tool: %s", tool.name)
                 sanitized.append(self._to_clean_tool(tool))
 
-        # Apply tool filters from server configs
         filtered = _filter_tools(sanitized)
         if len(filtered) < len(sanitized):
             logger.info(
@@ -319,32 +365,39 @@ class ToolProcessingMiddleware(Middleware):
             )
 
         _tool_cache = filtered
-        _tool_cache_time = now
+        _tool_cache_time = time.time()
         logger.info("tools/list: cached %d tools", len(filtered))
-
-        # Apply per-session server blocklist on top of the global cache.
-        # This does not modify _tool_cache — each session gets a filtered view.
-        if context.fastmcp_context is not None:
-            try:
-                sid = context.fastmcp_context.session_id
-                blocked = _session_disabled.get(sid)
-                if blocked:
-                    pre = len(filtered)
-                    filtered = [
-                        t
-                        for t in filtered
-                        if _find_server_for_tool(str(t.name) if t.name else "")[0] not in blocked
-                    ]
-                    if len(filtered) < pre:
-                        logger.debug(
-                            "tools/list: session filter removed %d tool(s) for blocked servers %s",
-                            pre - len(filtered),
-                            blocked,
-                        )
-            except (RuntimeError, AttributeError):
-                pass
-
         return filtered
+
+    @staticmethod
+    def _apply_session_filter(
+        context: MiddlewareContext[mt.ListToolsRequest],
+        tools: list[Tool],
+    ) -> list[Tool]:
+        """Apply the per-session server blocklist on top of the shared cache."""
+        if context.fastmcp_context is None:
+            return tools
+        try:
+            sid = context.fastmcp_context.session_id
+        except (RuntimeError, AttributeError):
+            return tools
+
+        blocked = _session_disabled.get(sid)
+        if not blocked:
+            return tools
+
+        out = [
+            t
+            for t in tools
+            if _find_server_for_tool(str(t.name) if t.name else "")[0] not in blocked
+        ]
+        if len(out) < len(tools):
+            logger.debug(
+                "tools/list: session filter removed %d tool(s) for blocked servers %s",
+                len(tools) - len(out),
+                blocked,
+            )
+        return out
 
     async def on_call_tool(
         self,

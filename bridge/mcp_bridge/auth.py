@@ -414,6 +414,28 @@ class _RefreshTokenOAuth(OAuth):
             logger.warning("Proactive token refresh error", exc_info=True)
             return _RefreshOutcome.AUTH_ERROR
 
+    async def _apply_network_grace_window(self) -> None:
+        """Push token expiry forward when the network is unreachable.
+
+        Preserves the cached (expired) access token so the SDK does not fall
+        through to a full browser re-auth.  The next real request will trigger
+        a refresh attempt through the normal SDK flow.  The grace expiry is
+        also persisted so a quick second reconnect (still offline) does not
+        re-run ``_proactive_refresh`` and pay the timeout again.
+        """
+        ctx = self.context
+        ctx.token_expiry_time = time.time() + _NETWORK_ERROR_GRACE_SECONDS
+        logger.warning(
+            "Network unreachable during init — granting %.0fs grace window "
+            "to avoid triggering full re-auth (server: %s)",
+            _NETWORK_ERROR_GRACE_SECONDS,
+            self.token_storage_adapter._server_url,
+        )
+        try:
+            await self._save_token_expiry()
+        except Exception:
+            logger.debug("Failed to persist grace-window expiry", exc_info=True)
+
     async def _initialize(self) -> None:
         """Load cached tokens and ensure OAuth metadata is available.
 
@@ -470,17 +492,7 @@ class _RefreshTokenOAuth(OAuth):
                     )
                     outcome = await self._proactive_refresh()
                     if outcome == _RefreshOutcome.NETWORK_ERROR:
-                        # Network is down — preserve the token so the SDK
-                        # does not fall through to a full browser re-auth.
-                        # Grant a short validity window; the next real request
-                        # will trigger a refresh attempt via the SDK flow.
-                        ctx.token_expiry_time = time.time() + _NETWORK_ERROR_GRACE_SECONDS
-                        logger.warning(
-                            "Network unreachable during init — granting %.0fs grace window "
-                            "to avoid triggering full re-auth (server: %s)",
-                            _NETWORK_ERROR_GRACE_SECONDS,
-                            self.token_storage_adapter._server_url,
-                        )
+                        await self._apply_network_grace_window()
                 else:
                     logger.info(
                         "Restored absolute token expiry (expired %.0fs ago — no refresh token)",
@@ -493,13 +505,7 @@ class _RefreshTokenOAuth(OAuth):
                 logger.info("No persisted token expiry — proactively refreshing")
                 outcome = await self._proactive_refresh()
                 if outcome == _RefreshOutcome.NETWORK_ERROR:
-                    ctx.token_expiry_time = time.time() + _NETWORK_ERROR_GRACE_SECONDS
-                    logger.warning(
-                        "Network unreachable during init — granting %.0fs grace window "
-                        "to avoid triggering full re-auth (server: %s)",
-                        _NETWORK_ERROR_GRACE_SECONDS,
-                        self.token_storage_adapter._server_url,
-                    )
+                    await self._apply_network_grace_window()
 
     async def async_auth_flow(
         self, request: httpx.Request

@@ -266,6 +266,95 @@ class TestMiddlewareFiltering:
         assert srv._session_disabled.get("other-sid") is None
 
 
+# ── Single-flight tools/list cache fill ────────────────────────────
+
+
+class TestToolsListSingleFlight:
+    """Concurrent tools/list misses should coalesce into one upstream fetch.
+
+    Without single-flight, an N-session ``tools_list_changed`` broadcast
+    causes N concurrent ``call_next`` invocations against the same OAuth-backed
+    upstream, which races the SDK's auth-context lock.
+    """
+
+    def setup_method(self):
+        import mcp_bridge.server as srv
+
+        _reset_session_state()
+        srv._tool_cache = None
+        srv._tool_cache_time = 0
+        srv.ToolProcessingMiddleware._inflight = None
+
+    def teardown_method(self):
+        import mcp_bridge.server as srv
+
+        srv._tool_cache = None
+        srv._tool_cache_time = 0
+        srv.ToolProcessingMiddleware._inflight = None
+        _reset_session_state()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_misses_coalesce(self):
+        import asyncio
+
+        from mcp_bridge.server import ToolProcessingMiddleware
+
+        mw = ToolProcessingMiddleware()
+
+        call_count = 0
+        gate = asyncio.Event()
+
+        async def fake_call_next(_ctx):
+            nonlocal call_count
+            call_count += 1
+            await gate.wait()  # hold the first fetch open while others queue up
+            return []
+
+        ctx = MagicMock()
+        ctx.fastmcp_context = None
+
+        tasks = [
+            asyncio.create_task(mw.on_list_tools(ctx, fake_call_next)) for _ in range(10)
+        ]
+        # Yield so all tasks reach the in-flight join point before we release.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        gate.set()
+        results = await asyncio.gather(*tasks)
+
+        assert call_count == 1, f"expected 1 upstream fetch, got {call_count}"
+        assert all(r == [] for r in results)
+
+    @pytest.mark.asyncio
+    async def test_failure_does_not_wedge_inflight(self):
+        """A failed fetch must clear the in-flight slot so the next call retries."""
+        from mcp_bridge.server import ToolProcessingMiddleware
+
+        mw = ToolProcessingMiddleware()
+        ctx = MagicMock()
+        ctx.fastmcp_context = None
+
+        async def failing_fetch(_ctx):
+            raise RuntimeError("upstream boom")
+
+        # _do_fetch swallows upstream errors and returns []; the in-flight
+        # slot should still be cleared after the call resolves.
+        result = await mw.on_list_tools(ctx, failing_fetch)
+        assert result == []
+        assert ToolProcessingMiddleware._inflight is None
+
+        # A subsequent call must be free to issue a new fetch.
+        called = 0
+
+        async def succeeding_fetch(_ctx):
+            nonlocal called
+            called += 1
+            return []
+
+        await mw.on_list_tools(ctx, succeeding_fetch)
+        assert called == 1
+
+
 # ── _pending_token_filters dict ────────────────────────────────────
 
 
