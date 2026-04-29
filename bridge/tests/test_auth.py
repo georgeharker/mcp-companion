@@ -416,9 +416,14 @@ class TestPreflightRefresh:
 
     @pytest.mark.anyio
     async def test_token_well_inside_margin_is_left_alone(self, tmp_path: Path) -> None:
-        """A token with plenty of life left should not trigger a pre-flight refresh."""
+        """A token with plenty of life left and a recent heartbeat is not refreshed."""
+        import time
+
         oauth = self._make_oauth(tmp_path)
         self._seed(oauth, expires_in=_REFRESH_MARGIN_SECONDS + 600.0)
+        # Mark this OAuth instance as warm — i.e. we already saw a successful
+        # request this process.  Without this the first-request branch fires.
+        oauth._last_seen_at = time.time()
 
         with patch.object(oauth, "_proactive_refresh", new=AsyncMock()) as ref:
             await oauth._preflight_refresh_if_needed()
@@ -428,8 +433,11 @@ class TestPreflightRefresh:
     @pytest.mark.anyio
     async def test_token_within_margin_triggers_refresh(self, tmp_path: Path) -> None:
         """A token within the margin window should be refreshed proactively."""
+        import time
+
         oauth = self._make_oauth(tmp_path)
         self._seed(oauth, expires_in=_REFRESH_MARGIN_SECONDS - 30.0)
+        oauth._last_seen_at = time.time()  # warm — gates the margin path
 
         ref = AsyncMock(return_value=_RefreshOutcome.SUCCESS)
         with patch.object(oauth, "_proactive_refresh", new=ref):
@@ -454,30 +462,45 @@ class TestPreflightRefresh:
         ref.assert_awaited_once()
 
     @pytest.mark.anyio
-    async def test_no_last_seen_does_not_force_refresh(self, tmp_path: Path) -> None:
-        """A first-ever request must not be misclassified as a wake-up."""
+    async def test_first_request_forces_refresh(self, tmp_path: Path) -> None:
+        """A first-ever request (no prior heartbeat) treats as wake-up.
+
+        Reason: the on-disk expiry could be stale — a previous bridge-process
+        session might have applied a synthetic grace window, or the token
+        might have been revoked externally.  A single refresh on first use
+        is the only way to know the persisted expiry reflects reality.
+        """
         oauth = self._make_oauth(tmp_path)
+        # Token nominally has plenty of life left per the on-disk expiry —
+        # but we don't trust it because we haven't seen it pass a real check
+        # yet this process.
         self._seed(oauth, expires_in=3600.0)
-        # _last_seen_at is unset on a fresh instance.
         assert not hasattr(oauth, "_last_seen_at")
 
-        ref = AsyncMock()
+        ref = AsyncMock(return_value=_RefreshOutcome.SUCCESS)
         with patch.object(oauth, "_proactive_refresh", new=ref):
             await oauth._preflight_refresh_if_needed()
 
-        ref.assert_not_called()
+        ref.assert_awaited_once()
 
     @pytest.mark.anyio
     async def test_network_error_applies_grace_window(self, tmp_path: Path) -> None:
-        """NETWORK_ERROR from refresh extends expiry by the grace window."""
+        """NETWORK_ERROR from refresh extends in-memory expiry but does NOT persist.
+
+        Grace is bridge-process-scoped — persisting it would propagate the
+        synthetic value across restarts and trick a future ``_initialize`` into
+        trusting an expiry the access token doesn't actually have at the
+        OAuth provider.
+        """
         import time
 
         oauth = self._make_oauth(tmp_path)
         # Within margin so refresh is attempted.
         self._seed(oauth, expires_in=_REFRESH_MARGIN_SECONDS - 30.0)
+        oauth._last_seen_at = time.time()  # warm — exercise margin path
 
         ref = AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
-        save = AsyncMock()  # avoid reaching the disk store
+        save = AsyncMock()  # spy on persistence
         with patch.object(oauth, "_proactive_refresh", new=ref), patch.object(
             oauth, "_save_token_expiry", new=save
         ):
@@ -494,12 +517,17 @@ class TestPreflightRefresh:
         # Tokens themselves untouched
         assert ctx.current_tokens.access_token == "A"
         assert ctx.current_tokens.refresh_token == "R"
+        # Synthetic expiry must NOT have hit disk.
+        save.assert_not_awaited()
 
     @pytest.mark.anyio
     async def test_auth_error_leaves_tokens_for_sdk_to_handle(self, tmp_path: Path) -> None:
         """AUTH_ERROR from refresh must not bump expiry — let SDK drive re-auth."""
+        import time
+
         oauth = self._make_oauth(tmp_path)
         self._seed(oauth, expires_in=_REFRESH_MARGIN_SECONDS - 30.0)
+        oauth._last_seen_at = time.time()
         original_expiry = oauth.context.token_expiry_time
 
         ref = AsyncMock(return_value=_RefreshOutcome.AUTH_ERROR)
@@ -512,8 +540,11 @@ class TestPreflightRefresh:
     @pytest.mark.anyio
     async def test_no_refresh_capability_skips_preflight(self, tmp_path: Path) -> None:
         """Without a refresh_token / client_info there's nothing to do."""
+        import time
+
         oauth = self._make_oauth(tmp_path)
         self._seed(oauth, expires_in=10.0)
+        oauth._last_seen_at = time.time()
         # Strip client_info so can_refresh_token() returns False
         oauth.context.client_info = None
 
@@ -565,12 +596,17 @@ class TestPreflightRefresh:
     async def test_network_error_extends_short_or_expired_token(
         self, tmp_path: Path
     ) -> None:
-        """When the existing expiry IS within (or before) the grace window, extend it."""
+        """When the existing expiry IS within (or before) the grace window, extend it.
+
+        The synthetic value is in-memory only — must not be persisted to
+        disk (otherwise the lie would survive a bridge restart).
+        """
         import time
 
         oauth = self._make_oauth(tmp_path)
         # Token within the grace window (e.g. 30 seconds left)
         self._seed(oauth, expires_in=30.0)
+        oauth._last_seen_at = time.time()
 
         ref = AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
         save = AsyncMock()
@@ -585,7 +621,8 @@ class TestPreflightRefresh:
         lo = before + _NETWORK_ERROR_GRACE_SECONDS - 1
         hi = after + _NETWORK_ERROR_GRACE_SECONDS + 1
         assert lo <= ctx.token_expiry_time <= hi
-        save.assert_awaited()
+        # In-memory only — never reaches disk.
+        save.assert_not_awaited()
 
 
 class TestUpstream401Suppression:
