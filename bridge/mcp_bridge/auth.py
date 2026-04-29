@@ -434,12 +434,25 @@ class _RefreshTokenOAuth(OAuth):
 
         Preserves the cached (expired) access token so the SDK does not fall
         through to a full browser re-auth.  The next real request will trigger
-        a refresh attempt through the normal SDK flow.  The grace expiry is
-        also persisted so a quick second reconnect (still offline) does not
-        re-run ``_proactive_refresh`` and pay the timeout again.
+        a refresh attempt through the normal SDK flow.
+
+        Only extends — if the existing expiry is already further out than the
+        grace window (e.g. the wake-up pre-flight fired against a token that
+        still has tens of minutes left), we leave it alone instead of taking
+        the headroom away on a transient network failure.
         """
         ctx = self.context
-        ctx.token_expiry_time = time.time() + _NETWORK_ERROR_GRACE_SECONDS
+        grace_until = time.time() + _NETWORK_ERROR_GRACE_SECONDS
+        existing = ctx.token_expiry_time
+        if existing is not None and existing > grace_until:
+            logger.debug(
+                "Network unreachable but existing token expiry (%.0fs out) is past "
+                "the grace window — leaving expiry untouched (server: %s)",
+                existing - time.time(),
+                self.token_storage_adapter._server_url,
+            )
+            return
+        ctx.token_expiry_time = grace_until
         logger.warning(
             "Network unreachable during init — granting %.0fs grace window "
             "to avoid triggering full re-auth (server: %s)",
@@ -632,6 +645,42 @@ class _RefreshTokenOAuth(OAuth):
                     request_out.url,
                     response.status_code,
                 )
+
+                # Suppress the SDK's inline full-flow re-auth on the *first*
+                # 401 from the upstream MCP server when our credentials still
+                # look healthy.
+                #
+                # Why: the SDK treats any 401 as "credentials are bad, must
+                # re-authorize" and immediately runs PRM/OASM discovery and
+                # `_perform_authorization`, which prints the Google sign-in
+                # URL and pops a browser.  Real-world workspace_mcp under
+                # ``EXTERNAL_OAUTH21_PROVIDER=true`` calls Google's userinfo
+                # synchronously inside ``verify_token``; if Google is briefly
+                # unreachable the 401 is purely transient — neither the
+                # access nor refresh token is at fault.  The pre-flight
+                # refresh has already done what it can; the right answer is
+                # to propagate the 401 to the caller, not invent a re-auth
+                # event.  Genuine credential failures (revoked grant, scope
+                # mismatch) are recovered via :MCPToggleServer / the `e` key
+                # in :MCPStatus, which clears _auth_failed and runs a fresh
+                # browser flow on demand.
+                if (
+                    cycle == 1
+                    and response.status_code == 401
+                    and ctx.current_tokens
+                    and ctx.current_tokens.access_token
+                    and ctx.current_tokens.refresh_token
+                ):
+                    logger.warning(
+                        "Upstream %s returned 401 with locally-valid token "
+                        "(refresh_token present) — propagating to caller without "
+                        "triggering full re-auth.  Use :MCPToggleServer to force "
+                        "re-authentication if this persists.",
+                        request.url,
+                    )
+                    await flow.aclose()
+                    return
+
                 try:
                     request_out = await flow.asend(response)
                 except StopAsyncIteration:
