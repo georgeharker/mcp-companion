@@ -461,6 +461,13 @@ class _RefreshTokenOAuth(OAuth):
         grace window (e.g. the wake-up pre-flight fired against a token that
         still has tens of minutes left), we leave it alone instead of taking
         the headroom away on a transient network failure.
+
+        **The synthetic expiry is intentionally NOT persisted to disk.**  The
+        grace bridges a transient outage within one bridge-process lifetime;
+        persisting would propagate the bumped value across restarts and trick
+        ``_initialize()`` into trusting an expiry the access token doesn't
+        actually have at the OAuth provider.  The on-disk sidecar always
+        reflects the most recent *real* refresh response.
         """
         ctx = self.context
         grace_until = time.time() + _NETWORK_ERROR_GRACE_SECONDS
@@ -476,14 +483,11 @@ class _RefreshTokenOAuth(OAuth):
         ctx.token_expiry_time = grace_until
         logger.warning(
             "Network unreachable during init — granting %.0fs grace window "
-            "to avoid triggering full re-auth (server: %s)",
+            "to avoid triggering full re-auth (server: %s).  Not persisted; "
+            "next restart will see the real expiry and refresh.",
             _NETWORK_ERROR_GRACE_SECONDS,
             self.token_storage_adapter._server_url,
         )
-        try:
-            await self._save_token_expiry()
-        except Exception:
-            logger.debug("Failed to persist grace-window expiry", exc_info=True)
 
     async def _initialize(self) -> None:
         """Load cached tokens and ensure OAuth metadata is available.
@@ -665,7 +669,7 @@ class _RefreshTokenOAuth(OAuth):
     async def _preflight_refresh_if_needed(self) -> None:
         """Refresh the access token *before* the SDK sees it expired.
 
-        Two triggers:
+        Three triggers:
 
         * **Margin** — token has less than ``_REFRESH_MARGIN_SECONDS`` of life
           left.  Refreshing here gives concurrent requests a fresh token and
@@ -674,6 +678,14 @@ class _RefreshTokenOAuth(OAuth):
           since the last successful auth flow.  Catches the laptop-was-asleep
           case where the access token expired during suspend and the network
           may also be reassociating.
+        * **First request** — the OAuth instance has never seen activity yet
+          (``_last_seen_at is None``).  This is the bridge-just-started case:
+          the on-disk expiry could be stale (e.g. by a synthetic grace value
+          set in a previous session), and we have no live signal about how
+          long the wall clock has advanced since the token was issued.  Cost
+          is one extra refresh on bridge startup; it's the only way to be
+          sure the persisted expiry hasn't been doctored by an earlier grace
+          window or pre-empted by external token revocation.
 
         On a transient network failure we apply a short grace window so the
         SDK doesn't immediately try to refresh again (which would hit the
@@ -688,16 +700,21 @@ class _RefreshTokenOAuth(OAuth):
         now = time.time()
         remaining = ctx.token_expiry_time - now
         last_seen = getattr(self, "_last_seen_at", None)
-        wake_detected = last_seen is not None and (now - last_seen) > _WAKE_GAP_SECONDS
+        first_request = last_seen is None
+        wake_detected = (
+            first_request or (now - last_seen) > _WAKE_GAP_SECONDS
+        )
 
         if not wake_detected and remaining >= _REFRESH_MARGIN_SECONDS:
             return
 
         logger.info(
-            "Pre-flight refresh: remaining=%.0fs margin=%.0fs wake=%s",
+            "Pre-flight refresh: remaining=%.0fs margin=%.0fs wake=%s "
+            "(first_request=%s)",
             remaining,
             _REFRESH_MARGIN_SECONDS,
             wake_detected,
+            first_request,
         )
         outcome = await self._proactive_refresh()
         if outcome == _RefreshOutcome.NETWORK_ERROR:
