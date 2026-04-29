@@ -116,6 +116,31 @@ function M.setup(opts)
     end,
   })
 
+  vim.api.nvim_create_user_command("MCPSaveProjectConfig", function(args)
+    local format = args.args ~= "" and args.args or "shortest"
+    if format ~= "shortest" and format ~= "allowed" and format ~= "disabled" then
+      vim.notify(
+        "[mcp-companion] Usage: :MCPSaveProjectConfig [shortest|allowed|disabled]",
+        vim.log.levels.WARN
+      )
+      return
+    end
+    local cc = require("mcp_companion.cc")
+    local chat = cc._current_chat_for_save()
+    if not chat then
+      vim.notify(
+        "[mcp-companion] No active chat with an MCP session — open a CodeCompanion chat first",
+        vim.log.levels.WARN
+      )
+      return
+    end
+    cc._save_project_config_interactive(chat, format)
+  end, {
+    nargs = "?",
+    desc = "Snapshot current chat session's MCP server visibility to .mcp-companion.json",
+    complete = function() return { "shortest", "allowed", "disabled" } end,
+  })
+
   state.update("setup_state", "completed")
   _setup_done = true
 

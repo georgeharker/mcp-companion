@@ -268,6 +268,16 @@ def main() -> None:
         default=None,
         help="Write logs to this file in addition to stderr (default: none)",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=["trace", "debug", "info", "warn", "error"],
+        default="info",
+        help=(
+            "Verbosity for the bridge logger and httpx/mcp-client loggers "
+            "(default: info).  Use 'debug' to capture OAuth metadata-discovery, "
+            "token refresh, and httpx request/response detail."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -278,37 +288,56 @@ def main() -> None:
     if args.oauth_token_dir:
         os.environ["MCP_BRIDGE_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
 
-    # Ensure the mcp-bridge logger outputs INFO+ to stderr.
-    # Without this, only WARNING+ would appear because Python's root logger
-    # defaults to WARNING.  uvicorn sets its own loggers to INFO but that
-    # doesn't affect our "mcp-bridge" logger.
+    # Resolve --log-level to a stdlib logging numeric level.
+    # "trace" is treated as DEBUG since stdlib has no TRACE.
+    _level_map = {
+        "trace": logging.DEBUG,
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warn": logging.WARNING,
+        "error": logging.ERROR,
+    }
+    level = _level_map[args.log_level]
+
+    # Stderr handler on the bridge logger.  Without this only WARNING+ would
+    # appear because Python's root logger defaults to WARNING.
     bridge_logger = logging.getLogger("mcp-bridge")
-    bridge_logger.setLevel(logging.INFO)
+    bridge_logger.setLevel(level)
     if not bridge_logger.handlers:
         stderr_handler = logging.StreamHandler()
-        stderr_handler.setLevel(logging.INFO)
+        stderr_handler.setLevel(level)
         stderr_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
         bridge_logger.addHandler(stderr_handler)
         bridge_logger.propagate = False  # avoid duplicate messages via root
 
-    # Configure file logging if requested
+    # Configure file logging if requested.  File handler always runs at the
+    # requested level (decoupled from the file's presence so you can pick
+    # INFO+file or DEBUG+stderr-only independently).
     if args.log_file:
         import pathlib
 
         log_path = pathlib.Path(args.log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_path)
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(level)
         file_handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )
+        # Root catches non-bridge loggers (fastmcp, mcp.client.auth, httpx, …)
         logging.getLogger().addHandler(file_handler)
-        logging.getLogger().setLevel(logging.DEBUG)
-        # Also attach to bridge logger (propagate=False means root handler
-        # won't see its messages)
+        logging.getLogger().setLevel(level)
+        # propagate=False on bridge_logger means the root handler won't see
+        # its messages — attach explicitly.
         bridge_logger.addHandler(file_handler)
-        bridge_logger.setLevel(logging.DEBUG)
-        logger.info("Logging to file: %s", log_path)
+        logger.info("Logging to %s at level %s", log_path, args.log_level)
+    else:
+        # No file — still apply level globally so DEBUG-on-stderr works.
+        logging.getLogger().setLevel(level)
+
+    # At DEBUG, also turn on the SDK loggers that carry the OAuth flow detail.
+    if level <= logging.DEBUG:
+        for name in ("httpx", "httpcore", "mcp.client.auth", "fastmcp.client.auth"):
+            logging.getLogger(name).setLevel(logging.DEBUG)
 
     # Register cleanup handlers
     atexit.register(cleanup_sharedservers)

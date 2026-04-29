@@ -12,7 +12,16 @@ local M = {}
 --- @field startup_timeout number Seconds to wait for bridge health. Default 30.
 --- @field request_timeout number Default timeout for MCP requests in seconds. Default 60.
 --- @field token_key? string Encryption key for OAuth token storage (or set MCP_BRIDGE_TOKEN_KEY env var)
---- @field log_file? string Path for bridge Python-side log file (default: nil — relies on sharedserver stderr capture)
+--- @field log? MCPCompanion.BridgeLogConfig Bridge logging — same shape as the
+---   top-level ``log`` table.  ``{ level = "info", file = true }`` by default.
+---   ``file = true`` resolves to ``stdpath("log")/mcp-bridge-py.log``;
+---   ``file = "<path>"`` writes to that path; ``file = false`` disables file
+---   logging.  ``level = "debug"`` also turns on the upstream httpx /
+---   mcp.client.auth / fastmcp.client.auth loggers.
+
+--- @class MCPCompanion.BridgeLogConfig
+--- @field level? "trace"|"debug"|"info"|"warn"|"error" Default "info".
+--- @field file? boolean|string Default true (= default path).
 --- @field token_in_url? boolean Include session token in URL path (/mcp/<token>) instead of header only.
 ---   Default false: token is sent via X-MCP-Bridge-Session header only (cleaner, per ACP spec).
 ---   Set true if your ACP agent does not forward custom HTTP headers to MCP servers.
@@ -24,13 +33,16 @@ local M = {}
 ---   true (default): add the aggregate @mcp-bridge group (all servers, one context block entry).
 ---   false: register tools but do not auto-add; user manually @-mentions groups in each chat.
 ---   string[]: add only the named server groups (e.g. {"github","filesystem"}).
+---   Overridden per-project by .mcp-companion.json (see mcp_companion.project).
 --- @field auto_acp_tools boolean|string[] Whether to inject the bridge as an MCP server into ACP sessions.
 ---   true (default): bridge is offered to ACP agents; all MCP servers visible.
 ---   false: bridge is not injected; ACP agents have no MCP tools from this plugin.
 ---   string[]: bridge is injected but only the named servers are visible (e.g. {"github","filesystem"}).
+---   Overridden per-project by .mcp-companion.json (see mcp_companion.project).
 --- @field tool_system_prompts boolean Whether to add per-tool natural-language system messages alongside
----   the tools array. Default false: tool descriptions are already present in the schema and duplicating
----   them as system messages significantly inflates token usage (one message per tool).
+---   the tools array. Default true: helps models that ignore JSON-Schema descriptions.  Set false to save
+---   tokens (descriptions duplicate the schema's `description` fields, ~one extra system message per tool).
+---   Overridden per-project by .mcp-companion.json (see mcp_companion.project).
 
 --- @class MCPCompanion.Config
 --- @field bridge MCPCompanion.BridgeConfig
@@ -55,7 +67,10 @@ M.defaults = {
     startup_timeout = 30,
     request_timeout = 60,
     token_key = nil,
-    log_file = nil,
+    log = {
+      level = "info",
+      file = true,    -- true = default path, string = path, false = disabled
+    },
     token_in_url = false,
   },
 
@@ -66,7 +81,7 @@ M.defaults = {
   cc = {
     auto_http_tools = true,
     auto_acp_tools = true,
-    tool_system_prompts = false,
+    tool_system_prompts = true,
   },
 
   auto_approve = false,
@@ -166,6 +181,22 @@ local function _validate(cfg)
     table.insert(issues, "bridge.startup_timeout must be >= 1")
   end
 
+  if cfg.bridge.log and cfg.bridge.log.level ~= nil then
+    local valid = { trace = true, debug = true, info = true, warn = true, error = true }
+    if not valid[cfg.bridge.log.level] then
+      table.insert(issues, string.format(
+        "bridge.log.level %q must be one of: trace, debug, info, warn, error",
+        tostring(cfg.bridge.log.level)
+      ))
+    end
+  end
+  if cfg.bridge.log and cfg.bridge.log.file ~= nil then
+    local t = type(cfg.bridge.log.file)
+    if t ~= "boolean" and t ~= "string" then
+      table.insert(issues, "bridge.log.file must be a boolean or a string path")
+    end
+  end
+
   return issues
 end
 
@@ -186,6 +217,15 @@ function M.setup(opts)
         break
       end
     end
+  end
+
+  -- Resolve bridge.log.file: true → default path; string → kept; false → disabled.
+  _config.bridge.log = _config.bridge.log or {}
+  if _config.bridge.log.file == nil or _config.bridge.log.file == true then
+    _config.bridge.log.file = vim.fn.stdpath("log") .. "/mcp-bridge-py.log"
+  end
+  if _config.bridge.log.level == nil then
+    _config.bridge.log.level = "info"
   end
 
   return _validate(_config)

@@ -21,6 +21,39 @@ M._pending_acp_tokens = {}
 -- Used to skip per-chat HTTP client setup for ACP chats in _auto_http_tools.
 M._acp_adapter_names = {}
 
+--- Resolve the per-session allowed-servers filter.
+--- A ``.mcp-companion.json`` walked up from cwd takes precedence over the
+--- global ``cc.auto_http_tools`` / ``cc.auto_acp_tools`` setting, so a single
+--- global default (e.g. ``auto_http_tools = false``) can be selectively
+--- enabled per-project.
+--- @param kind "http"|"acp"
+--- @return string[]|nil allowed nil = no filter (all servers visible)
+function M._resolve_session_allowed(kind)
+    local cfg = require("mcp_companion.config").get()
+    local cc = cfg.cc or {}
+    local auto_value
+    if kind == "acp" then
+        auto_value = cc.auto_acp_tools
+    else
+        auto_value = cc.auto_http_tools
+    end
+
+    local known_servers
+    local state_ok, state = pcall(require, "mcp_companion.state")
+    if state_ok then
+        local servers = state.field("servers") or {}
+        known_servers = {}
+        for _, srv in ipairs(servers) do
+            if srv.name then
+                table.insert(known_servers, srv.name)
+            end
+        end
+    end
+
+    local project = require("mcp_companion.project")
+    return project.resolve_allowed(auto_value, known_servers)
+end
+
 --- Build bridge MCP server entry for ACP session/new.
 --- Each ACP session gets a unique URL (/mcp/<token>) so the bridge can
 --- associate the MCP connection with the correct ACP chat session.
@@ -194,8 +227,9 @@ function M.setup(schema) -- luacheck: ignore 212/schema
       -- Kick off bridge warm-up (non-blocking).
       M._start_bridge_async()
 
-      local cfg = require("mcp_companion.config").get()
-      local auto_acp_tools = cfg.cc and cfg.cc.auto_acp_tools
+      -- Resolve allowed-servers for this session.  Project file
+      -- (.mcp-companion.json walked up from cwd) overrides cc.auto_acp_tools.
+      local allowed = M._resolve_session_allowed("acp")
 
       -- Generate per-session token. Store in _pending_acp_tokens so the
       -- patched transform_to_acp (called from _establish_session immediately
@@ -239,14 +273,13 @@ function M.setup(schema) -- luacheck: ignore 212/schema
               log.debug("CC ACP: discarded pre-existing HTTP per-chat client (adapter=%s)", adapter_name)
             end
             c.adapter._mcp_token = token
-            if auto_acp_tools == false then
-              c.adapter._mcp_allowed_servers = {}
-              log.debug("CC ACP: stored token on adapter (token=%s, allowed=none)", token)
-            elseif type(auto_acp_tools) == "table" then
-              c.adapter._mcp_allowed_servers = auto_acp_tools
-              log.debug("CC ACP: stored token on adapter (token=%s, allowed=%s)", token, vim.inspect(auto_acp_tools))
-            else
+            c.adapter._mcp_allowed_servers = allowed
+            if allowed == nil then
               log.debug("CC ACP: stored token on adapter (token=%s, allowed=all)", token)
+            elseif #allowed == 0 then
+              log.debug("CC ACP: stored token on adapter (token=%s, allowed=none)", token)
+            else
+              log.debug("CC ACP: stored token on adapter (token=%s, allowed=%s)", token, vim.inspect(allowed))
             end
             break
           end
@@ -391,10 +424,13 @@ function M._auto_http_tools(event_data)
     M._setup_http_per_chat(chat)
   end
 
-  local cfg = require("mcp_companion.config").get()
-  local auto = cfg.cc and cfg.cc.auto_http_tools
-  if auto == false then
-    log.debug("CC: auto_http_tools=false, skipping tool group registration")
+  -- Resolve allowed servers (project file > cc.auto_http_tools).
+  -- nil  → no filter (aggregate group)
+  -- []   → no servers (skip registration)
+  -- list → register named per-server groups
+  local allowed = M._resolve_session_allowed("http")
+  if type(allowed) == "table" and #allowed == 0 then
+    log.debug("CC: no servers allowed for this session, skipping tool group registration")
     return
   end
 
@@ -403,15 +439,14 @@ function M._auto_http_tools(event_data)
 
   chat.tools:refresh({ adapter = chat.adapter })
 
-  if auto == true then
-    -- Add the aggregate bridge group — one context block entry covering all servers
+  if allowed == nil then
+    -- No filter — aggregate bridge group covers all servers
     local bridge_group = cc_mcp.tool_prefix() .. "bridge"
     chat.tool_registry:add(bridge_group, { config = chat.tools.tools_config })
     log.info("CC: auto-enabled aggregate bridge tool group")
-  elseif type(auto) == "table" then
-    -- Add only the named per-server groups
+  else
     local enabled_count = 0
-    for _, server_name in ipairs(auto) do
+    for _, server_name in ipairs(allowed) do
       local group_name = cc_mcp.tool_prefix() .. server_name
       chat.tool_registry:add(group_name, { config = chat.tools.tools_config })
       enabled_count = enabled_count + 1
@@ -437,19 +472,12 @@ function M._setup_http_per_chat(chat)
   end
 
   local token = M._generate_token()
-  local cfg = require("mcp_companion.config").get()
-  local auto_http = cfg.cc and cfg.cc.auto_http_tools
 
   -- Derive the allowed-servers list for the bridge-side filter.
-  -- This makes the bridge the source of truth; the Neovim-side tool_registry
-  -- mirrors this in _auto_http_tools().
-  local allowed
-  if auto_http == false then
-    allowed = {}
-  elseif type(auto_http) == "table" then
-    allowed = auto_http
-  end
-  -- auto_http == true (default) → allowed stays nil → no filter → all servers
+  -- A .mcp-companion.json (walked up from cwd) overrides cc.auto_http_tools.
+  -- The bridge is the source of truth; the Neovim-side tool_registry mirrors
+  -- this in _auto_http_tools().
+  local allowed = M._resolve_session_allowed("http")
 
   chat._mcp_token = token
   chat._mcp_allowed_servers = allowed
@@ -594,6 +622,143 @@ function M._apply_token_filter(chat)
       end
     end,
   })
+end
+
+--- Resolve the chat session's MCP token (works for both HTTP and ACP chats).
+--- @param chat table CC chat object
+--- @return string|nil token
+local function _chat_token(chat)
+    if not chat then return nil end
+    if chat._mcp_token then return chat._mcp_token end
+    if chat.adapter and chat.adapter._mcp_token then return chat.adapter._mcp_token end
+    return nil
+end
+
+--- Snapshot the current session's disabled-server list and write a
+--- ``.mcp-companion.json`` with the result.  Asynchronous: queries the bridge
+--- for the authoritative filter state, then writes (or prompts for overwrite).
+---
+--- @param chat table CC chat object with _mcp_token set
+--- @param format "shortest"|"allowed"|"disabled" Defaults to "shortest".
+--- @param force boolean Skip the overwrite confirmation. Defaults to false.
+--- @param done? fun(err: string|nil, result: table|nil) Optional completion callback.
+function M._save_project_config(chat, format, force, done)
+    done = done or function() end
+    format = format or "shortest"
+
+    local token = _chat_token(chat)
+    if not token then
+        local err = "no MCP session token on this chat — open a CodeCompanion chat first"
+        done(err, nil)
+        return
+    end
+
+    local cfg = require("mcp_companion.config").get()
+    local host = cfg.bridge.host or "127.0.0.1"
+    local port = cfg.bridge.port or 9741
+    local http = require("mcp_companion.http")
+
+    http.request({
+        url = string.format("http://%s:%d/sessions/token/%s/filter", host, port, token),
+        method = "get",
+        timeout = 5000,
+        callback = function(r)
+            if r.status ~= 200 then
+                done(string.format("bridge filter lookup failed (status %s): %s",
+                    r.status, r.body or ""), nil)
+                return
+            end
+            local ok_decode, data = pcall(vim.json.decode, r.body)
+            if not ok_decode or type(data) ~= "table" then
+                done("bridge returned malformed JSON", nil)
+                return
+            end
+            local disabled = data.disabled_servers or {}
+
+            -- Compute the canonical known-server list (excluding the internal
+            -- bridge pseudo-server, which is never user-toggleable).
+            local state = require("mcp_companion.state")
+            local servers = state.field("servers") or {}
+            local known = {}
+            for _, srv in ipairs(servers) do
+                if srv.name and srv.name ~= "_bridge" then
+                    table.insert(known, srv.name)
+                end
+            end
+
+            local project = require("mcp_companion.project")
+            vim.schedule(function()
+                local result = project.save({
+                    disabled = disabled,
+                    known_servers = known,
+                    format = format,
+                    force = force,
+                })
+                done(nil, result)
+            end)
+        end,
+    })
+end
+
+--- High-level wrapper: invoke ``_save_project_config`` with vim.ui.select-based
+--- overwrite confirmation and vim.notify for the result.  Used by the user
+--- command and slash command surfaces.
+--- @param chat table CC chat object
+--- @param format "shortest"|"allowed"|"disabled"
+function M._save_project_config_interactive(chat, format)
+    M._save_project_config(chat, format, false, function(err, result)
+        if err then
+            vim.notify("mcp-companion: save failed — " .. err, vim.log.levels.ERROR)
+            return
+        end
+        if result.action == "unchanged" then
+            vim.notify("mcp-companion: " .. result.path .. " already up to date",
+                vim.log.levels.INFO)
+            return
+        end
+        if result.action == "wrote" then
+            vim.notify("mcp-companion: wrote " .. result.path, vim.log.levels.INFO)
+            return
+        end
+        if result.action == "would_overwrite" then
+            vim.ui.select({ "overwrite", "cancel" }, {
+                prompt = string.format("Overwrite %s?", result.path),
+            }, function(choice)
+                if choice ~= "overwrite" then
+                    vim.notify("mcp-companion: save cancelled", vim.log.levels.INFO)
+                    return
+                end
+                M._save_project_config(chat, format, true, function(err2, r2)
+                    if err2 then
+                        vim.notify("mcp-companion: save failed — " .. err2,
+                            vim.log.levels.ERROR)
+                    else
+                        vim.notify("mcp-companion: wrote " .. r2.path, vim.log.levels.INFO)
+                    end
+                end)
+            end)
+        end
+    end)
+end
+
+--- Find the chat the save command should snapshot.
+--- Preference order: chat in the current buffer, then any chat with an
+--- MCP token (most-recently-created wins, since CC orders chats that way).
+--- @return table|nil chat
+function M._current_chat_for_save()
+    local cc_ok, codecompanion = pcall(require, "codecompanion")
+    if not cc_ok then return nil end
+
+    local chat = codecompanion.buf_get_chat(vim.api.nvim_get_current_buf())
+    if chat and _chat_token(chat) then return chat end
+
+    local all = codecompanion.buf_get_chat()
+    local fallback
+    for _, entry in ipairs(all or {}) do
+        local c = entry.chat
+        if c and _chat_token(c) then fallback = c end
+    end
+    return fallback
 end
 
 --- Clean up session filter and per-chat client on chat close.

@@ -169,6 +169,62 @@ local function _call_session_tool(chat, tool_name, server_name, callback)
     end)
 end
 
+--- Toggle a server's session-visibility for *chat* and synchronise downstream
+--- state (local cache, CC tool registry, status window).
+---
+--- Callable from any surface — currently used by the `/mcp-session` slash
+--- command and the `S` keymap in :MCPStatus.
+---
+--- @param chat table CodeCompanion chat object
+--- @param server_name string
+--- @param done? fun(err: string|nil, info: { action: "enabled"|"disabled", server: string }|nil)
+function M.toggle_server_for_session(chat, server_name, done)
+    done = done or function() end
+    if not chat or not chat.bufnr then
+        done("no chat available", nil)
+        return
+    end
+
+    local disabled = _get_disabled(chat.bufnr)
+    local currently_disabled = disabled[server_name] == true
+    local tool = currently_disabled
+        and "bridge__session_enable_server"
+        or "bridge__session_disable_server"
+    local new_state = not currently_disabled  -- true = will be disabled
+
+    log.debug("Session toggle: %s %s",
+        currently_disabled and "enabling" or "disabling", server_name)
+
+    _call_session_tool(chat, tool, server_name, function(err, msg)
+        if err then
+            done(err, nil)
+            return
+        end
+
+        -- Mirror the new state locally so the picker / UI reflect it
+        -- without an extra round-trip.
+        if new_state then
+            disabled[server_name] = true
+        else
+            disabled[server_name] = nil
+        end
+
+        -- Update CC tool registry so @-mention and context block reflect
+        -- the session-disabled state.
+        _sync_cc_tool_group(chat, server_name, new_state)
+
+        -- Refresh the status window if it's open (it shows session state).
+        local ui_ok, ui = pcall(require, "mcp_companion.ui")
+        if ui_ok and ui.is_open() then
+            ui.render()
+        end
+
+        local action_label = new_state and "disabled" or "enabled"
+        log.info("Session toggle: %s %s — %s", action_label, server_name, msg)
+        done(nil, { action = action_label, server = server_name })
+    end)
+end
+
 --- Register /mcp-session as a static CC slash command.
 --- Called once at setup — not driven by bridge_ready/servers_updated.
 function M.register()
@@ -223,22 +279,7 @@ function M.register()
                 format_item = function(item) return item.label end,
             }, function(choice)
                 if not choice then return end
-
-                local currently_disabled = disabled[choice.name]
-                local tool, action, new_state
-                if currently_disabled then
-                    tool = "bridge__session_enable_server"
-                    action = "Enabling"
-                    new_state = false
-                else
-                    tool = "bridge__session_disable_server"
-                    action = "Disabling"
-                    new_state = true
-                end
-
-                log.debug("Session toggle: %s %s", action:lower(), choice.name)
-
-                _call_session_tool(chat, tool, choice.name, function(err, msg)
+                M.toggle_server_for_session(chat, choice.name, function(err, info)
                     if err then
                         vim.notify(
                             string.format("mcp-companion: session toggle failed: %s", err),
@@ -246,35 +287,35 @@ function M.register()
                         )
                         return
                     end
-
-                    -- Update local state
-                    if new_state then
-                        disabled[choice.name] = true
-                    else
-                        disabled[choice.name] = nil
-                    end
-
-                    -- Update CC tool registry so @-mention and context block
-                    -- reflect the session-disabled state (Part B).
-                    _sync_cc_tool_group(chat, choice.name, new_state)
-
-                    -- Refresh status window if open (it shows session state)
-                    local ui_ok, ui = pcall(require, "mcp_companion.ui")
-                    if ui_ok and ui.is_open() then
-                        ui.render()
-                    end
-
                     vim.notify(
-                        string.format("mcp-companion: %s", msg),
+                        string.format("mcp-companion: %s %s for this session",
+                            info.action, info.server),
                         vim.log.levels.INFO
                     )
-                    log.info("Session toggle: %s %s — %s", action:lower(), choice.name, msg)
                 end)
             end)
         end,
     }
 
-    log.debug("Registered /mcp-session slash command")
+    slash_cmds["mcp-session-save"] = {
+        description = "Save current MCP server visibility as .mcp-companion.json",
+        ---@param chat table CodeCompanion chat object
+        callback = function(chat)
+            -- Single-arg parsing: trailing token after the command name
+            -- selects the format (shortest|allowed|disabled).  CC slash
+            -- commands receive the full message line as chat.context, but to
+            -- stay portable we just prompt when an arg isn't supplied.
+            vim.ui.select({ "shortest", "allowed", "disabled" }, {
+                prompt = "Project file format:",
+            }, function(choice)
+                if not choice then return end
+                local cc_init = require("mcp_companion.cc")
+                cc_init._save_project_config_interactive(chat, choice)
+            end)
+        end,
+    }
+
+    log.debug("Registered /mcp-session and /mcp-session-save slash commands")
 end
 
 --- Return the session-disabled set for a chat buffer (read-only view).

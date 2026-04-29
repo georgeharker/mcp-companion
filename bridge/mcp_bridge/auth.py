@@ -83,6 +83,21 @@ def _is_network_error(exc: BaseException) -> bool:
 # request will trigger a normal refresh attempt through the SDK flow.
 _NETWORK_ERROR_GRACE_SECONDS = 300.0  # 5 minutes
 
+# Refresh proactively when the access token is within this many seconds of
+# expiry.  Gives requests in flight 2 minutes of headroom against a slow
+# refresh round-trip and keeps the SDK's destructive refresh path (which
+# wipes the refresh_token on any non-200 response) from firing in normal
+# operation — our pre-flight uses ``oauth_metadata.token_endpoint`` directly
+# and preserves tokens on transient failures.
+_REFRESH_MARGIN_SECONDS = 120.0
+
+# If more than this many seconds have elapsed since the OAuth instance last
+# saw activity, treat the next request as a wake-up: force a pre-flight
+# refresh regardless of what the local clock says about expiry.  Catches the
+# laptop-was-asleep case where wall-clock time advanced past expiry while
+# the bridge was suspended.
+_WAKE_GAP_SECONDS = 300.0  # 5 minutes
+
 
 # Default token storage directory (XDG cache convention)
 _DEFAULT_TOKEN_DIR = Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
@@ -507,17 +522,70 @@ class _RefreshTokenOAuth(OAuth):
                 if outcome == _RefreshOutcome.NETWORK_ERROR:
                     await self._apply_network_grace_window()
 
+    async def _preflight_refresh_if_needed(self) -> None:
+        """Refresh the access token *before* the SDK sees it expired.
+
+        Two triggers:
+
+        * **Margin** — token has less than ``_REFRESH_MARGIN_SECONDS`` of life
+          left.  Refreshing here gives concurrent requests a fresh token and
+          keeps the SDK's normal flow on the happy path.
+        * **Wake-up** — wall-clock has advanced more than ``_WAKE_GAP_SECONDS``
+          since the last successful auth flow.  Catches the laptop-was-asleep
+          case where the access token expired during suspend and the network
+          may also be reassociating.
+
+        On a transient network failure we apply a short grace window so the
+        SDK doesn't immediately try to refresh again (which would hit the
+        same network problem and, on non-200 from its fallback URL, wipe the
+        refresh_token).  On auth failure we leave the token alone so the
+        SDK's inline 401 path can drive a clean re-auth.
+        """
+        ctx = self.context
+        if not ctx.can_refresh_token() or ctx.token_expiry_time is None:
+            return
+
+        now = time.time()
+        remaining = ctx.token_expiry_time - now
+        last_seen = getattr(self, "_last_seen_at", None)
+        wake_detected = last_seen is not None and (now - last_seen) > _WAKE_GAP_SECONDS
+
+        if not wake_detected and remaining >= _REFRESH_MARGIN_SECONDS:
+            return
+
+        logger.info(
+            "Pre-flight refresh: remaining=%.0fs margin=%.0fs wake=%s",
+            remaining,
+            _REFRESH_MARGIN_SECONDS,
+            wake_detected,
+        )
+        outcome = await self._proactive_refresh()
+        if outcome == _RefreshOutcome.NETWORK_ERROR:
+            # Existing token preserved; bump expiry so the SDK doesn't pile a
+            # second (failing) refresh attempt on top of the same outage.
+            await self._apply_network_grace_window()
+        # SUCCESS: tokens updated, SDK will see fresh state.
+        # AUTH_ERROR: tokens left as-is so the SDK's inline 401 path can run.
+
     async def async_auth_flow(
         self, request: httpx.Request
     ) -> typing.AsyncGenerator[httpx.Request, httpx.Response]:
         """Wrap the parent auth flow to persist the absolute token expiry.
 
-        After the parent flow completes (including any silent refresh or
-        full re-authorization), the SDK will have set a correct
-        ``token_expiry_time`` on the context.  We persist it so subsequent
-        ``_initialize()`` calls can restore it.
+        Adds a pre-flight refresh (margin + wake-up heuristic) so the SDK's
+        destructive refresh path rarely fires.  After the parent flow
+        completes the ``token_expiry_time`` may have been updated by a
+        refresh or re-auth — we persist it so subsequent ``_initialize()``
+        calls can restore it, and we record the completion timestamp so the
+        next request can detect a long sleep gap.
         """
         ctx = self.context
+
+        # Pre-flight: refresh proactively when within margin or after wake.
+        # Done before the diagnostic logging below so the snapshot reflects
+        # the post-refresh state where applicable.
+        await self._preflight_refresh_if_needed()
+
         tv = ctx.is_token_valid()
         cr = ctx.can_refresh_token()
         exp = ctx.token_expiry_time
@@ -550,35 +618,45 @@ class _RefreshTokenOAuth(OAuth):
         # the SDK replaces current_tokens wholesale, losing it.
         original_refresh_token = ctx.current_tokens.refresh_token if ctx.current_tokens else None
 
-        flow = super().async_auth_flow(request)
-        request_out = await flow.__anext__()
-        cycle = 0
-        while True:
-            response = yield request_out
-            cycle += 1
-            logger.debug(
-                "Auth flow cycle %d: %s %s → %d",
-                cycle,
-                request_out.method,
-                request_out.url,
-                response.status_code,
-            )
+        try:
+            flow = super().async_auth_flow(request)
+            request_out = await flow.__anext__()
+            cycle = 0
+            while True:
+                response = yield request_out
+                cycle += 1
+                logger.debug(
+                    "Auth flow cycle %d: %s %s → %d",
+                    cycle,
+                    request_out.method,
+                    request_out.url,
+                    response.status_code,
+                )
+                try:
+                    request_out = await flow.asend(response)
+                except StopAsyncIteration:
+                    break
+
+            # Restore refresh_token if the SDK lost it during a token refresh.
+            if (
+                original_refresh_token
+                and ctx.current_tokens
+                and not ctx.current_tokens.refresh_token
+            ):
+                ctx.current_tokens = ctx.current_tokens.model_copy(
+                    update={"refresh_token": original_refresh_token}
+                )
+                await ctx.storage.set_tokens(ctx.current_tokens)
+                logger.info("Preserved refresh_token after SDK token refresh")
+        finally:
+            # Wake-detection heartbeat — set even on error paths so a request
+            # that fails doesn't make the *next* request misclassify the gap
+            # as a wake-up.
+            self._last_seen_at = time.time()
             try:
-                request_out = await flow.asend(response)
-            except StopAsyncIteration:
-                break
-
-        # Restore refresh_token if the SDK lost it during a token refresh.
-        if original_refresh_token and ctx.current_tokens and not ctx.current_tokens.refresh_token:
-            ctx.current_tokens = ctx.current_tokens.model_copy(
-                update={"refresh_token": original_refresh_token}
-            )
-            await ctx.storage.set_tokens(ctx.current_tokens)
-            logger.info("Preserved refresh_token after SDK token refresh")
-
-        # The flow is done — token_expiry_time may have been updated by a
-        # refresh or re-auth.  Persist the current value.
-        await self._save_token_expiry()
+                await self._save_token_expiry()
+            except Exception:
+                logger.debug("Failed to persist token expiry", exc_info=True)
 
     async def _discover_oauth_metadata(self) -> None:
         """Fetch protected-resource + OAuth AS metadata for the server."""

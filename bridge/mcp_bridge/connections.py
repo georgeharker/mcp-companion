@@ -345,7 +345,13 @@ class ConnectionManager:
             )
             conn.client_ref[0] = None
         except Exception as e:
-            logger.warning("Failed to open persistent connection for '%s': %s", conn.name, e)
+            logger.warning(
+                "Failed to open persistent connection for '%s': %s (%s)",
+                conn.name,
+                e,
+                type(e).__name__,
+            )
+            _log_auth_failure_details(conn.name, conn.srv, e)
             conn.client_ref[0] = None
             if _is_auth_error(e):
                 conn._auth_failed = True
@@ -423,6 +429,59 @@ class ConnectionManager:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _log_auth_failure_details(name: str, srv: ServerConfig, exc: BaseException) -> None:
+    """Capture the response body and the headers we sent on a connection failure.
+
+    The default ``HTTPStatusError`` formatting only includes the status code and
+    URL, which is not enough to tell apart "bad credentials", "Copilot access
+    required", and "wrong endpoint" — all of which surface as 401 from
+    ``api.githubcopilot.com``.  We pull the server's response body (truncated) and
+    redact our own Authorization header so the log is safe to share.
+    """
+
+    def _redact_header(value: str) -> str:
+        if value.lower().startswith("bearer "):
+            tail = value[7:]
+            keep = tail[:6] if len(tail) > 12 else ""
+            return f"Bearer {keep}…<redacted {max(len(tail) - len(keep), 0)} chars>"
+        if len(value) > 16:
+            return value[:6] + "…<redacted>"
+        return value
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = response.text
+        except Exception:
+            body = "<could not read response body>"
+        if len(body) > 500:
+            body = body[:500] + " …(truncated)"
+        try:
+            headers_repr = {k: v for k, v in response.headers.items()}
+        except Exception:
+            headers_repr = {}
+        logger.warning(
+            "Upstream response for '%s': status=%s body=%s response_headers=%s",
+            name,
+            response.status_code,
+            body,
+            headers_repr,
+        )
+
+    if srv.headers:
+        sent: dict[str, str] = {}
+        for k, v in srv.headers.items():
+            if k.lower() in ("authorization", "x-api-key", "api-key", "cookie"):
+                sent[k] = _redact_header(v)
+            else:
+                sent[k] = v
+        logger.warning(
+            "Headers configured for '%s' (sent verbatim, secrets redacted): %s",
+            name,
+            sent,
+        )
 
 
 def _is_auth_error(exc: BaseException) -> bool:

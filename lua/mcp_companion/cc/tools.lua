@@ -141,6 +141,14 @@ function M.register()
     local registered_servers = 0
     local registered_tools = 0
 
+    -- Resolve once: project file > plugin config > default(true). Captured in
+    -- the closures below; changes to the project file take effect on the next
+    -- re-registration (e.g. after :MCPRestart or a servers-updated event).
+    local project = require("mcp_companion.project")
+    local sysp_enabled = project.resolve_tool_system_prompts(
+        config.get().cc.tool_system_prompts
+    )
+
     for _, server in ipairs(servers) do
         -- Skip the internal _bridge pseudo-server
         if server.name == "_bridge" then
@@ -172,7 +180,7 @@ function M.register()
                         cmds = {
                             _make_bridge_cmd(client, captured_namespaced, captured_display, server.name),
                         },
-                        system_prompt = config.get().cc.tool_system_prompts and function(_group_config, _ctx)
+                        system_prompt = sysp_enabled and function(_group_config, _ctx)
                             return string.format(
                                 "You can use the `%s` tool from the `%s` MCP server to: %s\n",
                                 captured_display,
@@ -202,7 +210,7 @@ function M.register()
             local group = {
                 description = string.format("All tools from the `%s` MCP server", server.name),
                 tools = tool_keys,
-                system_prompt = config.get().cc.tool_system_prompts and function(_group_config, _ctx)
+                system_prompt = sysp_enabled and function(_group_config, _ctx)
                     return string.format(
                         "You have access to the `%s` MCP server with %d tool(s).\n",
                         server.name,
@@ -239,7 +247,7 @@ function M.register()
         local bridge_group = {
             description = "All tools from all MCP servers via the bridge",
             tools = all_tool_keys,
-            system_prompt = config.get().cc.tool_system_prompts and function(_group_config, _ctx)
+            system_prompt = sysp_enabled and function(_group_config, _ctx)
                 return string.format(
                     "You have access to %d MCP tool(s) across %d server(s) via the MCP bridge.\n",
                     #all_tool_keys,

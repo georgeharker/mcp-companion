@@ -94,9 +94,14 @@ local function _bridge_cmd()
     "--port", tostring(_config.bridge.port),
     "--host", _config.bridge.host or "127.0.0.1",
   }
-  if _config.bridge.log_file then
+  local blog = _config.bridge.log or {}
+  if type(blog.file) == "string" then  -- false to opt out; string = path
     table.insert(cmd, "--log-file")
-    table.insert(cmd, _config.bridge.log_file)
+    table.insert(cmd, blog.file)
+  end
+  if blog.level then
+    table.insert(cmd, "--log-level")
+    table.insert(cmd, blog.level)
   end
   return cmd
 end

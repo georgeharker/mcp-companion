@@ -680,14 +680,38 @@ Agent: [calls todoist_get_tasks autonomously via bridge]
 | `:MCPStatus` | Toggle the status floating window |
 | `:MCPRestart` | Restart the MCP bridge |
 | `:MCPLog` | Open the log file in a buffer |
+| `:MCPToggleServer <name>` | Globally enable/disable a server |
+| `:MCPSaveProjectConfig [shortest\|allowed\|disabled]` | Snapshot the current chat session's MCP server visibility to `.mcp-companion.json` (see [Per-project defaults](#per-project-defaults-mcp-companionjson)) |
 
 ```lua
 vim.keymap.set("n", "<leader>ms", "<cmd>MCPStatus<cr>", { desc = "MCP status" })
 ```
 
 The status window shows bridge state, connected servers, and tool/resource/prompt
-counts. Press `<CR>` on a server to expand/collapse it. Press `l` for the logs
-view, `q` to close.
+counts. Key bindings:
+
+| Key | Action |
+|---|---|
+| `<CR>` | Expand/collapse the server under the cursor |
+| `e` | Toggle **global** enable/disable (calls `bridge__enable_server` / `bridge__disable_server`) |
+| `p` | Toggle the server's visibility in `.mcp-companion.json` (creates the file if absent; preserves the existing `allowed_servers` / `disabled_servers` shape) |
+| `S` | Toggle the server for **this chat session only** — equivalent to `/mcp-session` on the chat the status window was opened from |
+| `r` | Refresh from the bridge |
+| `R` | Restart the bridge |
+| `l` / `s` | Switch to logs / status view |
+| `q` | Close the window |
+
+The three toggle keys (`e`, `p`, `S`) form a hierarchy from broadest to
+narrowest scope:
+
+- `e` — global, persists in the bridge for every session.
+- `p` — per-project, persists across Neovim restarts via `.mcp-companion.json`.
+- `S` — per-chat, lives only as long as the chat session.
+
+A server hidden by the project file shows `[project off]`; one hidden by a
+session toggle shows `[session off]`. The same key that hid it (`p` or `S`)
+restores it. `S` requires `:MCPStatus` to have been opened from a
+CodeCompanion chat buffer (so it knows which chat to scope the toggle to).
 
 ### Logging
 
@@ -696,13 +720,33 @@ MCP companion writes logs to two locations:
 | Log | Default path | Purpose |
 |---|---|---|
 | Plugin log | `~/.local/state/nvim/mcp-companion.log` | Lua-side events (bridge lifecycle, server connections, errors) |
-| Bridge log | set via `bridge.log_file` | Python bridge output (server communication, OAuth, tool calls) |
+| Bridge file log | `~/.local/state/nvim/mcp-bridge-py.log` | Python file logger (formatted, level set by `bridge.log_level`) |
+| Bridge stderr capture | `~/.local/state/nvim/mcp-bridge.log` | sharedserver-captured stderr from the Python bridge process |
 | sharedserver logs | `$XDG_RUNTIME_DIR/sharedserver` or `/tmp/sharedserver` | All processes managed by sharedserver |
 
 Use `:MCPLog` to open the plugin log directly in a Neovim buffer.
 
-By default the bridge produces no log file. To enable bridge logging, set `bridge.log_file` in
-your [plugin configuration](#plugin-configuration).
+The bridge file log is enabled by default. Configure it via `bridge.log` —
+same shape as the top-level `log` table:
+
+```lua
+require("mcp_companion").setup({
+  log = { level = "warn", file = true },        -- top-level (Lua side)
+  bridge = {
+    log = {
+      level = "debug",                          -- trace | debug | info (default) | warn | error
+      file = "/path/to/mcp-bridge.log",         -- true (default path), string (explicit), false (disabled)
+    },
+  },
+})
+```
+
+Defaults are `level = "info"` and `file = true` (resolves to
+`stdpath("log")/mcp-bridge-py.log`). At `level = "debug"` the upstream
+`httpx`, `httpcore`, `mcp.client.auth`, and `fastmcp.client.auth` loggers
+also flip to DEBUG so refresh requests, metadata-discovery URLs, and HTTP
+request/response detail are captured. Restart the bridge after changing
+either setting (`:MCPRestart!`).
 
 When the bridge is managed by [sharedserver](https://github.com/georgeharker/sharedserver.nvim),
 sharedserver writes its own logs to `$XDG_RUNTIME_DIR/sharedserver` (or `/tmp/sharedserver` if
@@ -751,7 +795,10 @@ require("mcp_companion").setup({
         startup_timeout = 30,           -- seconds to wait for bridge health
         request_timeout = 60,           -- default MCP request timeout in seconds
         token_key = nil,                -- encryption key for OAuth tokens (or use MCP_BRIDGE_TOKEN_KEY env)
-        log_file = nil,                 -- path to write bridge stdout/stderr (e.g. vim.fn.stdpath("log") .. "/mcp-bridge.log")
+        log = {
+          level = "info",               -- "trace" | "debug" | "info" | "warn" | "error"
+          file = true,                  -- true = default path, string = explicit path, false = disabled
+        },
         token_in_url = false,           -- embed session token in URL path; see Troubleshooting below
         global_env = {},                -- extra environment variables passed to the bridge process
     },
@@ -838,7 +885,9 @@ cc = { auto_http_tools = { "github", "filesystem" } }
 ```
 
 You can also hide individual servers mid-conversation with `/mcp-session` —
-see [Per-session server gating](#per-session-server-gating) below.
+see [Per-session server gating](#per-session-server-gating) below — or commit
+per-project defaults to a `.mcp-companion.json` file (see
+[Per-project defaults](#per-project-defaults-mcp-companionjson) below).
 
 #### MCP tool availability in ACP chats
 
@@ -867,6 +916,8 @@ REST session API and cleaned up when the chat closes.
 **Per-session server gating** allows selectively hiding individual upstream
 MCP servers from the ACP agent mid-conversation, without affecting other open
 chats — see [Per-session server gating](#per-session-server-gating) below.
+Per-project defaults can also be checked into a `.mcp-companion.json` file
+(see [Per-project defaults](#per-project-defaults-mcp-companionjson)).
 
 #### Per-session server gating
 
@@ -893,6 +944,72 @@ A picker lists all connected servers with their current session status
 
 When the chat session ends the state is automatically cleaned up.
 
+##### Per-project defaults (`.mcp-companion.json`)
+
+The global `cc.auto_http_tools` / `cc.auto_acp_tools` settings can be overridden
+per-project by dropping a `.mcp-companion.json` file at (or above) the
+project's working directory. When a new chat starts, the plugin walks upward
+from `vim.fn.getcwd()` looking for this file; if found, it controls which
+servers the chat session sees, regardless of the global default.
+
+The intended workflow is "default off, opt in per project": set
+`auto_http_tools = false` (and/or `auto_acp_tools = false`) globally, then
+list the servers each project actually needs.
+
+```json
+{
+  "$schema": "https://geohar.github.io/mcp-companion/project.schema.json",
+  "allowed_servers": ["github", "gws"]
+}
+```
+
+Or hide specific servers from an otherwise-default project:
+
+```json
+{
+  "$schema": "https://geohar.github.io/mcp-companion/project.schema.json",
+  "disabled_servers": ["clickup"]
+}
+```
+
+| Field | Type | Effect |
+|---|---|---|
+| `allowed_servers` | `string[]` | Whitelist — only these servers are visible. |
+| `disabled_servers` | `string[]` | Blacklist — every other configured server is visible. |
+| `tool_system_prompts` | `boolean` | Override the plugin-level `cc.tool_system_prompts` setting (default `true`). Set `false` here to suppress per-tool natural-language system messages just for this project. |
+
+The two server-list fields are mutually exclusive. Server names must match entries in
+your `servers.json` / `mcpServers` config; unknown names are dropped with a
+warning, so a stale project file never breaks chat creation. Malformed JSON
+or schema violations log a warning and fall back to the global
+`auto_*_tools` setting — they don't lock you out of MCP tools.
+
+The file is re-read every time a chat session starts; no Neovim reload is
+needed when you edit it. The schema is published at
+[`docs/schemas/project.schema.json`](docs/schemas/project.schema.json) for
+editor autocomplete (e.g., VSCode `json.schemas`, Neovim `jsonls`).
+
+###### Saving from current session state
+
+If you've reached the right per-project setup with `/mcp-session` toggles,
+two surfaces snapshot it back to disk:
+
+- `:MCPSaveProjectConfig [shortest|allowed|disabled]` — works from any
+  buffer; resolves the active chat automatically.
+- `/mcp-session-save` — slash command in a CodeCompanion chat; prompts for
+  the format.
+
+The default `shortest` writes whichever list (`allowed_servers` or
+`disabled_servers`) is smaller, with a tie going to `allowed_servers` to
+match the documented "default off, opt in per project" workflow. `allowed`
+or `disabled` force a specific shape.
+
+The save target is the existing `.mcp-companion.json` walked up from cwd if
+one exists (so a save updates the same file the chat is already reading);
+otherwise the file is created at `cwd/.mcp-companion.json`. If the existing
+file would be overwritten with different contents, the command prompts
+before writing.
+
 ##### How it works
 
 Filtering is enforced at two layers:
@@ -909,11 +1026,14 @@ Filtering is enforced at two layers:
    `notifications/tools/list_changed` notification and the agent re-fetches
    tools directly.
 
-The initial filter for a new chat is derived from the config:
-- `auto_http_tools = false` → all servers disabled on the bridge for that session
-- `auto_http_tools = {"github"}` → only `github` enabled; all others disabled
-- `auto_http_tools = true` → no filter; all servers enabled
-- For ACP chats, `auto_acp_tools` controls the same behavior
+The initial filter for a new chat is derived in this order of precedence:
+
+1. **`.mcp-companion.json`** found by walking up from the cwd
+   (see [Per-project defaults](#per-project-defaults-mcp-companionjson) above)
+2. **`cc.auto_http_tools`** (or `cc.auto_acp_tools` for ACP chats):
+   - `false` → all servers disabled on the bridge for that session
+   - `{"github"}` → only `github` enabled; all others disabled
+   - `true` → no filter; all servers enabled
 
 ##### Bridge meta-tools
 

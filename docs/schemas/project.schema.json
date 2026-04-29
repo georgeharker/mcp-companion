@@ -1,0 +1,58 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://geohar.github.io/mcp-companion/project.schema.json",
+    "title": "mcp-companion project configuration",
+    "description": "Per-project visibility overrides for MCP servers, read by mcp-companion.nvim from .mcp-companion.json walked up from the editor's current working directory at chat-session creation time. The file selects which servers (declared in your servers.json / mcpServers config) are exposed to a chat in this project, overriding the global cc.auto_http_tools / cc.auto_acp_tools settings.",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "$schema": {
+            "type": "string",
+            "format": "uri"
+        },
+        "allowed_servers": {
+            "description": "Names of MCP servers that should be visible to chat sessions in this project. All other configured servers are hidden. Mutually exclusive with disabled_servers.",
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1
+            },
+            "uniqueItems": true
+        },
+        "disabled_servers": {
+            "description": "Names of MCP servers that should be hidden from chat sessions in this project. All other configured servers remain visible. Mutually exclusive with allowed_servers.",
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1
+            },
+            "uniqueItems": true
+        },
+        "tool_system_prompts": {
+            "description": "Whether to add per-tool natural-language system messages alongside the tools array. Useful for models that ignore JSON-Schema descriptions; set to false to save tokens. Overrides the plugin-level cc.tool_system_prompts setting; defaults to true.",
+            "type": "boolean"
+        }
+    },
+    "oneOf": [
+        {
+            "required": ["allowed_servers"],
+            "not": {
+                "required": ["disabled_servers"]
+            }
+        },
+        {
+            "required": ["disabled_servers"],
+            "not": {
+                "required": ["allowed_servers"]
+            }
+        },
+        {
+            "not": {
+                "anyOf": [
+                    {"required": ["allowed_servers"]},
+                    {"required": ["disabled_servers"]}
+                ]
+            }
+        }
+    ]
+}

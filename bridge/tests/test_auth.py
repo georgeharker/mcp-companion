@@ -10,6 +10,8 @@ import pytest
 
 from mcp_bridge.auth import (
     _NETWORK_ERROR_GRACE_SECONDS,
+    _REFRESH_MARGIN_SECONDS,
+    _WAKE_GAP_SECONDS,
     _RefreshOutcome,
     _is_network_error,
     _BearerAuth,
@@ -368,3 +370,154 @@ class TestProactiveRefreshNetworkHandling:
         )
         # Token should appear valid (not triggering re-auth)
         assert ctx.is_token_valid()
+
+
+class TestPreflightRefresh:
+    """Tests for the pre-flight refresh helper.
+
+    Together they verify that:
+      * Tokens still well clear of expiry are NOT refreshed.
+      * Tokens within the margin ARE refreshed.
+      * A long gap since last activity (sleep/wake) triggers a forced refresh.
+      * A NETWORK_ERROR outcome leaves tokens intact and bumps the grace window.
+    """
+
+    def _make_oauth(self, tmp_path: Path):
+        from mcp_bridge.auth import _build_oauth
+
+        return _build_oauth(
+            server_name="test-srv",
+            server_url="https://mcp.example.com/mcp",
+            base_dir=tmp_path / "test-srv",
+            cache_tokens=False,
+        )
+
+    def _seed(self, oauth, *, expires_in: float = 3600.0):
+        """Wire the context with refreshable tokens, client info, metadata."""
+        import time
+
+        from mcp.shared.auth import OAuthToken
+
+        ctx = oauth.context
+        ctx.current_tokens = OAuthToken(
+            access_token="A",
+            token_type="Bearer",
+            refresh_token="R",
+            expires_in=int(expires_in),
+        )
+        ctx.token_expiry_time = time.time() + expires_in
+        fake_meta = MagicMock()
+        fake_meta.token_endpoint = "https://auth.example.com/token"
+        ctx.oauth_metadata = fake_meta
+        fake_ci = MagicMock()
+        fake_ci.client_id = "client-123"
+        ctx.client_info = fake_ci
+
+    @pytest.mark.anyio
+    async def test_token_well_inside_margin_is_left_alone(self, tmp_path: Path) -> None:
+        """A token with plenty of life left should not trigger a pre-flight refresh."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed(oauth, expires_in=_REFRESH_MARGIN_SECONDS + 600.0)
+
+        with patch.object(oauth, "_proactive_refresh", new=AsyncMock()) as ref:
+            await oauth._preflight_refresh_if_needed()
+
+        ref.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_token_within_margin_triggers_refresh(self, tmp_path: Path) -> None:
+        """A token within the margin window should be refreshed proactively."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed(oauth, expires_in=_REFRESH_MARGIN_SECONDS - 30.0)
+
+        ref = AsyncMock(return_value=_RefreshOutcome.SUCCESS)
+        with patch.object(oauth, "_proactive_refresh", new=ref):
+            await oauth._preflight_refresh_if_needed()
+
+        ref.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_wake_up_forces_refresh_even_with_time_left(self, tmp_path: Path) -> None:
+        """Long idle gap is treated as a wake-up — refresh fires regardless of margin."""
+        import time
+
+        oauth = self._make_oauth(tmp_path)
+        # Token is fresh (way outside margin), but last_seen is ancient.
+        self._seed(oauth, expires_in=3600.0)
+        oauth._last_seen_at = time.time() - (_WAKE_GAP_SECONDS + 60.0)
+
+        ref = AsyncMock(return_value=_RefreshOutcome.SUCCESS)
+        with patch.object(oauth, "_proactive_refresh", new=ref):
+            await oauth._preflight_refresh_if_needed()
+
+        ref.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_no_last_seen_does_not_force_refresh(self, tmp_path: Path) -> None:
+        """A first-ever request must not be misclassified as a wake-up."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed(oauth, expires_in=3600.0)
+        # _last_seen_at is unset on a fresh instance.
+        assert not hasattr(oauth, "_last_seen_at")
+
+        ref = AsyncMock()
+        with patch.object(oauth, "_proactive_refresh", new=ref):
+            await oauth._preflight_refresh_if_needed()
+
+        ref.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_network_error_applies_grace_window(self, tmp_path: Path) -> None:
+        """NETWORK_ERROR from refresh extends expiry by the grace window."""
+        import time
+
+        oauth = self._make_oauth(tmp_path)
+        # Within margin so refresh is attempted.
+        self._seed(oauth, expires_in=_REFRESH_MARGIN_SECONDS - 30.0)
+
+        ref = AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
+        save = AsyncMock()  # avoid reaching the disk store
+        with patch.object(oauth, "_proactive_refresh", new=ref), patch.object(
+            oauth, "_save_token_expiry", new=save
+        ):
+            before = time.time()
+            await oauth._preflight_refresh_if_needed()
+            after = time.time()
+
+        ref.assert_awaited_once()
+        ctx = oauth.context
+        assert ctx.token_expiry_time is not None
+        lo = before + _NETWORK_ERROR_GRACE_SECONDS - 1
+        hi = after + _NETWORK_ERROR_GRACE_SECONDS + 1
+        assert lo <= ctx.token_expiry_time <= hi
+        # Tokens themselves untouched
+        assert ctx.current_tokens.access_token == "A"
+        assert ctx.current_tokens.refresh_token == "R"
+
+    @pytest.mark.anyio
+    async def test_auth_error_leaves_tokens_for_sdk_to_handle(self, tmp_path: Path) -> None:
+        """AUTH_ERROR from refresh must not bump expiry — let SDK drive re-auth."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed(oauth, expires_in=_REFRESH_MARGIN_SECONDS - 30.0)
+        original_expiry = oauth.context.token_expiry_time
+
+        ref = AsyncMock(return_value=_RefreshOutcome.AUTH_ERROR)
+        with patch.object(oauth, "_proactive_refresh", new=ref):
+            await oauth._preflight_refresh_if_needed()
+
+        # Expiry unchanged: SDK will see expired token and follow its 401 path.
+        assert oauth.context.token_expiry_time == original_expiry
+
+    @pytest.mark.anyio
+    async def test_no_refresh_capability_skips_preflight(self, tmp_path: Path) -> None:
+        """Without a refresh_token / client_info there's nothing to do."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed(oauth, expires_in=10.0)
+        # Strip client_info so can_refresh_token() returns False
+        oauth.context.client_info = None
+
+        ref = AsyncMock()
+        with patch.object(oauth, "_proactive_refresh", new=ref):
+            await oauth._preflight_refresh_if_needed()
+
+        ref.assert_not_called()

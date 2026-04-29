@@ -146,7 +146,7 @@ end
 --- Render a single server
 --- @param srv MCPCompanion.ServerInfo
 --- @param session_disabled? table<string,boolean> Per-session disabled set for the source chat
-local function render_server(srv, session_disabled)
+local function render_server(srv, session_disabled, project_disabled)
   local icon, hl = status_icon(srv.status or "connected")
   local tools_n = srv.tools and #srv.tools or 0
   local res_n = srv.resources and #srv.resources or 0
@@ -155,6 +155,7 @@ local function render_server(srv, session_disabled)
   local arrow = is_expanded and icons.collapse or icons.expand
   local disabled_label = srv.disabled and " [disabled]" or ""
   local session_off = session_disabled and session_disabled[srv.name]
+  local project_off = project_disabled and project_disabled[srv.name]
 
   -- Server header line (clickable)
   local header_segments = {
@@ -169,6 +170,9 @@ local function render_server(srv, session_disabled)
       string.format("  %d %s  %d %s  %d %s", tools_n, icons.tool, res_n, icons.resource, prompts_n, icons.prompt),
       "Comment",
     })
+  end
+  if project_off then
+    table.insert(header_segments, { " [project off]", "DiagnosticHint" })
   end
   if session_off then
     table.insert(header_segments, { " [session off]", "DiagnosticWarn" })
@@ -236,6 +240,26 @@ local function build_status_view(state)
     end
   end
 
+  -- Resolve per-project disabled state from .mcp-companion.json walked up
+  -- from cwd.  Indicator only appears when a project file is in scope, so the
+  -- usual "no project file = all visible" case stays uncluttered.
+  local project_disabled = nil
+  do
+    local ok, project = pcall(require, "mcp_companion.project")
+    if ok then
+      local cfg, _root = project.resolve()
+      if cfg then
+        local known = {}
+        for _, srv in ipairs(state.servers or {}) do
+          if srv.name and srv.name ~= "_bridge" then
+            table.insert(known, srv.name)
+          end
+        end
+        project_disabled = project.project_disabled_set(cfg, known)
+      end
+    end
+  end
+
   -- Header
   add_line("")
   render_bridge(state)
@@ -267,7 +291,7 @@ local function build_status_view(state)
     add_line("")
     for _, srv in ipairs(servers) do
       if srv.name ~= "_bridge" then
-        render_server(srv, session_disabled)
+        render_server(srv, session_disabled, project_disabled)
       end
     end
   end
@@ -292,7 +316,11 @@ local function build_status_view(state)
     { " q", "Special" },
     { " close  ", "Comment" },
     { "e", "Special" },
-    { " toggle  ", "Comment" },
+    { " global  ", "Comment" },
+    { "p", "Special" },
+    { " project  ", "Comment" },
+    { "S", "Special" },
+    { " session  ", "Comment" },
     { "r", "Special" },
     { " refresh  ", "Comment" },
     { "R", "Special" },
@@ -300,7 +328,7 @@ local function build_status_view(state)
     { "l", "Special" },
     { " logs  ", "Comment" },
     { "<CR>", "Special" },
-    { " expand/collapse", "Comment" },
+    { " expand", "Comment" },
   })
 end
 
@@ -496,6 +524,96 @@ function M.open()
       end
     end)
   end, "Toggle server enable/disable")
+
+  map("p", function()
+    local cursor = vim.api.nvim_win_get_cursor(_win)
+    local line_idx = cursor[1]
+    local line_data = _lines[line_idx]
+    if not line_data or not line_data.server_name then
+      return
+    end
+    local srv_name = line_data.server_name
+    if srv_name == "_bridge" then return end
+
+    local state = require("mcp_companion.state")
+    local servers = state.field("servers") or {}
+    local known = {}
+    for _, srv in ipairs(servers) do
+      if srv.name and srv.name ~= "_bridge" then
+        table.insert(known, srv.name)
+      end
+    end
+    if #known == 0 then
+      vim.notify("[mcp-companion] No connected servers — bridge state not loaded yet",
+        vim.log.levels.WARN)
+      return
+    end
+
+    local project = require("mcp_companion.project")
+    local ok, result = pcall(project.toggle_in_project_file, srv_name, known)
+    if not ok then
+      vim.notify("[mcp-companion] Project toggle failed: " .. tostring(result),
+        vim.log.levels.ERROR)
+      return
+    end
+
+    local new_state_label = result.now_visible and "visible" or "hidden"
+    vim.notify(string.format(
+      "[mcp-companion] %s %s in project (%s)",
+      srv_name, new_state_label, result.path
+    ), vim.log.levels.INFO)
+
+    -- Re-render so the [project off] indicator updates immediately.
+    M.render()
+  end, "Toggle server in .mcp-companion.json")
+
+  map("S", function()
+    local cursor = vim.api.nvim_win_get_cursor(_win)
+    local line_idx = cursor[1]
+    local line_data = _lines[line_idx]
+    if not line_data or not line_data.server_name then
+      return
+    end
+    local srv_name = line_data.server_name
+    if srv_name == "_bridge" then return end
+
+    if not _source_bufnr then
+      vim.notify(
+        "[mcp-companion] No chat associated with this status window — open :MCPStatus from a CodeCompanion chat",
+        vim.log.levels.WARN
+      )
+      return
+    end
+
+    local cc_ok, codecompanion = pcall(require, "codecompanion")
+    if not cc_ok then
+      vim.notify("[mcp-companion] CodeCompanion not available", vim.log.levels.WARN)
+      return
+    end
+    local chat = codecompanion.buf_get_chat(_source_bufnr)
+    if not chat then
+      vim.notify("[mcp-companion] Source buffer is no longer a chat",
+        vim.log.levels.WARN)
+      return
+    end
+
+    local sc_ok, sc = pcall(require, "mcp_companion.cc.session_commands")
+    if not sc_ok then
+      vim.notify("[mcp-companion] Session commands not available",
+        vim.log.levels.WARN)
+      return
+    end
+
+    sc.toggle_server_for_session(chat, srv_name, function(err, info)
+      if err then
+        vim.notify("[mcp-companion] Session toggle failed: " .. err,
+          vim.log.levels.ERROR)
+        return
+      end
+      vim.notify(string.format("[mcp-companion] %s %s for this chat session",
+        info.action, info.server), vim.log.levels.INFO)
+    end)
+  end, "Toggle server for this chat session")
 
   -- Subscribe to state changes for live updates
   local state = require("mcp_companion.state")
