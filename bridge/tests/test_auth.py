@@ -12,6 +12,7 @@ from mcp_bridge.auth import (
     _NETWORK_ERROR_GRACE_SECONDS,
     _REFRESH_MARGIN_SECONDS,
     _WAKE_GAP_SECONDS,
+    _ProbeOutcome,
     _RefreshOutcome,
     _is_network_error,
     _BearerAuth,
@@ -627,46 +628,95 @@ class TestUpstream401Suppression:
         fake_ci.client_id = "client-123"
         ctx.client_info = fake_ci
 
-    @pytest.mark.anyio
-    async def test_401_with_valid_tokens_propagates_without_full_flow(
-        self, tmp_path: Path
-    ) -> None:
-        """A 401 on cycle 1 with healthy tokens must not enter the SDK's full-flow."""
-        import fastmcp.client.auth.oauth as fastmcp_oauth_mod
+    async def _drive_401(
+        self,
+        oauth,
+        probe_outcome: _ProbeOutcome,
+    ) -> tuple[list[str], httpx.Response | None]:
+        """Run async_auth_flow against a 401 with the probe forced to *probe_outcome*.
 
-        oauth = self._make_oauth(tmp_path)
-        self._seed_valid_tokens(oauth)
+        Returns (sdk_yields, second_yield_or_none).  The second yield exists
+        only when the SDK was allowed to drive its full-flow path (i.e. the
+        probe said INVALID).
+        """
+        import fastmcp.client.auth.oauth as fastmcp_oauth_mod
 
         sdk_yields: list[str] = []
 
         async def fake_super_flow(self_inner, request):
             sdk_yields.append("initial")
             response = yield request
-            # We should NEVER reach this point: our wrapper should have
-            # closed this generator before forwarding the 401.
             sdk_yields.append(f"continued-after-{response.status_code}")
-            yield httpx.Request("GET", "https://example.com/.well-known/foo")
+            yield httpx.Request(
+                "GET", "https://example.com/.well-known/foo"
+            )
 
         initial = httpx.Request("POST", "https://mcp.example.com/mcp")
+        response_401 = httpx.Response(401, request=initial)
 
         with patch.object(
             fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
         ), patch.object(
             oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(oauth, "_save_token_expiry", new=AsyncMock()):
+        ), patch.object(
+            oauth, "_save_token_expiry", new=AsyncMock()
+        ), patch.object(
+            oauth,
+            "_probe_google_token_validity",
+            new=AsyncMock(return_value=probe_outcome),
+        ):
             gen = oauth.async_auth_flow(initial)
-            first = await gen.__anext__()
-            assert first.url == initial.url
+            await gen.__anext__()
+            try:
+                second = await gen.asend(response_401)
+                return sdk_yields, second
+            except StopAsyncIteration:
+                return sdk_yields, None
 
-            response_401 = httpx.Response(401, request=initial)
-            with pytest.raises(StopAsyncIteration):
-                await gen.asend(response_401)
+    @pytest.mark.anyio
+    async def test_401_propagated_when_google_says_token_valid(
+        self, tmp_path: Path
+    ) -> None:
+        """Probe → VALID: workspace_mcp's problem; propagate 401 without re-auth."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
 
-        # SDK flow yielded the initial request but was closed before it
-        # could observe the 401 response and run discovery.
+        sdk_yields, second = await self._drive_401(oauth, _ProbeOutcome.VALID)
+
+        # SDK flow saw the initial yield but was closed before it could
+        # observe the 401 response or drive discovery.
         assert sdk_yields == ["initial"], (
             f"SDK flow continued past the 401: {sdk_yields}"
         )
+        assert second is None
+
+    @pytest.mark.anyio
+    async def test_401_propagated_when_probe_unknown(
+        self, tmp_path: Path
+    ) -> None:
+        """Probe → UNKNOWN (we can't reach Google either): be safe, propagate."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        sdk_yields, second = await self._drive_401(oauth, _ProbeOutcome.UNKNOWN)
+
+        assert sdk_yields == ["initial"]
+        assert second is None
+
+    @pytest.mark.anyio
+    async def test_401_falls_through_to_sdk_when_google_says_token_invalid(
+        self, tmp_path: Path
+    ) -> None:
+        """Probe → INVALID: token genuinely dead, let SDK drive full re-auth."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        sdk_yields, second = await self._drive_401(oauth, _ProbeOutcome.INVALID)
+
+        # SDK flow received the 401 and yielded its discovery request.
+        assert sdk_yields == ["initial", "continued-after-401"]
+        assert second is not None
+        assert second.url == httpx.URL("https://example.com/.well-known/foo")
 
     @pytest.mark.anyio
     async def test_401_without_refresh_token_falls_through_to_sdk(
@@ -712,6 +762,72 @@ class TestUpstream401Suppression:
             assert second.url == httpx.URL("https://example.com/.well-known/x")
 
         assert sdk_yields == ["initial", "got-401"]
+
+    @pytest.mark.anyio
+    async def test_probe_returns_valid_on_200(self, tmp_path: Path) -> None:
+        """Google userinfo 200 → token is valid."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_http = AsyncMock()
+            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+            mock_http.__aexit__ = AsyncMock(return_value=False)
+            mock_http.get = AsyncMock(
+                return_value=httpx.Response(200, json={"email": "x@example.com"})
+            )
+            mock_cls.return_value = mock_http
+            outcome = await oauth._probe_google_token_validity()
+
+        assert outcome == _ProbeOutcome.VALID
+
+    @pytest.mark.anyio
+    async def test_probe_returns_invalid_on_401(self, tmp_path: Path) -> None:
+        """Google userinfo 401 → token is dead/revoked."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_http = AsyncMock()
+            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+            mock_http.__aexit__ = AsyncMock(return_value=False)
+            mock_http.get = AsyncMock(return_value=httpx.Response(401))
+            mock_cls.return_value = mock_http
+            outcome = await oauth._probe_google_token_validity()
+
+        assert outcome == _ProbeOutcome.INVALID
+
+    @pytest.mark.anyio
+    async def test_probe_returns_unknown_on_network_error(self, tmp_path: Path) -> None:
+        """ConnectError → UNKNOWN (we can't tell)."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_http = AsyncMock()
+            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+            mock_http.__aexit__ = AsyncMock(return_value=False)
+            mock_http.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+            mock_cls.return_value = mock_http
+            outcome = await oauth._probe_google_token_validity()
+
+        assert outcome == _ProbeOutcome.UNKNOWN
+
+    @pytest.mark.anyio
+    async def test_probe_returns_unknown_on_5xx(self, tmp_path: Path) -> None:
+        """Other status codes (5xx, 403) → UNKNOWN."""
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_http = AsyncMock()
+            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+            mock_http.__aexit__ = AsyncMock(return_value=False)
+            mock_http.get = AsyncMock(return_value=httpx.Response(503))
+            mock_cls.return_value = mock_http
+            outcome = await oauth._probe_google_token_validity()
+
+        assert outcome == _ProbeOutcome.UNKNOWN
 
     @pytest.mark.anyio
     async def test_non_401_lets_sdk_flow_complete(self, tmp_path: Path) -> None:

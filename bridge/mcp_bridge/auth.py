@@ -60,6 +60,27 @@ class _RefreshOutcome(enum.Enum):
     AUTH_ERROR = "auth_error"  # permanent — need full re-auth
 
 
+class _ProbeOutcome(enum.Enum):
+    """Result of probing Google directly to classify an upstream 401.
+
+    Used to decide whether a 401 from a downstream MCP server (e.g.
+    workspace_mcp under EXTERNAL_OAUTH21_PROVIDER) indicates a real
+    credential failure or just an outage in the validator's side of the
+    network.
+    """
+
+    VALID = "valid"  # Google accepts our token — 401 is downstream's problem
+    INVALID = "invalid"  # Google rejects our token — real auth failure
+    UNKNOWN = "unknown"  # Couldn't tell (network error, 5xx, etc.)
+
+
+# Endpoint we probe to classify upstream 401s.  Same endpoint workspace_mcp
+# uses inside its verify_token, so a 200 here is a strong signal that the
+# downstream's verify_token is failing for a non-credential reason.
+_GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+_GOOGLE_PROBE_TIMEOUT_SECONDS = 5.0
+
+
 def _is_network_error(exc: BaseException) -> bool:
     """Return True if *exc* looks like a transient network failure.
 
@@ -535,6 +556,51 @@ class _RefreshTokenOAuth(OAuth):
                 if outcome == _RefreshOutcome.NETWORK_ERROR:
                     await self._apply_network_grace_window()
 
+    async def _probe_google_token_validity(self) -> _ProbeOutcome:
+        """Ask Google directly whether our access token is still valid.
+
+        This is the same userinfo endpoint workspace_mcp's
+        ``ExternalOAuthProvider.verify_token`` calls — so a 200 here is a
+        strong signal that our credentials are good and the downstream's
+        401 was caused by something on its side (typically Google being
+        unreachable from the workspace_mcp process).
+
+        Only called from the upstream-401 handler in ``async_auth_flow``;
+        cost is one ~200ms HTTP request, paid only when an upstream 401
+        actually happens.
+        """
+        ctx = self.context
+        if not ctx.current_tokens or not ctx.current_tokens.access_token:
+            return _ProbeOutcome.UNKNOWN
+
+        token = ctx.current_tokens.access_token
+        try:
+            async with httpx.AsyncClient(
+                timeout=_GOOGLE_PROBE_TIMEOUT_SECONDS
+            ) as http:
+                resp = await http.get(
+                    _GOOGLE_USERINFO_URL,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        except Exception as exc:
+            if _is_network_error(exc):
+                logger.debug(
+                    "Google probe network-failed: %s — treating as UNKNOWN", exc
+                )
+            else:
+                logger.warning("Google probe error", exc_info=True)
+            return _ProbeOutcome.UNKNOWN
+
+        if resp.status_code == 200:
+            return _ProbeOutcome.VALID
+        if resp.status_code == 401:
+            return _ProbeOutcome.INVALID
+        # 5xx, 403 (rate-limited or similar) — ambiguous.
+        logger.debug(
+            "Google probe returned %d — treating as UNKNOWN", resp.status_code
+        )
+        return _ProbeOutcome.UNKNOWN
+
     async def _preflight_refresh_if_needed(self) -> None:
         """Refresh the access token *before* the SDK sees it expired.
 
@@ -646,24 +712,27 @@ class _RefreshTokenOAuth(OAuth):
                     response.status_code,
                 )
 
-                # Suppress the SDK's inline full-flow re-auth on the *first*
-                # 401 from the upstream MCP server when our credentials still
-                # look healthy.
+                # Classify the *first* 401 from the upstream MCP server by
+                # probing Google directly with our token.  We can't tell from
+                # the 401 alone whether downstream's verify_token failed
+                # because Google was briefly unreachable from its side or
+                # because our credentials are actually bad — but we can ask
+                # Google ourselves.
                 #
-                # Why: the SDK treats any 401 as "credentials are bad, must
-                # re-authorize" and immediately runs PRM/OASM discovery and
-                # `_perform_authorization`, which prints the Google sign-in
-                # URL and pops a browser.  Real-world workspace_mcp under
-                # ``EXTERNAL_OAUTH21_PROVIDER=true`` calls Google's userinfo
-                # synchronously inside ``verify_token``; if Google is briefly
-                # unreachable the 401 is purely transient — neither the
-                # access nor refresh token is at fault.  The pre-flight
-                # refresh has already done what it can; the right answer is
-                # to propagate the 401 to the caller, not invent a re-auth
-                # event.  Genuine credential failures (revoked grant, scope
-                # mismatch) are recovered via :MCPToggleServer / the `e` key
-                # in :MCPStatus, which clears _auth_failed and runs a fresh
-                # browser flow on demand.
+                # 200 from Google → our token is fine, the 401 is downstream's
+                # problem (e.g. workspace_mcp under EXTERNAL_OAUTH21_PROVIDER
+                # couldn't reach Google's userinfo endpoint during a network
+                # blip).  Propagate the 401 to the caller; no browser popup.
+                #
+                # 401 from Google → our token is genuinely revoked/expired.
+                # Let the SDK's inline full-flow path run so the user gets
+                # the deliberate browser flow they need to recover.
+                #
+                # Anything else (network error, 5xx) → ambiguous; default to
+                # propagating as transient so the user doesn't see spurious
+                # popups when both sides are simultaneously unreachable.
+                # :MCPToggleServer / the `e` key in :MCPStatus is always the
+                # manual recovery path.
                 if (
                     cycle == 1
                     and response.status_code == 401
@@ -671,15 +740,34 @@ class _RefreshTokenOAuth(OAuth):
                     and ctx.current_tokens.access_token
                     and ctx.current_tokens.refresh_token
                 ):
-                    logger.warning(
-                        "Upstream %s returned 401 with locally-valid token "
-                        "(refresh_token present) — propagating to caller without "
-                        "triggering full re-auth.  Use :MCPToggleServer to force "
-                        "re-authentication if this persists.",
-                        request.url,
-                    )
-                    await flow.aclose()
-                    return
+                    probe = await self._probe_google_token_validity()
+                    if probe == _ProbeOutcome.INVALID:
+                        logger.warning(
+                            "Upstream %s returned 401 and Google rejected our "
+                            "token — letting SDK drive full re-auth.",
+                            request.url,
+                        )
+                        # Fall through: let the SDK process the 401 normally.
+                    else:
+                        # VALID or UNKNOWN — propagate without re-auth.
+                        if probe == _ProbeOutcome.VALID:
+                            reason = (
+                                "Google accepts our token; 401 is downstream's "
+                                "validator problem (likely transient)"
+                            )
+                        else:
+                            reason = (
+                                "Google probe inconclusive; treating as transient"
+                            )
+                        logger.warning(
+                            "Upstream %s returned 401 — %s. Propagating to caller "
+                            "without triggering full re-auth.  Use :MCPToggleServer "
+                            "to force re-authentication if this persists.",
+                            request.url,
+                            reason,
+                        )
+                        await flow.aclose()
+                        return
 
                 try:
                     request_out = await flow.asend(response)
