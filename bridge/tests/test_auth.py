@@ -614,8 +614,20 @@ class TestUpstream401Suppression:
         *,
         expires_in: float = 3600.0,
         token_endpoint: str = "https://oauth2.googleapis.com/token",
+        authorization_server: str | None = None,
     ):
+        """Seed the OAuth instance with valid-looking tokens + discovery metadata.
+
+        The fixture's server URL is ``https://mcp.example.com/mcp`` (set by
+        ``_make_oauth``).  ``authorization_server`` populates the PRM's
+        ``authorization_servers`` list — this is what
+        ``_delegated_validator_host`` reads.  When ``None`` the AS defaults
+        to the same host as the token_endpoint (so e.g. a Google
+        token_endpoint implies a Google AS), which matches the real-world
+        gws / clickup discovery shapes.
+        """
         import time
+        from urllib.parse import urlparse
 
         from mcp.shared.auth import OAuthToken
 
@@ -627,9 +639,20 @@ class TestUpstream401Suppression:
             expires_in=int(expires_in),
         )
         ctx.token_expiry_time = time.time() + expires_in
-        fake_meta = MagicMock()
-        fake_meta.token_endpoint = token_endpoint
-        ctx.oauth_metadata = fake_meta
+
+        # OAuth Authorization Server Metadata
+        oasm = MagicMock()
+        oasm.token_endpoint = token_endpoint
+        ctx.oauth_metadata = oasm
+
+        # Protected Resource Metadata (what _delegated_validator_host reads)
+        if authorization_server is None:
+            tok_host = urlparse(token_endpoint).hostname or ""
+            authorization_server = f"https://{tok_host}"
+        prm = MagicMock()
+        prm.authorization_servers = [authorization_server]
+        ctx.protected_resource_metadata = prm
+
         fake_ci = MagicMock()
         fake_ci.client_id = "client-123"
         ctx.client_info = fake_ci
@@ -668,7 +691,7 @@ class TestUpstream401Suppression:
             oauth, "_save_token_expiry", new=AsyncMock()
         ), patch.object(
             oauth,
-            "_probe_google_token_validity",
+            "_probe_token_at",
             new=AsyncMock(return_value=probe_outcome),
         ):
             gen = oauth.async_auth_flow(initial)
@@ -783,7 +806,7 @@ class TestUpstream401Suppression:
                 return_value=httpx.Response(200, json={"email": "x@example.com"})
             )
             mock_cls.return_value = mock_http
-            outcome = await oauth._probe_google_token_validity()
+            outcome = await oauth._probe_token_at("https://www.googleapis.com/oauth2/v3/userinfo")
 
         assert outcome == _ProbeOutcome.VALID
 
@@ -799,7 +822,7 @@ class TestUpstream401Suppression:
             mock_http.__aexit__ = AsyncMock(return_value=False)
             mock_http.get = AsyncMock(return_value=httpx.Response(401))
             mock_cls.return_value = mock_http
-            outcome = await oauth._probe_google_token_validity()
+            outcome = await oauth._probe_token_at("https://www.googleapis.com/oauth2/v3/userinfo")
 
         assert outcome == _ProbeOutcome.INVALID
 
@@ -815,77 +838,188 @@ class TestUpstream401Suppression:
             mock_http.__aexit__ = AsyncMock(return_value=False)
             mock_http.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
             mock_cls.return_value = mock_http
-            outcome = await oauth._probe_google_token_validity()
+            outcome = await oauth._probe_token_at("https://www.googleapis.com/oauth2/v3/userinfo")
 
         assert outcome == _ProbeOutcome.UNKNOWN
 
     @pytest.mark.anyio
-    async def test_non_google_provider_falls_through_to_sdk(
+    async def test_self_validating_provider_falls_through_to_sdk(
         self, tmp_path: Path
     ) -> None:
-        """For non-Google OAuth providers (e.g. ClickUp) we have no meaningful
-        probe — the upstream MCP server IS the OAuth server.  401 must reach
-        the SDK so it can drive full re-auth.
+        """When the upstream IS the OAuth server (server host == token-endpoint
+        host, e.g. clickup), its 401 is authoritative — let the SDK drive
+        full re-auth.  No probe.
         """
+        import fastmcp.client.auth.oauth as fastmcp_oauth_mod
+
         oauth = self._make_oauth(tmp_path)
-        # ClickUp's token endpoint, not Google's.
+        # The fixture's server URL is mcp.example.com; match it so
+        # _has_third_party_validator returns False.
         self._seed_valid_tokens(
-            oauth, token_endpoint="https://mcp.clickup.com/oauth/token"
+            oauth, token_endpoint="https://mcp.example.com/oauth/token"
         )
 
-        # Probe must NOT be called — the gate check should short-circuit.
+        sdk_yields: list[str] = []
+
+        async def fake_super_flow(self_inner, request):
+            sdk_yields.append("initial")
+            response = yield request
+            sdk_yields.append(f"continued-after-{response.status_code}")
+            yield httpx.Request("GET", "https://example.com/.well-known/foo")
+
+        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
+        response_401 = httpx.Response(401, request=initial)
+
+        # The probe must NOT be called.
         probe = AsyncMock(return_value=_ProbeOutcome.VALID)
-        with patch.object(oauth, "_probe_google_token_validity", new=probe):
-            sdk_yields, second = await self._drive_401(
-                oauth, _ProbeOutcome.VALID  # ignored — probe shouldn't be called
-            )
+        with patch.object(
+            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
+        ), patch.object(
+            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
+        ), patch.object(
+            oauth, "_save_token_expiry", new=AsyncMock()
+        ), patch.object(oauth, "_probe_token_at", new=probe):
+            gen = oauth.async_auth_flow(initial)
+            await gen.__anext__()
+            second = await gen.asend(response_401)
+            assert second.url == httpx.URL("https://example.com/.well-known/foo")
 
-        # If the gate worked, the probe was never invoked and the SDK got
-        # the 401 normally.  _drive_401 patches the probe itself, so the
-        # only way to verify the gate is via the SDK observing the 401.
-        assert "continued-after-401" in sdk_yields, (
-            f"non-Google provider should let SDK see the 401, got {sdk_yields}"
-        )
-        assert second is not None
+        assert sdk_yields == ["initial", "continued-after-401"]
+        probe.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_is_google_provider_detects_googleapis(
+    async def test_third_party_unknown_validator_propagates(
         self, tmp_path: Path
     ) -> None:
+        """Third-party validator we don't know how to probe → propagate 401."""
+        import fastmcp.client.auth.oauth as fastmcp_oauth_mod
+
         oauth = self._make_oauth(tmp_path)
+        # Different host (so it's third-party), but not Google.
         self._seed_valid_tokens(
-            oauth, token_endpoint="https://oauth2.googleapis.com/token"
+            oauth, token_endpoint="https://login.microsoftonline.com/oauth/token"
         )
-        assert oauth._is_google_provider() is True
+
+        sdk_yields: list[str] = []
+
+        async def fake_super_flow(self_inner, request):
+            sdk_yields.append("initial")
+            response = yield request
+            sdk_yields.append(f"continued-after-{response.status_code}")
+            yield httpx.Request("GET", "https://example.com/.well-known/foo")
+
+        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
+        response_401 = httpx.Response(401, request=initial)
+
+        probe = AsyncMock(return_value=_ProbeOutcome.VALID)
+        with patch.object(
+            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
+        ), patch.object(
+            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
+        ), patch.object(
+            oauth, "_save_token_expiry", new=AsyncMock()
+        ), patch.object(oauth, "_probe_token_at", new=probe):
+            gen = oauth.async_auth_flow(initial)
+            await gen.__anext__()
+            with pytest.raises(StopAsyncIteration):
+                await gen.asend(response_401)
+
+        # SDK closed before observing the 401, no probe attempted.
+        assert sdk_yields == ["initial"]
+        probe.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_is_google_provider_detects_accounts_google(
+    async def test_delegated_validator_host_detects_different_host(
         self, tmp_path: Path
     ) -> None:
+        """gws-style: server is mcp.example.com, PRM points at accounts.google.com."""
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(
-            oauth, token_endpoint="https://accounts.google.com/o/oauth2/token"
+            oauth,
+            token_endpoint="https://oauth2.googleapis.com/token",
+            authorization_server="https://accounts.google.com",
         )
-        assert oauth._is_google_provider() is True
+        assert oauth._delegated_validator_host() == "accounts.google.com"
+        assert oauth._has_third_party_validator() is True
 
     @pytest.mark.anyio
-    async def test_is_google_provider_rejects_clickup(
+    async def test_delegated_validator_host_rejects_same_host(
         self, tmp_path: Path
     ) -> None:
+        """clickup-style: PRM advertises the server itself as the AS."""
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(
-            oauth, token_endpoint="https://mcp.clickup.com/oauth/token"
+            oauth,
+            token_endpoint="https://mcp.example.com/oauth/token",
+            authorization_server="https://mcp.example.com",
         )
-        assert oauth._is_google_provider() is False
+        assert oauth._delegated_validator_host() is None
+        assert oauth._has_third_party_validator() is False
 
     @pytest.mark.anyio
-    async def test_is_google_provider_handles_missing_metadata(
+    async def test_delegated_validator_host_handles_missing_prm(
         self, tmp_path: Path
     ) -> None:
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
-        oauth.context.oauth_metadata = None
-        assert oauth._is_google_provider() is False
+        oauth.context.protected_resource_metadata = None
+        assert oauth._delegated_validator_host() is None
+        assert oauth._has_third_party_validator() is False
+
+    @pytest.mark.anyio
+    async def test_delegated_validator_picks_external_when_mixed(
+        self, tmp_path: Path
+    ) -> None:
+        """Multi-AS PRM with both same-host and external entries → external wins."""
+        from urllib.parse import urlparse
+
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+        # Override PRM with two AS URLs: one self, one external.
+        prm = MagicMock()
+        prm.authorization_servers = [
+            "https://mcp.example.com",  # same host as server
+            "https://accounts.google.com",  # external — should win
+        ]
+        oauth.context.protected_resource_metadata = prm
+        assert oauth._delegated_validator_host() == "accounts.google.com"
+
+    @pytest.mark.anyio
+    async def test_third_party_probe_url_returns_google_for_googleapis(
+        self, tmp_path: Path
+    ) -> None:
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(
+            oauth, authorization_server="https://accounts.google.com"
+        )
+        assert oauth._third_party_probe_url() is not None
+        assert "googleapis.com" in oauth._third_party_probe_url()
+
+    @pytest.mark.anyio
+    async def test_third_party_probe_url_returns_none_for_unknown_provider(
+        self, tmp_path: Path
+    ) -> None:
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(
+            oauth,
+            token_endpoint="https://login.microsoftonline.com/oauth/token",
+            authorization_server="https://login.microsoftonline.com",
+        )
+        # Delegated but we don't know how to probe Microsoft yet.
+        assert oauth._has_third_party_validator() is True
+        assert oauth._third_party_probe_url() is None
+
+    @pytest.mark.anyio
+    async def test_third_party_probe_url_returns_none_when_self_validating(
+        self, tmp_path: Path
+    ) -> None:
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(
+            oauth,
+            token_endpoint="https://mcp.example.com/oauth/token",
+            authorization_server="https://mcp.example.com",
+        )
+        assert oauth._third_party_probe_url() is None
 
     @pytest.mark.anyio
     async def test_probe_returns_unknown_on_5xx(self, tmp_path: Path) -> None:
@@ -899,7 +1033,7 @@ class TestUpstream401Suppression:
             mock_http.__aexit__ = AsyncMock(return_value=False)
             mock_http.get = AsyncMock(return_value=httpx.Response(503))
             mock_cls.return_value = mock_http
-            outcome = await oauth._probe_google_token_validity()
+            outcome = await oauth._probe_token_at("https://www.googleapis.com/oauth2/v3/userinfo")
 
         assert outcome == _ProbeOutcome.UNKNOWN
 

@@ -556,33 +556,75 @@ class _RefreshTokenOAuth(OAuth):
                 if outcome == _RefreshOutcome.NETWORK_ERROR:
                     await self._apply_network_grace_window()
 
-    def _is_google_provider(self) -> bool:
-        """Heuristic: does our OAuth metadata point at Google?
+    def _delegated_validator_host(self) -> str | None:
+        """The host of the upstream MCP server's stated authorization server,
+        when it differs from the MCP server's own host.
 
-        We use this to gate the upstream-401 probe.  Probing only makes sense
-        when the upstream MCP server's token validator is a *third party* we
-        can ask directly.  For ClickUp / GitHub Copilot / any "validator IS
-        the OAuth server" case there's no useful probe to make — the upstream
-        already gave us its verdict by returning 401.
+        This is the PRM-level signal: ``.well-known/oauth-protected-resource``
+        carries an ``authorization_servers`` list, and a server *delegates*
+        validation when that list points somewhere other than itself.
+
+        * workspace_mcp under ``EXTERNAL_OAUTH21_PROVIDER`` advertises
+          ``["https://accounts.google.com"]`` while the server itself runs at
+          ``localhost:8002`` → returns ``"accounts.google.com"``.
+        * ClickUp advertises ``["https://mcp.clickup.com"]`` while the server
+          itself runs at ``mcp.clickup.com`` → returns ``None`` (self-validating).
+
+        Returning ``None`` means the upstream is its own OAuth server: its
+        401 is authoritative, no probe makes sense.
         """
-        meta = self.context.oauth_metadata
-        if meta is None or meta.token_endpoint is None:
-            return False
-        host = str(meta.token_endpoint).lower()
-        return "googleapis.com" in host or "accounts.google.com" in host
+        prm = self.context.protected_resource_metadata
+        if not prm or not prm.authorization_servers:
+            return None
+        from urllib.parse import urlparse  # local — only needed here
 
-    async def _probe_google_token_validity(self) -> _ProbeOutcome:
-        """Ask Google directly whether our access token is still valid.
+        server_host = (urlparse(str(self.context.server_url)).hostname or "").lower()
+        if not server_host:
+            return None
+        # A server can list multiple AS URLs; if any are external we treat
+        # the upstream as delegating.  Pick the first external one — the SDK
+        # will have picked authorization_servers[0] for OASM discovery, so
+        # that's the validator actually in play.
+        for as_url in prm.authorization_servers:
+            as_host = (urlparse(str(as_url)).hostname or "").lower()
+            if as_host and as_host != server_host:
+                return as_host
+        return None
 
-        This is the same userinfo endpoint workspace_mcp's
-        ``ExternalOAuthProvider.verify_token`` calls — so a 200 here is a
-        strong signal that our credentials are good and the downstream's
-        401 was caused by something on its side (typically Google being
-        unreachable from the workspace_mcp process).
+    def _third_party_probe_url(self) -> str | None:
+        """URL to probe the delegated validator with our access token, or None.
 
-        Only meaningful for Google-issued tokens; callers should gate via
-        :meth:`_is_google_provider`.  Cost is one ~200ms HTTP request, paid
-        only when an upstream 401 actually happens.
+        Returns a userinfo-style endpoint when the validator is a provider we
+        know how to ask directly (currently Google).  Returns ``None`` when
+        either there is no delegated validator (PRM lists the server itself
+        as the AS) or the third party is one we don't know how to probe —
+        in which case the 401 handler falls back to the safe-default
+        "treat as transient" behaviour rather than guessing.
+        """
+        validator_host = self._delegated_validator_host()
+        if validator_host is None:
+            return None
+        if "googleapis.com" in validator_host or "google.com" in validator_host:
+            return _GOOGLE_USERINFO_URL
+        # Other delegated-validator providers can be added here as we learn
+        # their userinfo / introspection endpoints.
+        return None
+
+    def _has_third_party_validator(self) -> bool:
+        """``True`` iff the upstream MCP server's PRM lists an AS on a different host."""
+        return self._delegated_validator_host() is not None
+
+    async def _probe_token_at(self, probe_url: str) -> _ProbeOutcome:
+        """Probe a third-party validator with our access token.
+
+        Used to classify upstream 401s: 200 means the third party still
+        accepts our token (so the 401 came from the upstream's own
+        validation infrastructure being briefly unable to reach it); 401
+        means the token is genuinely revoked/expired; anything else is
+        ambiguous.
+
+        Cost: one ~200ms HTTP request, paid only when an upstream 401
+        actually happens and we have a known probe URL.
         """
         ctx = self.context
         if not ctx.current_tokens or not ctx.current_tokens.access_token:
@@ -594,16 +636,18 @@ class _RefreshTokenOAuth(OAuth):
                 timeout=_GOOGLE_PROBE_TIMEOUT_SECONDS
             ) as http:
                 resp = await http.get(
-                    _GOOGLE_USERINFO_URL,
+                    probe_url,
                     headers={"Authorization": f"Bearer {token}"},
                 )
         except Exception as exc:
             if _is_network_error(exc):
                 logger.debug(
-                    "Google probe network-failed: %s — treating as UNKNOWN", exc
+                    "Validator probe (%s) network-failed: %s — treating as UNKNOWN",
+                    probe_url,
+                    exc,
                 )
             else:
-                logger.warning("Google probe error", exc_info=True)
+                logger.warning("Validator probe (%s) error", probe_url, exc_info=True)
             return _ProbeOutcome.UNKNOWN
 
         if resp.status_code == 200:
@@ -612,7 +656,9 @@ class _RefreshTokenOAuth(OAuth):
             return _ProbeOutcome.INVALID
         # 5xx, 403 (rate-limited or similar) — ambiguous.
         logger.debug(
-            "Google probe returned %d — treating as UNKNOWN", resp.status_code
+            "Validator probe (%s) returned %d — treating as UNKNOWN",
+            probe_url,
+            resp.status_code,
         )
         return _ProbeOutcome.UNKNOWN
 
@@ -727,59 +773,76 @@ class _RefreshTokenOAuth(OAuth):
                     response.status_code,
                 )
 
-                # Classify the *first* 401 from the upstream MCP server by
-                # probing the OAuth provider directly with our token — but
-                # only when there's a meaningful third-party probe to make.
+                # Classify the *first* 401 from the upstream MCP server.
                 #
-                # For Google-backed providers (e.g. workspace_mcp under
-                # EXTERNAL_OAUTH21_PROVIDER) we ask Google's userinfo
-                # endpoint, which is the same one the downstream uses.  This
-                # gives a 3-way classification:
+                # Decision tree:
                 #
-                #   200 from Google → our token is fine, the 401 is
-                #     downstream's problem (typically Google was briefly
-                #     unreachable from its side).  Propagate; no popup.
-                #   401 from Google → token is genuinely revoked/expired.
-                #     Let the SDK's inline full-flow run so the user gets a
-                #     deliberate browser flow.
-                #   network error / 5xx → ambiguous.  Default to propagating.
+                # * No third-party validator (server host == token-endpoint
+                #   host, e.g. clickup): the upstream IS the OAuth server,
+                #   its 401 is authoritative.  Fall through to the SDK's
+                #   default — full re-auth via the inline 401 path.
                 #
-                # For other providers we have no meaningful probe — the
-                # upstream MCP server *is* the OAuth server (clickup, etc.)
-                # so its 401 is authoritative.  Fall through to the SDK's
-                # default behaviour for those.  :MCPToggleServer is always
-                # the manual recovery path.
+                # * Third-party validator that we know how to probe (Google):
+                #   ask the validator directly.
+                #     200 → token is fine; the 401 is downstream's fault
+                #       (typically validator unreachable from downstream's
+                #       side).  Propagate as transient; no popup.
+                #     401 → token is genuinely revoked/expired.  Fall through
+                #       to SDK so the user gets a deliberate browser flow.
+                #     network/5xx → ambiguous; propagate as transient.
+                #
+                # * Third-party validator we don't know how to probe: assume
+                #   transient and propagate.  We'd rather miss an
+                #   auto-recovery than pop browsers we can't classify;
+                #   :MCPToggleServer is always the manual recovery path.
                 if (
                     cycle == 1
                     and response.status_code == 401
                     and ctx.current_tokens
                     and ctx.current_tokens.access_token
                     and ctx.current_tokens.refresh_token
-                    and self._is_google_provider()
+                    and self._has_third_party_validator()
                 ):
-                    probe = await self._probe_google_token_validity()
+                    probe_url = self._third_party_probe_url()
+                    if probe_url is None:
+                        logger.warning(
+                            "Upstream %s returned 401; the validator is a "
+                            "third party we don't know how to probe — "
+                            "treating as transient and propagating to caller. "
+                            "Use :MCPToggleServer to force re-authentication "
+                            "if this persists.",
+                            request.url,
+                        )
+                        await flow.aclose()
+                        return
+
+                    probe = await self._probe_token_at(probe_url)
                     if probe == _ProbeOutcome.INVALID:
                         logger.warning(
-                            "Upstream %s returned 401 and Google rejected our "
-                            "token — letting SDK drive full re-auth.",
+                            "Upstream %s returned 401 and the third-party "
+                            "validator (%s) rejected our token — letting SDK "
+                            "drive full re-auth.",
                             request.url,
+                            probe_url,
                         )
                         # Fall through: let the SDK process the 401 normally.
                     else:
-                        # VALID or UNKNOWN — propagate without re-auth.
                         if probe == _ProbeOutcome.VALID:
                             reason = (
-                                "Google accepts our token; 401 is downstream's "
-                                "validator problem (likely transient)"
+                                f"third-party validator ({probe_url}) accepts "
+                                "our token; 401 is downstream's validator "
+                                "problem (likely transient)"
                             )
                         else:
                             reason = (
-                                "Google probe inconclusive; treating as transient"
+                                f"third-party probe ({probe_url}) inconclusive; "
+                                "treating as transient"
                             )
                         logger.warning(
-                            "Upstream %s returned 401 — %s. Propagating to caller "
-                            "without triggering full re-auth.  Use :MCPToggleServer "
-                            "to force re-authentication if this persists.",
+                            "Upstream %s returned 401 — %s. Propagating to "
+                            "caller without triggering full re-auth.  Use "
+                            ":MCPToggleServer to force re-authentication if "
+                            "this persists.",
                             request.url,
                             reason,
                         )
