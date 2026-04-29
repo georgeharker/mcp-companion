@@ -521,3 +521,223 @@ class TestPreflightRefresh:
             await oauth._preflight_refresh_if_needed()
 
         ref.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_network_error_does_not_shorten_distant_expiry(
+        self, tmp_path: Path
+    ) -> None:
+        """Wake-up pre-flight that network-fails must not shorten a still-valid token.
+
+        Repro of the production bug: at wake the token had ~42 min remaining,
+        the refresh hit a ConnectTimeout, and the grace window unconditionally
+        overwrote ``token_expiry_time = now + 300`` — taking 36 minutes of
+        valid lifetime away.  We should only EXTEND, never shorten.
+        """
+        import time
+
+        oauth = self._make_oauth(tmp_path)
+        # Token is well outside the grace window (e.g. 42 minutes left)
+        long_lifetime = _NETWORK_ERROR_GRACE_SECONDS * 8  # ~40 min
+        self._seed(oauth, expires_in=long_lifetime)
+        original_expiry = oauth.context.token_expiry_time
+
+        # Force the wake-up trigger so the pre-flight runs.
+        oauth._last_seen_at = time.time() - (_WAKE_GAP_SECONDS + 60.0)
+
+        ref = AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
+        save = AsyncMock()
+        with patch.object(oauth, "_proactive_refresh", new=ref), patch.object(
+            oauth, "_save_token_expiry", new=save
+        ):
+            await oauth._preflight_refresh_if_needed()
+
+        ref.assert_awaited_once()
+        # Expiry untouched — still the original ~42-min timestamp.
+        assert oauth.context.token_expiry_time == original_expiry, (
+            "grace window must not shorten a token whose existing expiry is "
+            "already past the grace horizon"
+        )
+        # And we didn't bother persisting either.
+        save.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_network_error_extends_short_or_expired_token(
+        self, tmp_path: Path
+    ) -> None:
+        """When the existing expiry IS within (or before) the grace window, extend it."""
+        import time
+
+        oauth = self._make_oauth(tmp_path)
+        # Token within the grace window (e.g. 30 seconds left)
+        self._seed(oauth, expires_in=30.0)
+
+        ref = AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
+        save = AsyncMock()
+        with patch.object(oauth, "_proactive_refresh", new=ref), patch.object(
+            oauth, "_save_token_expiry", new=save
+        ):
+            before = time.time()
+            await oauth._preflight_refresh_if_needed()
+            after = time.time()
+
+        ctx = oauth.context
+        lo = before + _NETWORK_ERROR_GRACE_SECONDS - 1
+        hi = after + _NETWORK_ERROR_GRACE_SECONDS + 1
+        assert lo <= ctx.token_expiry_time <= hi
+        save.assert_awaited()
+
+
+class TestUpstream401Suppression:
+    """Tests that a transient 401 from upstream does not pop a browser.
+
+    When workspace_mcp (or any other downstream MCP server validating tokens
+    against a network-reachable provider) returns 401 because its validator
+    can't reach Google, the bridge must propagate the 401 to its caller
+    rather than entering the SDK's inline full-OAuth path.  Real credential
+    failures recover via :MCPToggleServer.
+    """
+
+    def _make_oauth(self, tmp_path: Path):
+        from mcp_bridge.auth import _build_oauth
+
+        return _build_oauth(
+            server_name="test-srv",
+            server_url="https://mcp.example.com/mcp",
+            base_dir=tmp_path / "test-srv",
+            cache_tokens=False,
+        )
+
+    def _seed_valid_tokens(self, oauth, *, expires_in: float = 3600.0):
+        import time
+
+        from mcp.shared.auth import OAuthToken
+
+        ctx = oauth.context
+        ctx.current_tokens = OAuthToken(
+            access_token="A",
+            token_type="Bearer",
+            refresh_token="R",
+            expires_in=int(expires_in),
+        )
+        ctx.token_expiry_time = time.time() + expires_in
+        fake_meta = MagicMock()
+        fake_meta.token_endpoint = "https://auth.example.com/token"
+        ctx.oauth_metadata = fake_meta
+        fake_ci = MagicMock()
+        fake_ci.client_id = "client-123"
+        ctx.client_info = fake_ci
+
+    @pytest.mark.anyio
+    async def test_401_with_valid_tokens_propagates_without_full_flow(
+        self, tmp_path: Path
+    ) -> None:
+        """A 401 on cycle 1 with healthy tokens must not enter the SDK's full-flow."""
+        import fastmcp.client.auth.oauth as fastmcp_oauth_mod
+
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        sdk_yields: list[str] = []
+
+        async def fake_super_flow(self_inner, request):
+            sdk_yields.append("initial")
+            response = yield request
+            # We should NEVER reach this point: our wrapper should have
+            # closed this generator before forwarding the 401.
+            sdk_yields.append(f"continued-after-{response.status_code}")
+            yield httpx.Request("GET", "https://example.com/.well-known/foo")
+
+        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
+
+        with patch.object(
+            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
+        ), patch.object(
+            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
+        ), patch.object(oauth, "_save_token_expiry", new=AsyncMock()):
+            gen = oauth.async_auth_flow(initial)
+            first = await gen.__anext__()
+            assert first.url == initial.url
+
+            response_401 = httpx.Response(401, request=initial)
+            with pytest.raises(StopAsyncIteration):
+                await gen.asend(response_401)
+
+        # SDK flow yielded the initial request but was closed before it
+        # could observe the 401 response and run discovery.
+        assert sdk_yields == ["initial"], (
+            f"SDK flow continued past the 401: {sdk_yields}"
+        )
+
+    @pytest.mark.anyio
+    async def test_401_without_refresh_token_falls_through_to_sdk(
+        self, tmp_path: Path
+    ) -> None:
+        """If we have no refresh_token, a 401 must reach the SDK so it can full-reauth."""
+        import fastmcp.client.auth.oauth as fastmcp_oauth_mod
+        from mcp.shared.auth import OAuthToken
+
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+        # Strip the refresh_token — there's no other recovery path.
+        oauth.context.current_tokens = OAuthToken(
+            access_token="A",
+            token_type="Bearer",
+            refresh_token=None,
+            expires_in=3600,
+        )
+
+        sdk_yields: list[str] = []
+
+        async def fake_super_flow(self_inner, request):
+            sdk_yields.append("initial")
+            response = yield request
+            sdk_yields.append(f"got-{response.status_code}")
+            # Pretend SDK runs discovery
+            yield httpx.Request("GET", "https://example.com/.well-known/x")
+
+        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
+
+        with patch.object(
+            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
+        ), patch.object(
+            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
+        ), patch.object(oauth, "_save_token_expiry", new=AsyncMock()):
+            gen = oauth.async_auth_flow(initial)
+            first = await gen.__anext__()
+            assert first.url == initial.url
+
+            response_401 = httpx.Response(401, request=initial)
+            second = await gen.asend(response_401)
+            # SDK flow received the 401 and yielded its discovery request
+            assert second.url == httpx.URL("https://example.com/.well-known/x")
+
+        assert sdk_yields == ["initial", "got-401"]
+
+    @pytest.mark.anyio
+    async def test_non_401_lets_sdk_flow_complete(self, tmp_path: Path) -> None:
+        """A 200 (or other non-401) must allow the SDK flow to finish normally."""
+        import fastmcp.client.auth.oauth as fastmcp_oauth_mod
+
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        async def fake_super_flow(self_inner, request):
+            yield request  # one yield only — returns after asend()
+
+        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
+
+        save = AsyncMock()
+        with patch.object(
+            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
+        ), patch.object(
+            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
+        ), patch.object(oauth, "_save_token_expiry", new=save):
+            gen = oauth.async_auth_flow(initial)
+            await gen.__anext__()
+            response_200 = httpx.Response(200, request=initial)
+            with pytest.raises(StopAsyncIteration):
+                await gen.asend(response_200)
+
+        # finally-block heartbeat ran
+        save.assert_awaited()
+        assert oauth._last_seen_at is not None
