@@ -556,6 +556,21 @@ class _RefreshTokenOAuth(OAuth):
                 if outcome == _RefreshOutcome.NETWORK_ERROR:
                     await self._apply_network_grace_window()
 
+    def _is_google_provider(self) -> bool:
+        """Heuristic: does our OAuth metadata point at Google?
+
+        We use this to gate the upstream-401 probe.  Probing only makes sense
+        when the upstream MCP server's token validator is a *third party* we
+        can ask directly.  For ClickUp / GitHub Copilot / any "validator IS
+        the OAuth server" case there's no useful probe to make — the upstream
+        already gave us its verdict by returning 401.
+        """
+        meta = self.context.oauth_metadata
+        if meta is None or meta.token_endpoint is None:
+            return False
+        host = str(meta.token_endpoint).lower()
+        return "googleapis.com" in host or "accounts.google.com" in host
+
     async def _probe_google_token_validity(self) -> _ProbeOutcome:
         """Ask Google directly whether our access token is still valid.
 
@@ -565,9 +580,9 @@ class _RefreshTokenOAuth(OAuth):
         401 was caused by something on its side (typically Google being
         unreachable from the workspace_mcp process).
 
-        Only called from the upstream-401 handler in ``async_auth_flow``;
-        cost is one ~200ms HTTP request, paid only when an upstream 401
-        actually happens.
+        Only meaningful for Google-issued tokens; callers should gate via
+        :meth:`_is_google_provider`.  Cost is one ~200ms HTTP request, paid
+        only when an upstream 401 actually happens.
         """
         ctx = self.context
         if not ctx.current_tokens or not ctx.current_tokens.access_token:
@@ -713,32 +728,34 @@ class _RefreshTokenOAuth(OAuth):
                 )
 
                 # Classify the *first* 401 from the upstream MCP server by
-                # probing Google directly with our token.  We can't tell from
-                # the 401 alone whether downstream's verify_token failed
-                # because Google was briefly unreachable from its side or
-                # because our credentials are actually bad — but we can ask
-                # Google ourselves.
+                # probing the OAuth provider directly with our token — but
+                # only when there's a meaningful third-party probe to make.
                 #
-                # 200 from Google → our token is fine, the 401 is downstream's
-                # problem (e.g. workspace_mcp under EXTERNAL_OAUTH21_PROVIDER
-                # couldn't reach Google's userinfo endpoint during a network
-                # blip).  Propagate the 401 to the caller; no browser popup.
+                # For Google-backed providers (e.g. workspace_mcp under
+                # EXTERNAL_OAUTH21_PROVIDER) we ask Google's userinfo
+                # endpoint, which is the same one the downstream uses.  This
+                # gives a 3-way classification:
                 #
-                # 401 from Google → our token is genuinely revoked/expired.
-                # Let the SDK's inline full-flow path run so the user gets
-                # the deliberate browser flow they need to recover.
+                #   200 from Google → our token is fine, the 401 is
+                #     downstream's problem (typically Google was briefly
+                #     unreachable from its side).  Propagate; no popup.
+                #   401 from Google → token is genuinely revoked/expired.
+                #     Let the SDK's inline full-flow run so the user gets a
+                #     deliberate browser flow.
+                #   network error / 5xx → ambiguous.  Default to propagating.
                 #
-                # Anything else (network error, 5xx) → ambiguous; default to
-                # propagating as transient so the user doesn't see spurious
-                # popups when both sides are simultaneously unreachable.
-                # :MCPToggleServer / the `e` key in :MCPStatus is always the
-                # manual recovery path.
+                # For other providers we have no meaningful probe — the
+                # upstream MCP server *is* the OAuth server (clickup, etc.)
+                # so its 401 is authoritative.  Fall through to the SDK's
+                # default behaviour for those.  :MCPToggleServer is always
+                # the manual recovery path.
                 if (
                     cycle == 1
                     and response.status_code == 401
                     and ctx.current_tokens
                     and ctx.current_tokens.access_token
                     and ctx.current_tokens.refresh_token
+                    and self._is_google_provider()
                 ):
                     probe = await self._probe_google_token_validity()
                     if probe == _ProbeOutcome.INVALID:

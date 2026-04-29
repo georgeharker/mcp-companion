@@ -608,7 +608,13 @@ class TestUpstream401Suppression:
             cache_tokens=False,
         )
 
-    def _seed_valid_tokens(self, oauth, *, expires_in: float = 3600.0):
+    def _seed_valid_tokens(
+        self,
+        oauth,
+        *,
+        expires_in: float = 3600.0,
+        token_endpoint: str = "https://oauth2.googleapis.com/token",
+    ):
         import time
 
         from mcp.shared.auth import OAuthToken
@@ -622,7 +628,7 @@ class TestUpstream401Suppression:
         )
         ctx.token_expiry_time = time.time() + expires_in
         fake_meta = MagicMock()
-        fake_meta.token_endpoint = "https://auth.example.com/token"
+        fake_meta.token_endpoint = token_endpoint
         ctx.oauth_metadata = fake_meta
         fake_ci = MagicMock()
         fake_ci.client_id = "client-123"
@@ -812,6 +818,74 @@ class TestUpstream401Suppression:
             outcome = await oauth._probe_google_token_validity()
 
         assert outcome == _ProbeOutcome.UNKNOWN
+
+    @pytest.mark.anyio
+    async def test_non_google_provider_falls_through_to_sdk(
+        self, tmp_path: Path
+    ) -> None:
+        """For non-Google OAuth providers (e.g. ClickUp) we have no meaningful
+        probe — the upstream MCP server IS the OAuth server.  401 must reach
+        the SDK so it can drive full re-auth.
+        """
+        oauth = self._make_oauth(tmp_path)
+        # ClickUp's token endpoint, not Google's.
+        self._seed_valid_tokens(
+            oauth, token_endpoint="https://mcp.clickup.com/oauth/token"
+        )
+
+        # Probe must NOT be called — the gate check should short-circuit.
+        probe = AsyncMock(return_value=_ProbeOutcome.VALID)
+        with patch.object(oauth, "_probe_google_token_validity", new=probe):
+            sdk_yields, second = await self._drive_401(
+                oauth, _ProbeOutcome.VALID  # ignored — probe shouldn't be called
+            )
+
+        # If the gate worked, the probe was never invoked and the SDK got
+        # the 401 normally.  _drive_401 patches the probe itself, so the
+        # only way to verify the gate is via the SDK observing the 401.
+        assert "continued-after-401" in sdk_yields, (
+            f"non-Google provider should let SDK see the 401, got {sdk_yields}"
+        )
+        assert second is not None
+
+    @pytest.mark.anyio
+    async def test_is_google_provider_detects_googleapis(
+        self, tmp_path: Path
+    ) -> None:
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(
+            oauth, token_endpoint="https://oauth2.googleapis.com/token"
+        )
+        assert oauth._is_google_provider() is True
+
+    @pytest.mark.anyio
+    async def test_is_google_provider_detects_accounts_google(
+        self, tmp_path: Path
+    ) -> None:
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(
+            oauth, token_endpoint="https://accounts.google.com/o/oauth2/token"
+        )
+        assert oauth._is_google_provider() is True
+
+    @pytest.mark.anyio
+    async def test_is_google_provider_rejects_clickup(
+        self, tmp_path: Path
+    ) -> None:
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(
+            oauth, token_endpoint="https://mcp.clickup.com/oauth/token"
+        )
+        assert oauth._is_google_provider() is False
+
+    @pytest.mark.anyio
+    async def test_is_google_provider_handles_missing_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+        oauth.context.oauth_metadata = None
+        assert oauth._is_google_provider() is False
 
     @pytest.mark.anyio
     async def test_probe_returns_unknown_on_5xx(self, tmp_path: Path) -> None:
