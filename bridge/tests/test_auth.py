@@ -698,12 +698,23 @@ class TestUpstream401Suppression:
         self,
         oauth,
         probe_outcome: _ProbeOutcome,
+        *,
+        refresh_outcome: _RefreshOutcome | None = None,
+        retry_status: int | None = None,
     ) -> tuple[list[str], httpx.Response | None]:
-        """Run async_auth_flow against a 401 with the probe forced to *probe_outcome*.
+        """Run async_auth_flow against a 401 with controlled probe/refresh.
 
-        Returns (sdk_yields, second_yield_or_none).  The second yield exists
-        only when the SDK was allowed to drive its full-flow path (i.e. the
-        probe said INVALID).
+        :param probe_outcome: what ``_probe_token_at`` returns.
+        :param refresh_outcome: what ``_proactive_refresh`` returns when the
+            probe says INVALID and the handler attempts refresh-and-retry.
+            Ignored for non-INVALID probe outcomes.
+        :param retry_status: status code of the retry response when refresh
+            succeeds (and we yield a second request).  Default 200.
+
+        Returns ``(sdk_yields, final_response_or_none)``.  ``final_response``
+        is the value returned by ``gen.asend`` when the generator yields a
+        request beyond the initial — typically used to test that the retry
+        path yields the request and the SDK is *not* invoked further.
         """
         import fastmcp.client.auth.oauth as fastmcp_oauth_mod
 
@@ -713,12 +724,15 @@ class TestUpstream401Suppression:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"continued-after-{response.status_code}")
-            yield httpx.Request(
-                "GET", "https://example.com/.well-known/foo"
-            )
+            yield httpx.Request("GET", "https://example.com/.well-known/foo")
 
         initial = httpx.Request("POST", "https://mcp.example.com/mcp")
         response_401 = httpx.Response(401, request=initial)
+        retry_response = httpx.Response(retry_status or 200, request=initial)
+
+        refresh_mock = AsyncMock(
+            return_value=refresh_outcome or _RefreshOutcome.AUTH_ERROR
+        )
 
         with patch.object(
             fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
@@ -730,11 +744,20 @@ class TestUpstream401Suppression:
             oauth,
             "_probe_token_at",
             new=AsyncMock(return_value=probe_outcome),
-        ):
+        ), patch.object(oauth, "_proactive_refresh", new=refresh_mock):
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
             try:
                 second = await gen.asend(response_401)
+                # If the generator yielded again, it was either the SDK's
+                # full-flow discovery request OR our retry of the original.
+                # Distinguish by URL.
+                if second.url == initial.url:
+                    # It's our retry — feed it the simulated retry response.
+                    try:
+                        await gen.asend(retry_response)
+                    except StopAsyncIteration:
+                        pass
                 return sdk_yields, second
             except StopAsyncIteration:
                 return sdk_yields, None
@@ -770,19 +793,106 @@ class TestUpstream401Suppression:
         assert second is None
 
     @pytest.mark.anyio
-    async def test_401_falls_through_to_sdk_when_google_says_token_invalid(
+    async def test_invalid_probe_with_refresh_success_retries_quietly(
         self, tmp_path: Path
     ) -> None:
-        """Probe → INVALID: token genuinely dead, let SDK drive full re-auth."""
+        """Probe → INVALID + refresh succeeds → retry, no popup.
+
+        This is the "access token expired, refresh_token still valid" case —
+        very common after a network blip during which our pre-flight refresh
+        had timed out but the network is now back.  We must retry the
+        original request rather than treat the 401 as irrecoverable.
+        """
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
 
-        sdk_yields, second = await self._drive_401(oauth, _ProbeOutcome.INVALID)
+        sdk_yields, second = await self._drive_401(
+            oauth,
+            _ProbeOutcome.INVALID,
+            refresh_outcome=_RefreshOutcome.SUCCESS,
+            retry_status=200,
+        )
 
-        # SDK flow received the 401 and yielded its discovery request.
+        # SDK flow only saw the initial yield — we took over before letting
+        # it observe the 401 and run discovery.
+        assert sdk_yields == ["initial"]
+        # We yielded the retry request (same URL as original).
+        assert second is not None
+        assert second.url == httpx.URL("https://mcp.example.com/mcp")
+
+    @pytest.mark.anyio
+    async def test_invalid_probe_with_refresh_success_retry_still_401_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """Refresh succeeds but retry STILL returns 401 → propagate; no popup.
+
+        If a fresh access_token is also rejected, the issue isn't our
+        credentials — it's downstream's session state.  A browser flow
+        would just produce another fresh token that probably also gets
+        rejected, so it's a worse user experience than just propagating.
+        """
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        sdk_yields, second = await self._drive_401(
+            oauth,
+            _ProbeOutcome.INVALID,
+            refresh_outcome=_RefreshOutcome.SUCCESS,
+            retry_status=401,
+        )
+
+        # SDK still didn't run discovery — retry happened in our wrapper.
+        assert sdk_yields == ["initial"]
+        # Retry was yielded.
+        assert second is not None
+        assert second.url == httpx.URL("https://mcp.example.com/mcp")
+
+    @pytest.mark.anyio
+    async def test_invalid_probe_with_refresh_auth_error_falls_through(
+        self, tmp_path: Path
+    ) -> None:
+        """Probe → INVALID + refresh AUTH_ERROR → SDK full reauth (popup).
+
+        If both the access_token AND the refresh_token are rejected, the
+        OAuth state is genuinely dead.  A deliberate browser flow IS the
+        right recovery here.
+        """
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        sdk_yields, second = await self._drive_401(
+            oauth,
+            _ProbeOutcome.INVALID,
+            refresh_outcome=_RefreshOutcome.AUTH_ERROR,
+        )
+
+        # SDK observes the 401 and proceeds with its full-flow discovery.
         assert sdk_yields == ["initial", "continued-after-401"]
         assert second is not None
         assert second.url == httpx.URL("https://example.com/.well-known/foo")
+
+    @pytest.mark.anyio
+    async def test_invalid_probe_with_refresh_network_error_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """Probe → INVALID + refresh NETWORK_ERROR → propagate, no popup.
+
+        Validator just rejected access_token, refresh now also failing
+        with network — Google is unreachable for refresh too.  Treat as
+        transient; the user can retry when network is back.
+        """
+        oauth = self._make_oauth(tmp_path)
+        self._seed_valid_tokens(oauth)
+
+        sdk_yields, second = await self._drive_401(
+            oauth,
+            _ProbeOutcome.INVALID,
+            refresh_outcome=_RefreshOutcome.NETWORK_ERROR,
+        )
+
+        # SDK never saw the 401 — closed before it could.
+        assert sdk_yields == ["initial"]
+        assert second is None
 
     @pytest.mark.anyio
     async def test_401_without_refresh_token_falls_through_to_sdk(

@@ -835,14 +835,56 @@ class _RefreshTokenOAuth(OAuth):
 
                     probe = await self._probe_token_at(probe_url)
                     if probe == _ProbeOutcome.INVALID:
-                        logger.warning(
-                            "Upstream %s returned 401 and the third-party "
-                            "validator (%s) rejected our token — letting SDK "
-                            "drive full re-auth.",
-                            request.url,
-                            probe_url,
-                        )
-                        # Fall through: let the SDK process the 401 normally.
+                        # The third-party validator rejects our access_token.
+                        # That's the *expected* state of an expired access
+                        # token — and it's exactly what the refresh_token is
+                        # for.  Try a fresh refresh before pretending the
+                        # OAuth state is unrecoverable; the pre-flight may
+                        # have just timed out on a transient network blip.
+                        outcome = await self._proactive_refresh()
+                        if outcome == _RefreshOutcome.SUCCESS:
+                            logger.warning(
+                                "Upstream %s returned 401 and validator (%s) "
+                                "rejected our access_token, but refresh "
+                                "succeeded — retrying the request with a "
+                                "fresh token.",
+                                request.url,
+                                probe_url,
+                            )
+                            await flow.aclose()
+                            # Replay the request with the new bearer.  The
+                            # generator's caller will treat the retry's
+                            # response as the final response for the call.
+                            self._add_auth_header(request)
+                            retry_response = yield request
+                            if retry_response.status_code == 401:
+                                logger.warning(
+                                    "Upstream %s 401 persisted after fresh "
+                                    "token — propagating as transient. Use "
+                                    ":MCPToggleServer if this persists.",
+                                    request.url,
+                                )
+                            return
+                        if outcome == _RefreshOutcome.AUTH_ERROR:
+                            logger.warning(
+                                "Upstream %s returned 401, validator (%s) "
+                                "rejected access_token, AND refresh failed "
+                                "(refresh_token dead) — letting SDK drive "
+                                "full re-auth.",
+                                request.url,
+                                probe_url,
+                            )
+                            # Fall through: SDK runs the inline full-flow.
+                        else:  # NETWORK_ERROR
+                            logger.warning(
+                                "Upstream %s returned 401, validator (%s) "
+                                "rejected access_token, refresh failed "
+                                "(network) — propagating as transient.",
+                                request.url,
+                                probe_url,
+                            )
+                            await flow.aclose()
+                            return
                     else:
                         if probe == _ProbeOutcome.VALID:
                             reason = (
