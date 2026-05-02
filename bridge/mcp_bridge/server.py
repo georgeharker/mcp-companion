@@ -216,6 +216,56 @@ def _safe_json_clone(obj: object) -> Any:
     return json.loads(json.dumps(obj, default=str))
 
 
+# Keywords that semantically belong with a specific "type" declaration.
+# When we hoist a parent-level "type" into anyOf items, these travel with it.
+_TYPE_SIBLING_KEYWORDS = frozenset((
+    "items", "prefixItems", "minItems", "maxItems", "uniqueItems", "contains",
+    "minLength", "maxLength", "pattern", "format",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "properties", "required", "additionalProperties", "patternProperties",
+))
+
+
+def _normalize_schema(schema: object) -> object:
+    """Recursively fix schemas rejected by strict JSON Schema validators.
+
+    Some providers (e.g. Moonshot-ai) reject schemas where ``type`` and
+    ``anyOf`` coexist at the same level.  Pydantic generates this for
+    ``Optional[list[str]]``::
+
+        {"type": "array", "anyOf": [{"items": {...}}, {"type": "null"}]}
+
+    The fix is to promote ``type`` (plus its sibling keywords such as
+    ``items``) into each ``anyOf`` item that lacks its own ``type``::
+
+        {"anyOf": [{"type": "array", "items": {...}}, {"type": "null"}]}
+    """
+    if isinstance(schema, list):
+        return [_normalize_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    # Recurse into all values first so nested schemas are also clean.
+    result: dict[str, Any] = {k: _normalize_schema(v) for k, v in schema.items()}
+
+    if "type" not in result or "anyOf" not in result:
+        return result
+
+    # Pull the parent type and any keywords that travel with it.
+    parent_type = result.pop("type")
+    hoisted: dict[str, Any] = {"type": parent_type}
+    for kw in _TYPE_SIBLING_KEYWORDS:
+        if kw in result:
+            hoisted[kw] = result.pop(kw)
+
+    # Distribute into anyOf items that don't already declare a type.
+    result["anyOf"] = [
+        ({**hoisted, **item} if "type" not in item else item)
+        for item in result["anyOf"]
+    ]
+    return result
+
+
 class ToolProcessingMiddleware(Middleware):
     """Intercept tools/list with caching and sanitization.
 
@@ -506,9 +556,13 @@ class ToolProcessingMiddleware(Middleware):
         """
         from fastmcp.tools.function_tool import FunctionTool
 
-        # Clean the parameters via JSON round-trip
+        # Clean the parameters via JSON round-trip, then normalize the schema
+        # so it is accepted by strict validators (e.g. Moonshot-ai rejects
+        # schemas where "type" and "anyOf" coexist at the same level).
         try:
-            clean_params: dict[str, Any] = _safe_json_clone(tool.parameters)
+            clean_params = _normalize_schema(_safe_json_clone(tool.parameters))
+            if not isinstance(clean_params, dict):
+                clean_params = {"type": "object", "properties": {}}
         except (ValueError, RecursionError, TypeError):
             clean_params = {"type": "object", "properties": {}}
 
