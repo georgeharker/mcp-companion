@@ -295,12 +295,14 @@ class TestProactiveRefreshNetworkHandling:
         fake_ci.client_id = "client-123"
         ctx.client_info = fake_ci
 
-        # Patch httpx to raise a ConnectError
+        # Patch httpx to raise a ConnectError on send() (code now uses
+        # self._refresh_token() to build the request then http.send() to
+        # dispatch it, rather than http.post() directly).
         with patch("httpx.AsyncClient") as mock_cls:
             mock_http = AsyncMock()
             mock_http.__aenter__ = AsyncMock(return_value=mock_http)
             mock_http.__aexit__ = AsyncMock(return_value=False)
-            mock_http.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
+            mock_http.send = AsyncMock(side_effect=httpx.ConnectError("refused"))
             mock_cls.return_value = mock_http
 
             outcome = await oauth._proactive_refresh()
@@ -314,9 +316,11 @@ class TestProactiveRefreshNetworkHandling:
     async def test_initialize_sets_grace_window_on_network_error(self, tmp_path: Path) -> None:
         """_initialize sets token_expiry_time to grace window when network is down.
 
-        Scenario: sidecar shows token expired, proactive refresh fails with a
-        network error.  The token_expiry_time should be bumped to a short future
-        window so the SDK does not fall through to a full browser re-auth.
+        Scenario: _ExpiryAwareAdapter.get_tokens returns an expired token
+        (negative expires_in), so super()._initialize() sets token_expiry_time
+        to the past.  Proactive refresh fails with a network error.
+        The token_expiry_time should be bumped to a short future window so
+        the SDK does not fall through to a full browser re-auth.
         """
         import time
 
@@ -326,40 +330,33 @@ class TestProactiveRefreshNetworkHandling:
         oauth = self._make_oauth(tmp_path)
 
         ctx = oauth.context
+        # expires_in=-1 so FastMCP's OAuth._initialize calls
+        # update_token_expiry(-1) → token_expiry_time = time.time() - 1 (expired).
+        # This mirrors what _ExpiryAwareAdapter.get_tokens delivers when the
+        # stored absolute expiry is in the past.
         fake_token = OAuthToken(
             access_token="old-access",
             token_type="Bearer",
             refresh_token="old-refresh",
-            expires_in=3600,
+            expires_in=-1,
         )
-        expired_ts = time.time() - 500  # 500 seconds ago
 
         async def _fake_super_init(self_inner):
-            # Simulate parent loading tokens and setting _initialized
             self_inner.context.current_tokens = fake_token
-            # Also inject client_info so can_refresh_token() returns True
             fake_ci = MagicMock()
             fake_ci.client_id = "client-123"
             self_inner.context.client_info = fake_ci
-            # Parent wrongly recalculates expiry from relative expires_in,
-            # but we override it in our _initialize — set it to None here
-            # (we override via stored_expiry below).
-            self_inner.context.token_expiry_time = None
             self_inner._initialized = True
 
         with patch.object(
             oauth, "_proactive_refresh", new=AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
-        ):
-            # Return an expired sidecar timestamp so the "expired — refreshing" branch fires
-            with patch.object(oauth, "_load_token_expiry", new=AsyncMock(return_value=expired_ts)):
-                with patch.object(
-                    oauth, "_discover_oauth_metadata", new=AsyncMock(return_value=None)
-                ):
-                    with patch.object(OAuthClientProvider, "_initialize", new=_fake_super_init):
-                        oauth._initialized = False
-                        before = time.time()
-                        await oauth._initialize()
-                        after = time.time()
+        ), patch.object(
+            oauth, "_discover_oauth_metadata", new=AsyncMock(return_value=None)
+        ), patch.object(OAuthClientProvider, "_initialize", new=_fake_super_init):
+            oauth._initialized = False
+            before = time.time()
+            await oauth._initialize()
+            after = time.time()
 
         # token_expiry_time should be set to approximately now + grace window
         assert ctx.token_expiry_time is not None
@@ -500,10 +497,7 @@ class TestPreflightRefresh:
         oauth._last_seen_at = time.time()  # warm — exercise margin path
 
         ref = AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
-        save = AsyncMock()  # spy on persistence
-        with patch.object(oauth, "_proactive_refresh", new=ref), patch.object(
-            oauth, "_save_token_expiry", new=save
-        ):
+        with patch.object(oauth, "_proactive_refresh", new=ref):
             before = time.time()
             await oauth._preflight_refresh_if_needed()
             after = time.time()
@@ -517,8 +511,6 @@ class TestPreflightRefresh:
         # Tokens themselves untouched
         assert ctx.current_tokens.access_token == "A"
         assert ctx.current_tokens.refresh_token == "R"
-        # Synthetic expiry must NOT have hit disk.
-        save.assert_not_awaited()
 
     @pytest.mark.anyio
     async def test_auth_error_leaves_tokens_for_sdk_to_handle(self, tmp_path: Path) -> None:
@@ -577,10 +569,7 @@ class TestPreflightRefresh:
         oauth._last_seen_at = time.time() - (_WAKE_GAP_SECONDS + 60.0)
 
         ref = AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
-        save = AsyncMock()
-        with patch.object(oauth, "_proactive_refresh", new=ref), patch.object(
-            oauth, "_save_token_expiry", new=save
-        ):
+        with patch.object(oauth, "_proactive_refresh", new=ref):
             await oauth._preflight_refresh_if_needed()
 
         ref.assert_awaited_once()
@@ -589,8 +578,6 @@ class TestPreflightRefresh:
             "grace window must not shorten a token whose existing expiry is "
             "already past the grace horizon"
         )
-        # And we didn't bother persisting either.
-        save.assert_not_awaited()
 
     @pytest.mark.anyio
     async def test_network_error_extends_short_or_expired_token(
@@ -609,10 +596,7 @@ class TestPreflightRefresh:
         oauth._last_seen_at = time.time()
 
         ref = AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
-        save = AsyncMock()
-        with patch.object(oauth, "_proactive_refresh", new=ref), patch.object(
-            oauth, "_save_token_expiry", new=save
-        ):
+        with patch.object(oauth, "_proactive_refresh", new=ref):
             before = time.time()
             await oauth._preflight_refresh_if_needed()
             after = time.time()
@@ -621,8 +605,6 @@ class TestPreflightRefresh:
         lo = before + _NETWORK_ERROR_GRACE_SECONDS - 1
         hi = after + _NETWORK_ERROR_GRACE_SECONDS + 1
         assert lo <= ctx.token_expiry_time <= hi
-        # In-memory only — never reaches disk.
-        save.assert_not_awaited()
 
 
 class TestUpstream401Suppression:
@@ -738,8 +720,6 @@ class TestUpstream401Suppression:
             fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
         ), patch.object(
             oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(
-            oauth, "_save_token_expiry", new=AsyncMock()
         ), patch.object(
             oauth,
             "_probe_token_at",
@@ -927,7 +907,7 @@ class TestUpstream401Suppression:
             fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
         ), patch.object(
             oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(oauth, "_save_token_expiry", new=AsyncMock()):
+        ):
             gen = oauth.async_auth_flow(initial)
             first = await gen.__anext__()
             assert first.url == initial.url
@@ -1023,8 +1003,6 @@ class TestUpstream401Suppression:
             fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
         ), patch.object(
             oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(
-            oauth, "_save_token_expiry", new=AsyncMock()
         ), patch.object(oauth, "_probe_token_at", new=probe):
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
@@ -1063,8 +1041,6 @@ class TestUpstream401Suppression:
             fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
         ), patch.object(
             oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(
-            oauth, "_save_token_expiry", new=AsyncMock()
         ), patch.object(oauth, "_probe_token_at", new=probe):
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
@@ -1187,6 +1163,7 @@ class TestUpstream401Suppression:
     @pytest.mark.anyio
     async def test_non_401_lets_sdk_flow_complete(self, tmp_path: Path) -> None:
         """A 200 (or other non-401) must allow the SDK flow to finish normally."""
+        import time
         import fastmcp.client.auth.oauth as fastmcp_oauth_mod
 
         oauth = self._make_oauth(tmp_path)
@@ -1197,18 +1174,18 @@ class TestUpstream401Suppression:
 
         initial = httpx.Request("POST", "https://mcp.example.com/mcp")
 
-        save = AsyncMock()
         with patch.object(
             fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
         ), patch.object(
             oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(oauth, "_save_token_expiry", new=save):
+        ):
+            before = time.time()
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
             response_200 = httpx.Response(200, request=initial)
             with pytest.raises(StopAsyncIteration):
                 await gen.asend(response_200)
 
-        # finally-block heartbeat ran
-        save.assert_awaited()
+        # finally-block heartbeat set _last_seen_at
         assert oauth._last_seen_at is not None
+        assert oauth._last_seen_at >= before
