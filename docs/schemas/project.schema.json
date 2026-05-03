@@ -31,6 +31,52 @@
         "tool_system_prompts": {
             "description": "Whether to add per-tool natural-language system messages alongside the tools array. Useful for models that ignore JSON-Schema descriptions; set to false to save tokens. Overrides the plugin-level cc.tool_system_prompts setting; defaults to true.",
             "type": "boolean"
+        },
+        "adapters": {
+            "description": "Per-adapter server filter overrides. Keys are adapter names (e.g. 'moonshot-ai', 'claude'). Each value overrides the top-level allowed_servers / disabled_servers for sessions using that specific adapter, allowing different models to see different subsets of MCP servers within the same project.",
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "allowed_servers": {
+                        "description": "Names of MCP servers visible to this adapter in this project. All other configured servers are hidden. Mutually exclusive with disabled_servers.",
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "uniqueItems": true
+                    },
+                    "disabled_servers": {
+                        "description": "Names of MCP servers hidden from this adapter in this project. All other configured servers remain visible. Mutually exclusive with allowed_servers.",
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "uniqueItems": true
+                    }
+                },
+                "oneOf": [
+                    {
+                        "required": ["allowed_servers"],
+                        "not": { "required": ["disabled_servers"] }
+                    },
+                    {
+                        "required": ["disabled_servers"],
+                        "not": { "required": ["allowed_servers"] }
+                    },
+                    {
+                        "not": {
+                            "anyOf": [
+                                { "required": ["allowed_servers"] },
+                                { "required": ["disabled_servers"] }
+                            ]
+                        }
+                    }
+                ]
+            }
         }
     },
     "oneOf": [
