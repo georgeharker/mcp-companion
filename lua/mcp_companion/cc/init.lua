@@ -26,16 +26,31 @@ M._acp_adapter_names = {}
 --- global ``cc.auto_http_tools`` / ``cc.auto_acp_tools`` setting, so a single
 --- global default (e.g. ``auto_http_tools = false``) can be selectively
 --- enabled per-project.
+---
+--- Resolution order (first match wins):
+---   1. Project file ``adapters.<adapter_name>`` entry.
+---   2. Project file top-level ``allowed_servers`` / ``disabled_servers``.
+---   3. Global ``cc.adapters.<adapter_name>.auto_http_tools`` / ``auto_acp_tools``.
+---   4. Global ``cc.auto_http_tools`` / ``cc.auto_acp_tools``.
+---
 --- @param kind "http"|"acp"
+--- @param adapter_name? string Adapter name for per-adapter config lookup.
 --- @return string[]|nil allowed nil = no filter (all servers visible)
-function M._resolve_session_allowed(kind)
+function M._resolve_session_allowed(kind, adapter_name)
     local cfg = require("mcp_companion.config").get()
     local cc = cfg.cc or {}
+
+    -- Resolve global auto_value, preferring adapter-specific override.
     local auto_value
-    if kind == "acp" then
-        auto_value = cc.auto_acp_tools
-    else
-        auto_value = cc.auto_http_tools
+    local adapter_cfg = adapter_name and cc.adapters and cc.adapters[adapter_name]
+    if adapter_cfg then
+        local key = (kind == "acp") and "auto_acp_tools" or "auto_http_tools"
+        if adapter_cfg[key] ~= nil then
+            auto_value = adapter_cfg[key]
+        end
+    end
+    if auto_value == nil then
+        auto_value = (kind == "acp") and cc.auto_acp_tools or cc.auto_http_tools
     end
 
     local known_servers
@@ -51,7 +66,7 @@ function M._resolve_session_allowed(kind)
     end
 
     local project = require("mcp_companion.project")
-    return project.resolve_allowed(auto_value, known_servers)
+    return project.resolve_allowed(auto_value, known_servers, nil, adapter_name)
 end
 
 --- Build bridge MCP server entry for ACP session/new.
@@ -229,7 +244,7 @@ function M.setup(schema) -- luacheck: ignore 212/schema
 
       -- Resolve allowed-servers for this session.  Project file
       -- (.mcp-companion.json walked up from cwd) overrides cc.auto_acp_tools.
-      local allowed = M._resolve_session_allowed("acp")
+      local allowed = M._resolve_session_allowed("acp", adapter_name)
 
       -- Generate per-session token. Store in _pending_acp_tokens so the
       -- patched transform_to_acp (called from _establish_session immediately
@@ -239,7 +254,8 @@ function M.setup(schema) -- luacheck: ignore 212/schema
         token = token,
         agent_capabilities = agent_capabilities,
       }
-      log.info("CC ACP: Pre stored pending token for adapter=%s token=%s", adapter_name, token)
+      log.info("CC ACP: Pre stored pending token for adapter=%s token=%s",
+        adapter_name, token)
 
       -- If mcpServers is a concrete table (not "inherit_from_config"), inject
       -- directly — transform_to_acp is never called in that path.
@@ -279,7 +295,8 @@ function M.setup(schema) -- luacheck: ignore 212/schema
             elseif #allowed == 0 then
               log.debug("CC ACP: stored token on adapter (token=%s, allowed=none)", token)
             else
-              log.debug("CC ACP: stored token on adapter (token=%s, allowed=%s)", token, vim.inspect(allowed))
+              log.debug("CC ACP: stored token on adapter (token=%s, allowed=%s)",
+                token, vim.inspect(allowed))
             end
             break
           end
@@ -428,7 +445,7 @@ function M._auto_http_tools(event_data)
   -- nil  → no filter (aggregate group)
   -- []   → no servers (skip registration)
   -- list → register named per-server groups
-  local allowed = M._resolve_session_allowed("http")
+  local allowed = M._resolve_session_allowed("http", adapter_name)
   if type(allowed) == "table" and #allowed == 0 then
     log.debug("CC: no servers allowed for this session, skipping tool group registration")
     return
@@ -477,7 +494,8 @@ function M._setup_http_per_chat(chat)
   -- A .mcp-companion.json (walked up from cwd) overrides cc.auto_http_tools.
   -- The bridge is the source of truth; the Neovim-side tool_registry mirrors
   -- this in _auto_http_tools().
-  local allowed = M._resolve_session_allowed("http")
+  local adapter_name = chat.adapter and chat.adapter.name
+  local allowed = M._resolve_session_allowed("http", adapter_name)
 
   chat._mcp_token = token
   chat._mcp_allowed_servers = allowed
@@ -584,7 +602,9 @@ function M._apply_token_filter(chat)
 
   local token = chat._mcp_token
   local allowed = chat._mcp_allowed_servers
-  if not allowed then
+
+  -- Nothing to do if no server filter is needed
+  if allowed == nil then
     log.debug("CC: no filter, all servers enabled (token=%s)", token)
     return
   end
@@ -608,7 +628,8 @@ function M._apply_token_filter(chat)
         local pending = r_ok and r_data and r_data.pending
         log.info("CC: session filter %s (token=%s allowed=%s disabled=%s)",
           pending and "stored as pending" or "applied",
-          token, table.concat(allowed, ", "), table.concat(disabled_list, ", "))
+          token, allowed and table.concat(allowed, ", ") or "all",
+          table.concat(disabled_list, ", "))
         vim.schedule(function()
           local sc_ok, sc = pcall(require, "mcp_companion.cc.session_commands")
           if sc_ok and sc.set_session_state and chat.bufnr then

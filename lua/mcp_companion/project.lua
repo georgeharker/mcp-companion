@@ -113,10 +113,45 @@ local function validate(raw)
         return nil, "tool_system_prompts must be a boolean"
     end
 
+    local adapters = raw.adapters
+    local validated_adapters = nil
+    if adapters ~= nil then
+        if type(adapters) ~= "table" then
+            return nil, "adapters must be an object"
+        end
+        validated_adapters = {}
+        for adapter_name, acfg in pairs(adapters) do
+            if type(adapter_name) ~= "string" or adapter_name == "" then
+                return nil, "adapters keys must be non-empty strings"
+            end
+            if type(acfg) ~= "table" then
+                return nil, "adapters." .. adapter_name .. " must be an object"
+            end
+            local a_allowed = acfg.allowed_servers
+            local a_disabled = acfg.disabled_servers
+            if a_allowed ~= nil and a_disabled ~= nil then
+                return nil, "adapters." .. adapter_name .. ": allowed_servers and disabled_servers are mutually exclusive"
+            end
+            if a_allowed ~= nil then
+                local err = check_string_list(a_allowed, "adapters." .. adapter_name .. ".allowed_servers")
+                if err then return nil, err end
+            end
+            if a_disabled ~= nil then
+                local err = check_string_list(a_disabled, "adapters." .. adapter_name .. ".disabled_servers")
+                if err then return nil, err end
+            end
+            validated_adapters[adapter_name] = {
+                allowed_servers = a_allowed,
+                disabled_servers = a_disabled,
+            }
+        end
+    end
+
     return {
         allowed_servers = allowed,
         disabled_servers = disabled,
         tool_system_prompts = tool_system_prompts,
+        adapters = validated_adapters,
     }, nil
 end
 
@@ -151,6 +186,11 @@ end
 --- Decide the per-session allowed-servers list.
 --- Project file wins; otherwise fall back to ``auto_*_tools`` from cc config.
 ---
+--- Resolution order (first match wins):
+---   1. ``.mcp-companion.json`` ``adapters.<adapter_name>`` — adapter-specific project override.
+---   2. ``.mcp-companion.json`` top-level ``allowed_servers`` / ``disabled_servers``.
+---   3. ``auto_value`` — the (already adapter-resolved) global cc setting.
+---
 --- Returns one of:
 ---   * ``nil``       — no filter, expose all servers (the bridge's default).
 ---   * ``string[]``  — allow-list; only the named servers are visible.
@@ -160,13 +200,18 @@ end
 --- form are dropped with a warning so a stale project file doesn't 400 the
 --- bridge filter endpoint.
 ---
---- @param auto_value boolean|string[]|nil The cc.auto_*_tools config value.
+--- @param auto_value boolean|string[]|nil The cc.auto_*_tools config value (already adapter-resolved by caller).
 --- @param known_servers? string[] All server names known to the bridge.
 --- @param start_dir? string Defaults to vim.fn.getcwd().
+--- @param adapter_name? string Adapter name to check for per-adapter project overrides.
 --- @return string[]|nil allowed
-function M.resolve_allowed(auto_value, known_servers, start_dir)
+function M.resolve_allowed(auto_value, known_servers, start_dir, adapter_name)
     local project_cfg = M.resolve(start_dir)
     if project_cfg then
+        -- Adapter-specific project entry takes priority over the top-level filter.
+        if adapter_name and project_cfg.adapters and project_cfg.adapters[adapter_name] then
+            return M._apply_project_to_allowed(project_cfg.adapters[adapter_name], known_servers)
+        end
         return M._apply_project_to_allowed(project_cfg, known_servers)
     end
 

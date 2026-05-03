@@ -88,6 +88,12 @@ _token_sessions: dict[str, str] = {}
 # by TokenRewriteMiddleware when the token is first seen.
 _pending_token_filters: dict[str, set[str]] = {}
 
+# Global schema normalization flag, set at server creation from
+# ``--normalize-schema`` / ``MCP_BRIDGE_NORMALIZE_SCHEMA``.  When True, every
+# tool emitted from ``tools/list`` is normalized at cache-fill time so strict
+# providers (e.g. moonshot-ai/kimi) accept the resulting schemas.
+_normalize_schemas_global: bool = False
+
 # Strong references to in-flight notification tasks so they aren't GC'd
 # before completion.
 _notification_tasks: set[asyncio.Task[None]] = set()
@@ -266,6 +272,31 @@ def _normalize_schema(schema: object) -> object:
     return result
 
 
+def _normalize_tool_schema(tool: Tool) -> Tool:
+    """Return a copy of *tool* with schema-normalized parameters.
+
+    Assumes the tool parameters are already serializable (no circular refs).
+    Only fixes schema compatibility issues (e.g. ``type`` + ``anyOf`` siblings).
+    """
+    from fastmcp.tools.function_tool import FunctionTool
+
+    try:
+        params = _normalize_schema(_safe_json_clone(tool.parameters))
+        if not isinstance(params, dict):
+            params = {"type": "object", "properties": {}}
+    except (ValueError, RecursionError, TypeError):
+        params = tool.parameters or {"type": "object", "properties": {}}
+
+    dummy_fn = lambda: None  # noqa: E731
+    return FunctionTool(
+        fn=dummy_fn,
+        name=str(tool.name) if tool.name else "unknown",
+        description=str(tool.description) if tool.description else "",
+        parameters=params,
+        annotations=tool.annotations,
+    )
+
+
 class ToolProcessingMiddleware(Middleware):
     """Intercept tools/list with caching and sanitization.
 
@@ -406,6 +437,10 @@ class ToolProcessingMiddleware(Middleware):
                 logger.warning("Replacing circular tool: %s", tool.name)
                 sanitized.append(self._to_clean_tool(tool))
 
+        if _normalize_schemas_global:
+            sanitized = [_normalize_tool_schema(t) for t in sanitized]
+            logger.debug("tools/list: normalized %d tool schema(s)", len(sanitized))
+
         filtered = _filter_tools(sanitized)
         if len(filtered) < len(sanitized):
             logger.info(
@@ -424,7 +459,7 @@ class ToolProcessingMiddleware(Middleware):
         context: MiddlewareContext[mt.ListToolsRequest],
         tools: list[Tool],
     ) -> list[Tool]:
-        """Apply the per-session server blocklist on top of the shared cache."""
+        """Apply the per-session server blocklist."""
         if context.fastmcp_context is None:
             return tools
         try:
@@ -436,7 +471,7 @@ class ToolProcessingMiddleware(Middleware):
         if not blocked:
             return tools
 
-        out = [
+        out: list[Tool] = [
             t
             for t in tools
             if _find_server_for_tool(str(t.name) if t.name else "")[0] not in blocked
@@ -668,6 +703,7 @@ def create_bridge(
     *,
     oauth_cache_tokens: bool | None = ...,
     oauth_token_dir: str | None = ...,
+    normalize_schemas: bool = ...,
     return_ss_manager: Literal[True],
 ) -> tuple[FastMCP, SharedServerManager]: ...
 
@@ -678,6 +714,7 @@ def create_bridge(
     *,
     oauth_cache_tokens: bool | None = ...,
     oauth_token_dir: str | None = ...,
+    normalize_schemas: bool = ...,
     return_ss_manager: Literal[False] = ...,
 ) -> FastMCP: ...
 
@@ -687,6 +724,7 @@ def create_bridge(
     *,
     oauth_cache_tokens: bool | None = None,
     oauth_token_dir: str | None = None,
+    normalize_schemas: bool = False,
     return_ss_manager: bool = False,
 ) -> FastMCP | tuple[FastMCP, SharedServerManager]:
     """Create the bridge FastMCP server from a config file.
@@ -718,9 +756,13 @@ def create_bridge(
     """
     global _bridge_config
     global _conn_manager
+    global _normalize_schemas_global
 
     config = BridgeConfig.load(config_path)
     _bridge_config = config  # Store for tool filtering
+    _normalize_schemas_global = normalize_schemas
+    if normalize_schemas:
+        logger.info("Schema normalization enabled globally for tools/list")
 
     # Apply CLI overrides on top of config-file oauth settings
     if oauth_cache_tokens is not None:

@@ -819,6 +819,23 @@ require("mcp_companion").setup({
         -- false or {}: inject bridge but disable all servers by default (use /mcp-session to enable)
         -- string[]: inject bridge but only expose the named servers, e.g. {"github"}
         auto_acp_tools = true,
+        -- Whether to add per-tool natural-language system messages alongside the tools array.
+        -- true (default): helps models that ignore JSON-Schema descriptions.
+        -- false: saves tokens (descriptions duplicate the schema's `description` fields).
+        -- Overridden per-project by .mcp-companion.json.
+        tool_system_prompts = true,
+        -- Normalize tool JSON schemas to fix providers (e.g. moonshot-ai/kimi) that reject
+        -- schemas where `type` and `anyOf` coexist at the same level with a 400 error.
+        -- The transformation is semantically equivalent and accepted by lenient validators.
+        -- Passed to the bridge as --normalize-schema; applies at cache-fill time. Default false.
+        normalize_schema = false,
+        -- Per-adapter overrides for auto_http_tools and auto_acp_tools.
+        -- Keys are adapter names as returned by chat.adapter.name (e.g. "moonshot-ai", "claude").
+        -- Values override the corresponding top-level setting for sessions using that adapter.
+        -- Further overridden per-project by .mcp-companion.json#/adapters/<name>.
+        adapters = {
+            -- ["moonshot-ai"] = { auto_http_tools = { "github" }, auto_acp_tools = { "github" } },
+        },
     },
     ui = {
         enabled = true,
@@ -977,6 +994,21 @@ Or hide specific servers from an otherwise-default project:
 | `allowed_servers` | `string[]` | Whitelist — only these servers are visible. |
 | `disabled_servers` | `string[]` | Blacklist — every other configured server is visible. |
 | `tool_system_prompts` | `boolean` | Override the plugin-level `cc.tool_system_prompts` setting (default `true`). Set `false` here to suppress per-tool natural-language system messages just for this project. |
+| `adapters` | `object` | Per-adapter server filter overrides. Keys are adapter names (e.g. `"moonshot-ai"`, `"claude"`). Each value is an object with the same `allowed_servers` / `disabled_servers` shape as the top level, and overrides the top-level filter for sessions using that adapter. Useful when different models need to see different server subsets within the same project. |
+
+Example with per-adapter overrides:
+
+```json
+{
+  "$schema": "https://geohar.github.io/mcp-companion/project.schema.json",
+  "allowed_servers": ["github", "gws"],
+  "adapters": {
+    "moonshot-ai": {
+      "allowed_servers": ["github"]
+    }
+  }
+}
+```
 
 The two server-list fields are mutually exclusive. Server names must match entries in
 your `servers.json` / `mcpServers` config; unknown names are dropped with a

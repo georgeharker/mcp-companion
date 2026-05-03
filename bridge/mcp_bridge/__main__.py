@@ -15,7 +15,11 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response
 
-from mcp_bridge.server import _pending_token_filters, _token_sessions, create_bridge
+from mcp_bridge.server import (
+    _pending_token_filters,
+    _token_sessions,
+    create_bridge,
+)
 from mcp_bridge.sharedserver import cleanup as cleanup_sharedservers
 from mcp_bridge.sharedserver import register_for_cleanup
 
@@ -188,11 +192,13 @@ def create_app() -> Starlette:
     elif oauth_cache_str == "False":
         oauth_cache_tokens = False
     oauth_token_dir = os.environ.get("MCP_BRIDGE_OAUTH_TOKEN_DIR")
+    normalize_schemas = os.environ.get("MCP_BRIDGE_NORMALIZE_SCHEMA") == "1"
 
     bridge, ss_manager = create_bridge(
         config_path,
         oauth_cache_tokens=oauth_cache_tokens,
         oauth_token_dir=oauth_token_dir,
+        normalize_schemas=normalize_schemas,
         return_ss_manager=True,
     )
 
@@ -263,6 +269,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--normalize-schema",
+        dest="normalize_schema",
+        action="store_true",
+        default=False,
+        help=(
+            "Normalize tool JSON schemas to fix providers (e.g. moonshot-ai/kimi) "
+            "that reject schemas where 'type' and 'anyOf' coexist at the same level. "
+            "Applied to every tools/list response at cache-fill time."
+        ),
+    )
+    parser.add_argument(
         "--log-file",
         metavar="PATH",
         default=None,
@@ -287,6 +304,8 @@ def main() -> None:
         os.environ["MCP_BRIDGE_OAUTH_CACHE"] = str(args.oauth_cache)
     if args.oauth_token_dir:
         os.environ["MCP_BRIDGE_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
+    if args.normalize_schema:
+        os.environ["MCP_BRIDGE_NORMALIZE_SCHEMA"] = "1"
 
     # Resolve --log-level to a stdlib logging numeric level.
     # "trace" is treated as DEBUG since stdlib has no TRACE.

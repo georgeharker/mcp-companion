@@ -103,6 +103,9 @@ local function _bridge_cmd()
     table.insert(cmd, "--log-level")
     table.insert(cmd, blog.level)
   end
+  if _config.cc and _config.cc.normalize_schema then
+    table.insert(cmd, "--normalize-schema")
+  end
   return cmd
 end
 

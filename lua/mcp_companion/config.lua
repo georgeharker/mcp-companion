@@ -28,6 +28,10 @@ local M = {}
 ---   If tools fail in a specific agent, try enabling this and please report at
 ---   https://github.com/geohar/mcp-companion/issues with the agent name.
 
+--- @class MCPCompanion.CCAdapterConfig
+--- @field auto_http_tools? boolean|string[] Per-adapter override for auto_http_tools (same semantics).
+--- @field auto_acp_tools? boolean|string[] Per-adapter override for auto_acp_tools (same semantics).
+
 --- @class MCPCompanion.CCConfig
 --- @field auto_http_tools boolean|string[] Controls which MCP tool groups are added to new chats.
 ---   true (default): add the aggregate @mcp-bridge group (all servers, one context block entry).
@@ -43,6 +47,17 @@ local M = {}
 ---   the tools array. Default true: helps models that ignore JSON-Schema descriptions.  Set false to save
 ---   tokens (descriptions duplicate the schema's `description` fields, ~one extra system message per tool).
 ---   Overridden per-project by .mcp-companion.json (see mcp_companion.project).
+--- @field normalize_schema boolean Whether the bridge normalizes tool JSON schemas globally.
+---   Fixes schemas where ``type`` and ``anyOf`` coexist at the same level, which strict
+---   providers (e.g. moonshot-ai/kimi) reject with a 400 error.  The transformation is
+---   semantically equivalent and accepted by lenient validators too.  Passed to the
+---   bridge as ``--normalize-schema`` so every ``tools/list`` response is normalized at
+---   cache-fill time.  Default false.
+--- @field adapters? table<string, MCPCompanion.CCAdapterConfig> Per-adapter overrides for auto_http_tools
+---   and auto_acp_tools.  Keys are adapter names as returned by chat.adapter.name (e.g. "moonshot-ai",
+---   "claude", "openai").  Values override the corresponding top-level setting for sessions using that
+---   adapter.  Further overridden per-project by .mcp-companion.json#/adapters/<name>.
+---   Example: { ["moonshot-ai"] = { auto_http_tools = {"github"} } }
 
 --- @class MCPCompanion.Config
 --- @field bridge MCPCompanion.BridgeConfig
@@ -82,6 +97,8 @@ M.defaults = {
     auto_http_tools = true,
     auto_acp_tools = true,
     tool_system_prompts = true,
+    normalize_schema = false,
+    adapters = {},
   },
 
   auto_approve = false,
