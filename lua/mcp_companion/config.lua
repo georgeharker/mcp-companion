@@ -167,6 +167,7 @@ local function _config_candidates()
     cwd .. "/.mcphub/servers.json",
     cwd .. "/servers.json",
     cwd .. "/.mcp/servers.json",
+    cwd .. "/.mcp.json",
     vim.fn.stdpath("config") .. "/mcphub/servers.json",
     vim.fn.stdpath("data") .. "/mcp-companion/servers.json",
   }
