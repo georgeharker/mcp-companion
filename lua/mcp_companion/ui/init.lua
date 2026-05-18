@@ -416,8 +416,11 @@ function M.open()
 
   -- Capture the current window's buffer before opening the float (the float
   -- takes focus and nvim_get_current_win would return the float afterwards).
+  -- Accept both chat (codecompanion) and CLI (codecompanion_cli) source buffers
+  -- so :MCPStatus session toggles apply to whichever surface opened the UI.
   local cur_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
-  if vim.bo[cur_buf].filetype == "codecompanion" then
+  local cur_ft = vim.bo[cur_buf].filetype
+  if cur_ft == "codecompanion" or cur_ft == "codecompanion_cli" then
     _source_bufnr = cur_buf
   else
     _source_bufnr = nil
@@ -579,20 +582,16 @@ function M.open()
 
     if not _source_bufnr then
       vim.notify(
-        "[mcp-companion] No chat associated with this status window — open :MCPStatus from a CodeCompanion chat",
+        "[mcp-companion] No session associated with this status window — open :MCPStatus from a CodeCompanion chat or CLI buffer",
         vim.log.levels.WARN
       )
       return
     end
 
-    local cc_ok, codecompanion = pcall(require, "codecompanion")
-    if not cc_ok then
-      vim.notify("[mcp-companion] CodeCompanion not available", vim.log.levels.WARN)
-      return
-    end
-    local chat = codecompanion.buf_get_chat(_source_bufnr)
-    if not chat then
-      vim.notify("[mcp-companion] Source buffer is no longer a chat",
+    local cc_ok, cc = pcall(require, "mcp_companion.cc")
+    local handle = cc_ok and cc._handle_for_bufnr(_source_bufnr) or nil
+    if not handle or not handle._mcp_token then
+      vim.notify("[mcp-companion] Source buffer no longer has an MCP session",
         vim.log.levels.WARN)
       return
     end
@@ -604,16 +603,16 @@ function M.open()
       return
     end
 
-    sc.toggle_server_for_session(chat, srv_name, function(err, info)
+    sc.toggle_server_for_session(handle, srv_name, function(err, info)
       if err then
         vim.notify("[mcp-companion] Session toggle failed: " .. err,
           vim.log.levels.ERROR)
         return
       end
-      vim.notify(string.format("[mcp-companion] %s %s for this chat session",
+      vim.notify(string.format("[mcp-companion] %s %s for this session",
         info.action, info.server), vim.log.levels.INFO)
     end)
-  end, "Toggle server for this chat session")
+  end, "Toggle server for this session")
 
   -- Subscribe to state changes for live updates
   local state = require("mcp_companion.state")
@@ -655,14 +654,14 @@ function M._fetch_and_render()
   -- Initial render with cached/empty state
   M.render()
 
-  -- If we have a source chat buffer, fetch live session status
+  -- If we have a source chat/CLI buffer, fetch live session status
   if _source_bufnr then
-    local cc_ok, codecompanion = pcall(require, "codecompanion")
-    local chat = cc_ok and codecompanion.buf_get_chat(_source_bufnr)
-    if chat then
+    local cc_ok, cc = pcall(require, "mcp_companion.cc")
+    local handle = cc_ok and cc._handle_for_bufnr(_source_bufnr) or nil
+    if handle and handle._mcp_token then
       local sc_ok, sc = pcall(require, "mcp_companion.cc.session_commands")
       if sc_ok and sc.fetch_session_status then
-        sc.fetch_session_status(chat, function(err, _)
+        sc.fetch_session_status(handle, function(err, _)
           if not err then
             -- State is cached in _session_state by fetch_session_status
             -- Re-render to show updated state

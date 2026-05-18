@@ -21,6 +21,15 @@ M._pending_acp_tokens = {}
 -- Used to skip per-chat HTTP client setup for ACP chats in _auto_http_tools.
 M._acp_adapter_names = {}
 
+-- CodeCompanionCLI instances tracked by bufnr.  Populated by the patched
+-- ``codecompanion.interactions.cli.create`` (one entry per CLI window) and
+-- drained by the ``CodeCompanionCLIClosed`` subscriber.  Each instance carries
+-- _mcp_token / _mcp_client / _mcp_allowed_servers so existing helpers
+-- (_apply_token_filter, _cleanup_session_filter, session_commands.*) accept it
+-- as a chat-shaped handle without modification.
+--- @type table<integer, table>
+M._cli_instances = {}
+
 --- Resolve the per-session allowed-servers filter.
 --- A ``.mcp-companion.json`` walked up from cwd takes precedence over the
 --- global ``cc.auto_http_tools`` / ``cc.auto_acp_tools`` setting, so a single
@@ -383,6 +392,56 @@ function M.setup(schema) -- luacheck: ignore 212/schema
 
   -- Register static /mcp-session slash command (once, not on bridge_ready)
   require("mcp_companion.cc.session_commands").register()
+
+  -- Patch codecompanion.interactions.cli.create (once) to attach per-CLI
+  -- bridge session state to the returned instance. Mirrors the
+  -- transform_to_acp pattern: same _mcp_companion_patched guard, same
+  -- call-original-then-mutate shape. The instance becomes chat-shaped
+  -- (_mcp_token / _mcp_client / _mcp_allowed_servers on it) so the existing
+  -- session_commands and UI helpers consume it without modification.
+  local cli_ok, cc_cli_mod = pcall(require, "codecompanion.interactions.cli")
+  if cli_ok and cc_cli_mod and cc_cli_mod.create and not cc_cli_mod._mcp_companion_patched then
+    local _orig_create = cc_cli_mod.create
+    cc_cli_mod.create = function(create_args)
+      -- Warm the bridge synchronously, mirroring the CodeCompanionChatAdapter
+      -- → _wait_for_bridge(30000) hop the chat path uses.  Without this, a
+      -- CLI opened before any chat would find bridge.client.connected = false
+      -- and _setup_http_per_chat would early-return, leaving the instance
+      -- with no _mcp_token and :MCPStatus showing the bridge as disconnected.
+      M._wait_for_bridge(30000)
+      local instance = _orig_create(create_args)
+      if instance and instance.bufnr then
+        -- Synthesise adapter shape so _setup_http_per_chat / _resolve_session_allowed
+        -- can read instance.adapter.name the same way they read chat.adapter.name.
+        instance.adapter = instance.adapter or { name = instance.agent_name }
+        M._cli_instances[instance.bufnr] = instance
+        M._setup_http_per_chat(instance)
+      end
+      return instance
+    end
+    cc_cli_mod._mcp_companion_patched = true
+    log.debug("CC CLI: patched codecompanion.interactions.cli.create")
+  elseif cli_ok and cc_cli_mod and cc_cli_mod._mcp_companion_patched then
+    log.debug("CC CLI: create already patched, skipping")
+  else
+    log.debug("CC CLI: codecompanion.interactions.cli not available, skipping patch")
+  end
+
+  -- Clean up per-CLI session state when a CLI window closes.
+  -- Mirrors the CodeCompanionChatClosed handler above.
+  vim.api.nvim_create_autocmd("User", {
+    pattern = "CodeCompanionCLIClosed",
+    callback = function(args)
+      if not (args.data and args.data.bufnr) then return end
+      local bufnr = args.data.bufnr
+      require("mcp_companion.cc.session_commands").clear(bufnr)
+      local instance = M._cli_instances[bufnr]
+      if instance then
+        M._cleanup_session_filter(instance)
+        M._cli_instances[bufnr] = nil
+      end
+    end,
+  })
 
   -- Clean up per-chat session state when a chat buffer is closed
   vim.api.nvim_create_autocmd("User", {
@@ -760,6 +819,24 @@ function M._save_project_config_interactive(chat, format)
             end)
         end
     end)
+end
+
+--- Resolve a session-bearing handle for ``bufnr``.  Returns a CodeCompanion
+--- chat object if the buffer is a chat with a token; otherwise the tracked
+--- CodeCompanionCLI instance for that bufnr; otherwise nil.  Both shapes
+--- expose ``bufnr`` and ``_mcp_token``, which is all that session_commands
+--- and the :MCPStatus UI need.
+--- @param bufnr integer
+--- @return table|nil handle Chat object or CLI instance
+function M._handle_for_bufnr(bufnr)
+    local cc_ok, codecompanion = pcall(require, "codecompanion")
+    if cc_ok then
+        local chat = codecompanion.buf_get_chat(bufnr)
+        if chat and chat._mcp_token then
+            return chat
+        end
+    end
+    return M._cli_instances[bufnr]
 end
 
 --- Find the chat the save command should snapshot.
