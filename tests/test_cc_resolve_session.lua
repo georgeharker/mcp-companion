@@ -139,6 +139,26 @@ test("kind='acp' reads auto_acp_tools, not auto_http_tools", function()
     end)
 end)
 
+test("kind='cli' reads auto_cli_tools, isolated from http/acp", function()
+    in_clean_cwd(function()
+        _stub_cc_config = {
+            auto_http_tools = false,
+            auto_acp_tools = false,
+            auto_cli_tools = true,
+        }
+        assert_eq(cc._resolve_session_allowed("cli"), nil)
+        assert_list_eq(cc._resolve_session_allowed("http"), {})
+        assert_list_eq(cc._resolve_session_allowed("acp"), {})
+
+        _stub_cc_config = {
+            auto_http_tools = true,
+            auto_cli_tools = { "github" },
+        }
+        assert_list_eq(cc._resolve_session_allowed("cli"), { "github" })
+        assert_eq(cc._resolve_session_allowed("http"), nil)
+    end)
+end)
+
 print("\n=== cc._resolve_session_allowed (with project file) ===")
 
 local function write_file(path, content)
@@ -182,6 +202,46 @@ test("project disabled_servers inverts against state.servers", function()
         }
         local out = cc._resolve_session_allowed("http")
         assert_list_eq(out, { "gws", "github" })
+    end)
+end)
+
+test("project adapters.<name> beats top-level for HTTP", function()
+    in_clean_cwd(function(tmp)
+        write_file(tmp .. "/.mcp-companion.json", [[{
+            "allowed_servers": ["gws", "github"],
+            "adapters": { "moonshot-ai": { "allowed_servers": ["github"] } }
+        }]])
+        _stub_cc_config = { auto_http_tools = true }
+        _stub_servers = { { name = "gws" }, { name = "github" } }
+        assert_list_eq(cc._resolve_session_allowed("http", "moonshot-ai"), { "github" })
+        assert_list_eq(cc._resolve_session_allowed("http", "claude"), { "gws", "github" })
+        assert_list_eq(cc._resolve_session_allowed("http"), { "gws", "github" })
+    end)
+end)
+
+test("project adapters.<name> applies to ACP kind", function()
+    in_clean_cwd(function(tmp)
+        write_file(tmp .. "/.mcp-companion.json", [[{
+            "adapters": { "copilot_acp": { "allowed_servers": ["github"] } }
+        }]])
+        _stub_cc_config = { auto_acp_tools = true }
+        _stub_servers = { { name = "gws" }, { name = "github" } }
+        assert_list_eq(cc._resolve_session_allowed("acp", "copilot_acp"), { "github" })
+        -- A different ACP adapter falls back to top-level (none here) → global (no filter).
+        assert_eq(cc._resolve_session_allowed("acp", "claude_code"), nil)
+    end)
+end)
+
+test("project adapters.<name> applies to CLI kind keyed by agent name", function()
+    in_clean_cwd(function(tmp)
+        write_file(tmp .. "/.mcp-companion.json", [[{
+            "adapters": { "claude_code": { "disabled_servers": ["gws"] } }
+        }]])
+        _stub_cc_config = { auto_cli_tools = true }
+        _stub_servers = { { name = "gws" }, { name = "github" } }
+        assert_list_eq(cc._resolve_session_allowed("cli", "claude_code"), { "github" })
+        -- A different CLI agent name falls back to top-level (none) → global (no filter).
+        assert_eq(cc._resolve_session_allowed("cli", "gemini_cli"), nil)
     end)
 end)
 

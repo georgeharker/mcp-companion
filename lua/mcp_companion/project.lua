@@ -3,7 +3,10 @@
 --- Walks up from a starting directory looking for ``.mcp-companion.json`` and
 --- returns its parsed contents.  The file controls per-project visibility of
 --- MCP servers — independent of the global ``cc.auto_http_tools`` /
---- ``cc.auto_acp_tools`` settings.  Schema:
+--- ``cc.auto_acp_tools`` / ``cc.auto_cli_tools`` settings.  The file is
+--- keyed by adapter name (not by interaction kind), so a single project
+--- file applies to HTTP CC chats, ACP CC chats, and CLI sessions alike
+--- when they use the same adapter / agent name.  Schema:
 ---
 ---     {
 ---       "$schema": "https://geohar.github.io/mcp-companion/project.schema.json",
