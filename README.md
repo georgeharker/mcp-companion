@@ -819,6 +819,13 @@ require("mcp_companion").setup({
         -- false or {}: inject bridge but disable all servers by default (use /mcp-session to enable)
         -- string[]: inject bridge but only expose the named servers, e.g. {"github"}
         auto_acp_tools = true,
+        -- Per-session server filter for CodeCompanion CLI agents (codecompanion.interactions.cli).
+        -- The CLI agent connects back to the bridge via its own MCP config; this controls which
+        -- servers the bridge exposes on the per-session token.
+        -- true (default): all servers visible to the CLI session
+        -- false or {}: no servers visible (per-token filter set to empty)
+        -- string[]: only the named servers, e.g. {"github"}
+        auto_cli_tools = true,
         -- Whether to add per-tool natural-language system messages alongside the tools array.
         -- true (default): helps models that ignore JSON-Schema descriptions.
         -- false: saves tokens (descriptions duplicate the schema's `description` fields).
@@ -829,12 +836,14 @@ require("mcp_companion").setup({
         -- The transformation is semantically equivalent and accepted by lenient validators.
         -- Passed to the bridge as --normalize-schema; applies at cache-fill time. Default false.
         normalize_schema = false,
-        -- Per-adapter overrides for auto_http_tools and auto_acp_tools.
-        -- Keys are adapter names as returned by chat.adapter.name (e.g. "moonshot-ai", "claude").
-        -- Values override the corresponding top-level setting for sessions using that adapter.
+        -- Per-adapter overrides for auto_http_tools / auto_acp_tools / auto_cli_tools.
+        -- Keys are adapter names (chat.adapter.name, e.g. "moonshot-ai", "claude", "copilot_acp")
+        -- or CLI agent names (e.g. "claude_code", "gemini_cli").
+        -- Values override the corresponding top-level setting for sessions using that adapter/agent.
         -- Further overridden per-project by .mcp-companion.json#/adapters/<name>.
         adapters = {
             -- ["moonshot-ai"] = { auto_http_tools = { "github" }, auto_acp_tools = { "github" } },
+            -- ["claude_code"] = { auto_cli_tools = { "github", "filesystem" } },
         },
     },
     ui = {
@@ -936,6 +945,54 @@ chats — see [Per-session server gating](#per-session-server-gating) below.
 Per-project defaults can also be checked into a `.mcp-companion.json` file
 (see [Per-project defaults](#per-project-defaults-mcp-companionjson)).
 
+#### MCP tool availability in CLI sessions
+
+`codecompanion.interactions.cli` opens a terminal-backed window that runs an
+external CLI agent (e.g. `claude_code`, `gemini_cli`) and is a third category
+distinct from both HTTP CC chats and ACP CC chats:
+
+- **HTTP CC chat:** CodeCompanion is itself the MCP client; tools are dispatched
+  through CC's `tool_registry` and the LLM sees them via the `tools` array.
+- **ACP CC chat:** the bridge is injected into the ACP agent's `session/new`
+  call (`mcpServers`), and the agent's own MCP client connects back to the
+  bridge.
+- **CLI session:** the spawned CLI process is the MCP client. It connects to
+  the bridge using *its own* MCP config (whatever is in the CLI tool's config
+  file). The plugin does not inject a bridge entry into the CLI's process —
+  it only allocates a per-session token, applies the server filter to that
+  token on the bridge, and registers the session for `:MCPStatus` and
+  `/mcp-session` gating.
+
+`cc.auto_cli_tools` controls the bridge-side filter for CLI sessions:
+
+```lua
+cc = {
+  auto_cli_tools = true,                          -- (default) all servers visible
+  auto_cli_tools = false,                         -- per-token filter set to empty
+  auto_cli_tools = {},                            -- same as false
+  auto_cli_tools = { "github", "filesystem" },    -- only these servers visible
+}
+```
+
+Because the CLI tool only sees the bridge via its own config, you must:
+
+1. Configure the bridge as an MCP server in the CLI tool's own config (e.g.
+   `~/.claude/mcp.json` or equivalent), pointing at `http://127.0.0.1:9741/mcp`
+   with your bridge port.
+2. Optionally set `bridge.token_in_url = true` and arrange for the CLI tool's
+   config to embed the token (advanced; most users don't need this).
+
+Without step 1 the CLI tool will not see the bridge at all regardless of
+`auto_cli_tools`. With step 1 but no token plumbing, the CLI tool connects
+to the bridge's singleton endpoint (no per-token filter), so `auto_cli_tools`
+becomes informational rather than enforced.
+
+Per-session gating (`/mcp-session`), per-adapter overrides via `cc.adapters`,
+and per-project overrides via `.mcp-companion.json` all work for CLI sessions
+exactly as they do for HTTP chats — the `adapters.<name>` key in
+`.mcp-companion.json` uses the CLI agent name (`agent_name` from
+`config.interactions.cli.agents`).
+
 #### Per-session server gating
 
 `/mcp-session` lets you hide or restore individual MCP servers for the current
@@ -963,15 +1020,18 @@ When the chat session ends the state is automatically cleaned up.
 
 ##### Per-project defaults (`.mcp-companion.json`)
 
-The global `cc.auto_http_tools` / `cc.auto_acp_tools` settings can be overridden
-per-project by dropping a `.mcp-companion.json` file at (or above) the
-project's working directory. When a new chat starts, the plugin walks upward
-from `vim.fn.getcwd()` looking for this file; if found, it controls which
-servers the chat session sees, regardless of the global default.
+The global `cc.auto_http_tools` / `cc.auto_acp_tools` / `cc.auto_cli_tools`
+settings can be overridden per-project by dropping a `.mcp-companion.json`
+file at (or above) the project's working directory. When a new session
+starts, the plugin walks upward from `vim.fn.getcwd()` looking for this
+file; if found, it controls which servers the session sees, regardless of
+the global default. The file is keyed by adapter/agent name, so a single
+file applies to HTTP chats, ACP chats, and CLI sessions alike.
 
 The intended workflow is "default off, opt in per project": set
-`auto_http_tools = false` (and/or `auto_acp_tools = false`) globally, then
-list the servers each project actually needs.
+`auto_http_tools = false` (and/or `auto_acp_tools = false` /
+`auto_cli_tools = false`) globally, then list the servers each project
+actually needs.
 
 ```json
 {
@@ -994,7 +1054,7 @@ Or hide specific servers from an otherwise-default project:
 | `allowed_servers` | `string[]` | Whitelist — only these servers are visible. |
 | `disabled_servers` | `string[]` | Blacklist — every other configured server is visible. |
 | `tool_system_prompts` | `boolean` | Override the plugin-level `cc.tool_system_prompts` setting (default `true`). Set `false` here to suppress per-tool natural-language system messages just for this project. |
-| `adapters` | `object` | Per-adapter server filter overrides. Keys are adapter names (e.g. `"moonshot-ai"`, `"claude"`). Each value is an object with the same `allowed_servers` / `disabled_servers` shape as the top level, and overrides the top-level filter for sessions using that adapter. Useful when different models need to see different server subsets within the same project. |
+| `adapters` | `object` | Per-adapter server filter overrides. Keys are adapter names for chats (e.g. `"moonshot-ai"`, `"claude"`, `"copilot_acp"`) or CLI agent names (e.g. `"claude_code"`). Each value is an object with the same `allowed_servers` / `disabled_servers` shape as the top level, and overrides the top-level filter for sessions using that adapter/agent. Useful when different models need to see different server subsets within the same project. |
 
 Example with per-adapter overrides:
 
@@ -1062,7 +1122,8 @@ The initial filter for a new chat is derived in this order of precedence:
 
 1. **`.mcp-companion.json`** found by walking up from the cwd
    (see [Per-project defaults](#per-project-defaults-mcp-companionjson) above)
-2. **`cc.auto_http_tools`** (or `cc.auto_acp_tools` for ACP chats):
+2. **`cc.auto_http_tools`** (or `cc.auto_acp_tools` for ACP chats,
+   `cc.auto_cli_tools` for CLI sessions):
    - `false` → all servers disabled on the bridge for that session
    - `{"github"}` → only `github` enabled; all others disabled
    - `true` → no filter; all servers enabled

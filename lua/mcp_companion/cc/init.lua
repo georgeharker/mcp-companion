@@ -17,10 +17,6 @@ local log = require("mcp_companion.log")
 -- { [adapter_name] = { token=string, agent_capabilities=table|nil } }
 M._pending_acp_tokens = {}
 
--- Adapter names known to be ACP-type (populated on first ACPSessionPre).
--- Used to skip per-chat HTTP client setup for ACP chats in _auto_http_tools.
-M._acp_adapter_names = {}
-
 -- CodeCompanionCLI instances tracked by bufnr.  Populated by the patched
 -- ``codecompanion.interactions.cli.create`` (one entry per CLI window) and
 -- drained by the ``CodeCompanionCLIClosed`` subscriber.  Each instance carries
@@ -32,34 +28,38 @@ M._cli_instances = {}
 
 --- Resolve the per-session allowed-servers filter.
 --- A ``.mcp-companion.json`` walked up from cwd takes precedence over the
---- global ``cc.auto_http_tools`` / ``cc.auto_acp_tools`` setting, so a single
---- global default (e.g. ``auto_http_tools = false``) can be selectively
---- enabled per-project.
+--- global ``cc.auto_http_tools`` / ``cc.auto_acp_tools`` / ``cc.auto_cli_tools``
+--- setting, so a single global default (e.g. ``auto_http_tools = false``) can
+--- be selectively enabled per-project.
 ---
 --- Resolution order (first match wins):
 ---   1. Project file ``adapters.<adapter_name>`` entry.
 ---   2. Project file top-level ``allowed_servers`` / ``disabled_servers``.
----   3. Global ``cc.adapters.<adapter_name>.auto_http_tools`` / ``auto_acp_tools``.
----   4. Global ``cc.auto_http_tools`` / ``cc.auto_acp_tools``.
+---   3. Global ``cc.adapters.<adapter_name>.auto_{http,acp,cli}_tools``.
+---   4. Global ``cc.auto_{http,acp,cli}_tools``.
 ---
---- @param kind "http"|"acp"
+--- @param kind "http"|"acp"|"cli"
 --- @param adapter_name? string Adapter name for per-adapter config lookup.
 --- @return string[]|nil allowed nil = no filter (all servers visible)
 function M._resolve_session_allowed(kind, adapter_name)
     local cfg = require("mcp_companion.config").get()
     local cc = cfg.cc or {}
 
+    local kind_key = {
+        acp = "auto_acp_tools",
+        cli = "auto_cli_tools",
+        http = "auto_http_tools",
+    }
+    local key = kind_key[kind] or "auto_http_tools"
+
     -- Resolve global auto_value, preferring adapter-specific override.
     local auto_value
     local adapter_cfg = adapter_name and cc.adapters and cc.adapters[adapter_name]
-    if adapter_cfg then
-        local key = (kind == "acp") and "auto_acp_tools" or "auto_http_tools"
-        if adapter_cfg[key] ~= nil then
-            auto_value = adapter_cfg[key]
-        end
+    if adapter_cfg and adapter_cfg[key] ~= nil then
+        auto_value = adapter_cfg[key]
     end
     if auto_value == nil then
-        auto_value = (kind == "acp") and cc.auto_acp_tools or cc.auto_http_tools
+        auto_value = cc[key]
     end
 
     local known_servers
@@ -244,9 +244,7 @@ function M.setup(schema) -- luacheck: ignore 212/schema
       end
       log.debug("CC ACP: ACPSessionPre adapter=%s name=%s", tostring(adapter_modified), tostring(adapter_modified.name))
 
-      -- Record this adapter name as ACP-type so _auto_http_tools skips it
       local adapter_name = adapter_modified.name
-      M._acp_adapter_names[adapter_name] = true
 
       -- Kick off bridge warm-up (non-blocking).
       M._start_bridge_async()
@@ -291,12 +289,6 @@ function M.setup(schema) -- luacheck: ignore 212/schema
         for _, entry in ipairs(all_chats or {}) do
           local c = entry.chat
           if c and c.adapter and c.adapter.name == adapter_name then
-            -- Discard any per-chat HTTP client created before ACP session established
-            if c._mcp_client then
-              c._mcp_client:disconnect()
-              c._mcp_client = nil
-              log.debug("CC ACP: discarded pre-existing HTTP per-chat client (adapter=%s)", adapter_name)
-            end
             c.adapter._mcp_token = token
             c.adapter._mcp_allowed_servers = allowed
             if allowed == nil then
@@ -413,7 +405,12 @@ function M.setup(schema) -- luacheck: ignore 212/schema
       if instance and instance.bufnr then
         -- Synthesise adapter shape so _setup_http_per_chat / _resolve_session_allowed
         -- can read instance.adapter.name the same way they read chat.adapter.name.
-        instance.adapter = instance.adapter or { name = instance.agent_name }
+        -- type="cli" is what _setup_http_per_chat dispatches on to consult
+        -- auto_cli_tools instead of auto_http_tools — CLI is a distinct category:
+        -- the CLI agent connects back to the bridge via its own MCP config (no
+        -- bridge-entry injection like ACP, no CC tool_registry like HTTP), so
+        -- only the per-token server filter applies.
+        instance.adapter = instance.adapter or { name = instance.agent_name, type = "cli" }
         M._cli_instances[instance.bufnr] = instance
         M._setup_http_per_chat(instance)
       end
@@ -491,22 +488,31 @@ function M._auto_http_tools(event_data)
     return
   end
 
-  -- Always set up a per-chat bridge client for HTTP-adapter chats (non-ACP).
-  -- This must happen even when auto_http_tools=false so the bridge has a
-  -- per-chat session for filtering and MCPStatus can show session state.
-  -- ACP chats are skipped — they get their token via ACPSessionPre/Post.
+  -- Skip ACP chats entirely. Their bridge MCP server is injected into the
+  -- ACP session via ACPSessionPre / transform_to_acp (using auto_acp_tools),
+  -- so the CC tool_registry path here doesn't apply and must not consult
+  -- auto_http_tools.
   local adapter_name = chat.adapter and chat.adapter.name
-  if not M._acp_adapter_names[adapter_name] then
-    M._setup_http_per_chat(chat)
+  if chat.adapter and chat.adapter.type == "acp" then
+    log.debug("CC: ACP chat (adapter=%s) — tool exposure handled via ACPSessionPre, skipping HTTP path",
+      tostring(adapter_name))
+    return
   end
 
+  -- Always set up a per-chat bridge client for HTTP-adapter chats.
+  -- This must happen even when auto_http_tools=false so the bridge has a
+  -- per-chat session for filtering and MCPStatus can show session state.
+  M._setup_http_per_chat(chat)
+
   -- Resolve allowed servers (project file > cc.auto_http_tools).
+  -- "http" is the correct kind here: ACP chats already returned above, so
+  -- everything reaching this point is an HTTP-adapter chat.
   -- nil  → no filter (aggregate group)
   -- []   → no servers (skip registration)
   -- list → register named per-server groups
   local allowed = M._resolve_session_allowed("http", adapter_name)
   if type(allowed) == "table" and #allowed == 0 then
-    log.debug("CC: no servers allowed for this session, skipping tool group registration")
+    log.debug("CC HTTP: auto_http_tools resolved to empty allow-list, skipping tool group registration")
     return
   end
 
@@ -531,11 +537,12 @@ function M._auto_http_tools(event_data)
   end
 end
 
---- Create and connect a per-chat MCP client for HTTP-adapter chats.
+--- Create and connect a per-chat MCP client for HTTP-adapter chats or CLI sessions.
 --- Stores the client on chat._mcp_client and the token on chat._mcp_token.
---- The bridge-side filter is derived from config.cc.auto_http_tools so the
---- bridge is the source of truth for which servers are enabled per session.
---- @param chat table CC chat object
+--- The bridge-side filter is derived from auto_http_tools or auto_cli_tools
+--- depending on adapter.type, so the bridge is the source of truth for which
+--- servers are visible on this session's token.
+--- @param chat table CC chat object or CLI instance (chat-shaped via the cli.create patch)
 function M._setup_http_per_chat(chat)
   if chat._mcp_client or chat._mcp_token then
     return -- already set up
@@ -550,11 +557,14 @@ function M._setup_http_per_chat(chat)
   local token = M._generate_token()
 
   -- Derive the allowed-servers list for the bridge-side filter.
-  -- A .mcp-companion.json (walked up from cwd) overrides cc.auto_http_tools.
-  -- The bridge is the source of truth; the Neovim-side tool_registry mirrors
-  -- this in _auto_http_tools().
+  -- Dispatch by adapter.type: CLI instances (synthesised in the cli.create
+  -- patch with type="cli") read auto_cli_tools; everything else (HTTP-adapter
+  -- CC chats) reads auto_http_tools.  A .mcp-companion.json walked up from
+  -- cwd overrides either.  The Neovim-side tool_registry only mirrors the
+  -- HTTP path (in _auto_http_tools); CLI has no CC tool_registry to mirror to.
   local adapter_name = chat.adapter and chat.adapter.name
-  local allowed = M._resolve_session_allowed("http", adapter_name)
+  local kind = (chat.adapter and chat.adapter.type == "cli") and "cli" or "http"
+  local allowed = M._resolve_session_allowed(kind, adapter_name)
 
   chat._mcp_token = token
   chat._mcp_allowed_servers = allowed

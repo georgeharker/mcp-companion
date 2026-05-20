@@ -31,6 +31,7 @@ local M = {}
 --- @class MCPCompanion.CCAdapterConfig
 --- @field auto_http_tools? boolean|string[] Per-adapter override for auto_http_tools (same semantics).
 --- @field auto_acp_tools? boolean|string[] Per-adapter override for auto_acp_tools (same semantics).
+--- @field auto_cli_tools? boolean|string[] Per-adapter override for auto_cli_tools (same semantics).
 
 --- @class MCPCompanion.CCConfig
 --- @field auto_http_tools boolean|string[] Controls which MCP tool groups are added to new chats.
@@ -42,6 +43,13 @@ local M = {}
 ---   true (default): bridge is offered to ACP agents; all MCP servers visible.
 ---   false: bridge is not injected; ACP agents have no MCP tools from this plugin.
 ---   string[]: bridge is injected but only the named servers are visible (e.g. {"github","filesystem"}).
+---   Overridden per-project by .mcp-companion.json (see mcp_companion.project).
+--- @field auto_cli_tools boolean|string[] Per-session server filter applied to CodeCompanion CLI agents
+---   (codecompanion.interactions.cli).  The CLI agent connects back to the bridge via its own MCP
+---   client config; this setting controls which servers the bridge exposes on the per-session token.
+---   true (default): all MCP servers visible to the CLI session.
+---   false: no servers visible (per-token filter is set to empty).
+---   string[]: only the named servers visible.
 ---   Overridden per-project by .mcp-companion.json (see mcp_companion.project).
 --- @field tool_system_prompts boolean Whether to add per-tool natural-language system messages alongside
 ---   the tools array. Default true: helps models that ignore JSON-Schema descriptions.  Set false to save
@@ -96,6 +104,7 @@ M.defaults = {
   cc = {
     auto_http_tools = true,
     auto_acp_tools = true,
+    auto_cli_tools = true,
     tool_system_prompts = true,
     normalize_schema = false,
     adapters = {},
