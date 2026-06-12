@@ -1,6 +1,6 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://geohar.github.io/mcp-companion/project.schema.json",
+    "$id": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/docs/schemas/project.schema.json",
     "title": "mcp-companion project configuration",
     "description": "Per-project visibility overrides for MCP servers, read by mcp-companion.nvim from .mcp-companion.json walked up from the editor's current working directory at chat-session creation time. The file selects which servers (declared in your servers.json / mcpServers config) are exposed to a session in this project, overriding the global cc.auto_http_tools / cc.auto_acp_tools / cc.auto_cli_tools settings. Overrides are keyed by adapter / agent name (not by interaction kind), so one file applies to HTTP chats, ACP chats, and CLI sessions alike.",
     "type": "object",

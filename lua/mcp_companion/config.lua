@@ -26,7 +26,7 @@ local M = {}
 ---   Default false: token is sent via X-MCP-Bridge-Session header only (cleaner, per ACP spec).
 ---   Set true if your ACP agent does not forward custom HTTP headers to MCP servers.
 ---   If tools fail in a specific agent, try enabling this and please report at
----   https://github.com/geohar/mcp-companion/issues with the agent name.
+---   https://github.com/georgeharker/mcp-companion/issues with the agent name.
 
 --- @class MCPCompanion.CCAdapterConfig
 --- @field auto_http_tools? boolean|string[] Per-adapter override for auto_http_tools (same semantics).

@@ -1,6 +1,6 @@
 # mcp-bridge
 
-FastMCP proxy bridge for [mcp-companion.nvim](https://github.com/georgeharker/mcp-companion.nvim).
+FastMCP proxy bridge for [mcp-companion](https://github.com/georgeharker/mcp-companion).
 
 Aggregates multiple MCP servers through a single Streamable HTTP endpoint.
 

@@ -1,0 +1,45 @@
+project:
+  type: website
+  render:
+    - index.md
+    - README.md        # README files must be listed explicitly; globs skip them
+    - docs/*.md
+    # Repo-only documents — excluded from the published site:
+    - "!docs/design.md"   # internal architecture/design record
+    - "!docs/todo.md"     # maintainer task list
+    # docs/oauth.md is an internal design & implementation record (SDK bug
+    # investigations, internal class/function reference). User-facing OAuth
+    # setup lives in README.md's Authentication section.
+    - "!docs/oauth.md"
+    # docs/designs/ (design/investigation records) is not matched by the
+    # non-recursive docs/*.md glob and deliberately stays repo-only.
+  # The project-config JSON Schema is linked from README.md and referenced by
+  # $schema URLs; ship it with the site so the relative link resolves.
+  resources:
+    - docs/schemas/project.schema.json
+
+# gfm_auto_identifiers makes heading anchors match GitHub's slugs, which the
+# docs' cross-links use. Keep pandoc's full markdown reader otherwise —
+# `from: gfm` breaks Quarto's navigation divs.
+from: markdown+gfm_auto_identifiers
+
+website:
+  title: "mcp-companion"
+  search: true
+  sidebar:
+    style: docked
+    tools:
+      - icon: github
+        href: https://github.com/georgeharker/mcp-companion
+        text: GitHub repository
+    contents:
+      - text: "Home"
+        href: index.md
+      - text: "Overview (README)"
+        href: README.md
+
+format:
+  html:
+    theme: pulse
+    toc: true
+    embed-resources: true

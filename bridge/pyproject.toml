@@ -1,7 +1,7 @@
 [project]
 name = "mcp-bridge"
 version = "0.1.0"
-description = "MCP proxy bridge for mcp-companion.nvim — aggregates multiple MCP servers through a single Streamable HTTP endpoint"
+description = "MCP proxy bridge for mcp-companion — aggregates multiple MCP servers through a single Streamable HTTP endpoint"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "George Harker" }]

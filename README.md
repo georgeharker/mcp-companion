@@ -10,6 +10,9 @@ connect to it over HTTP. The Lua plugin layer adds Neovim-specific features:
 tool registration, editor context, slash commands, ACP forwarding, and a status
 UI.
 
+> 📖 Rendered documentation:
+> [docs.georgeharker.com/mcp-companion](https://docs.georgeharker.com/mcp-companion/)
+
 ## Overview
 
 ```
@@ -607,7 +610,7 @@ sharedserver use mcp-bridge --grace-period <idle_timeout> --pid <nvim-pid> \
 ```
 
 Multiple Neovim instances share the same bridge on `127.0.0.1:9741`. When
-the last Neovim instance exits (or calls `stop_bridge()`), the bridge stays
+the last Neovim instance exits (or calls `get_bridge().stop()`), the bridge stays
 alive for `idle_timeout` in case another instance reconnects, then shuts down.
 
 Without sharedserver, the bridge starts directly via `vim.uv` and lives for
@@ -748,7 +751,7 @@ also flip to DEBUG so refresh requests, metadata-discovery URLs, and HTTP
 request/response detail are captured. Restart the bridge after changing
 either setting (`:MCPRestart!`).
 
-When the bridge is managed by [sharedserver](https://github.com/georgeharker/sharedserver.nvim),
+When the bridge is managed by [sharedserver](https://github.com/georgeharker/sharedserver),
 sharedserver writes its own logs to `$XDG_RUNTIME_DIR/sharedserver` (or `/tmp/sharedserver` if
 `XDG_RUNTIME_DIR` is not set).
 
@@ -758,11 +761,11 @@ OAuth tokens are cached at `~/.cache/mcp-companion/oauth-tokens/<server>/`.
 
 ```lua
 -- Start/stop bridge explicitly
-require("mcp_companion").start_bridge()
-require("mcp_companion").stop_bridge()
+require("mcp_companion").get_bridge().start()
+require("mcp_companion").get_bridge().stop()
 
 -- Check status
-local status = require("mcp_companion").status()
+local status = require("mcp_companion").get_bridge().status()
 
 -- Listen to events
 require("mcp_companion").on("bridge_ready", function()
@@ -775,7 +778,6 @@ end)
 | Event | When |
 |---|---|
 | `bridge_ready` | Bridge connected and all capabilities loaded |
-| `bridge_stopped` | Bridge disconnected |
 | `bridge_error` | Bridge encountered an error |
 | `servers_updated` | Server list or capabilities changed |
 | `tool_list_changed` | Tool list changed on a server |
@@ -800,8 +802,8 @@ require("mcp_companion").setup({
           file = true,                  -- true = default path, string = explicit path, false = disabled
         },
         token_in_url = false,           -- embed session token in URL path; see Troubleshooting below
-        global_env = {},                -- extra environment variables passed to the bridge process
     },
+    global_env = {},                    -- extra environment variables passed to the bridge process
     log = {
         level = "warn",                 -- file log level: "debug", "info", "warn", "error"
         notify = "error",               -- vim.notify level (default: errors only)
@@ -1035,7 +1037,7 @@ actually needs.
 
 ```json
 {
-  "$schema": "https://geohar.github.io/mcp-companion/project.schema.json",
+  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/docs/schemas/project.schema.json",
   "allowed_servers": ["github", "gws"]
 }
 ```
@@ -1044,7 +1046,7 @@ Or hide specific servers from an otherwise-default project:
 
 ```json
 {
-  "$schema": "https://geohar.github.io/mcp-companion/project.schema.json",
+  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/docs/schemas/project.schema.json",
   "disabled_servers": ["clickup"]
 }
 ```
@@ -1060,7 +1062,7 @@ Example with per-adapter overrides:
 
 ```json
 {
-  "$schema": "https://geohar.github.io/mcp-companion/project.schema.json",
+  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/docs/schemas/project.schema.json",
   "allowed_servers": ["github", "gws"],
   "adapters": {
     "moonshot-ai": {
@@ -1234,7 +1236,7 @@ bridge = {
 ```
 
 If you need this workaround, please open an issue at
-<https://github.com/geohar/mcp-companion/issues> with the name and version of
+<https://github.com/georgeharker/mcp-companion/issues> with the name and version of
 the ACP agent so we can track which SDKs need it.
 
 ---
