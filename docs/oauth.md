@@ -99,7 +99,7 @@ triggering a fresh OAuth flow rather than crashing.
 | `mcp-oauth-token-expiry` | `{server_url}/token_expiry` | `{"expires_at": <absolute_timestamp>}` | 1 year |
 
 The `mcp-oauth-token-expiry` sidecar is a bridge-level addition (see [Token Expiry
-Problem](#token-expiry-problem-and-sidecar-fix)).
+Problem](#2-token-expiry-problem-and-sidecar-fix)).
 
 ## Auth Selection
 
@@ -528,15 +528,15 @@ On first launch, the bridge will:
 6. Tokens are exchanged, encrypted, and stored to disk
 
 Subsequent restarts silently refresh the cached token — no browser interaction
-required (see [Token Expiry Problem and Sidecar Fix](#token-expiry-problem-and-sidecar-fix)).
+required (see [Token Expiry Problem and Sidecar Fix](#2-token-expiry-problem-and-sidecar-fix)).
 
 ### Step 6: Verify
 
 Check that the server connected successfully:
 
 ```
-# In Neovim, use the bridge status meta-tool
-:lua require('mcp_companion').call_tool('bridge__status')
+# In Neovim, open the status window (or ask the agent to call bridge__status)
+:MCPStatus
 ```
 
 Or check the bridge log at `~/.local/state/nvim/mcp-bridge.log` for:

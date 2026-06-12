@@ -104,7 +104,7 @@ local function build_bridge_entry(agent_capabilities, token)
     -- is also embedded in the URL path as a fallback for agents whose MCP SDK
     -- does not forward headers. If your agent fails to route tools, enable
     -- token_in_url in config and report the agent at:
-    -- https://github.com/geohar/mcp-companion/issues
+    -- https://github.com/georgeharker/mcp-companion/issues
     local token_in_url = config.bridge and config.bridge.token_in_url
     local bridge_url
     if token_in_url then

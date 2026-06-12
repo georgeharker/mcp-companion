@@ -1,2 +1,8 @@
 /bridge/mcp_bridge/__pycache__
 /bridge/tests/__pycache__
+
+# Quarto docs build artifacts
+/_site/
+/.quarto/
+**/*.quarto_ipynb
+_quarto-deploy.yml
