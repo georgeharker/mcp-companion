@@ -16,4 +16,5 @@ Everything lives in the [overview and quick start](README.md):
 | Write a servers config | [MCP Server Config](README.md#mcp-server-config) |
 | Set up OAuth / bearer auth | [Authentication](README.md#authentication) |
 | Install the Neovim plugin | [Neovim Integration](README.md#neovim-integration) |
+| Let an agent drive my Neovim | [Controlling Neovim from an agent](docs/neovim-control.md) |
 | Scope servers per project or session | [Per-session server gating](README.md#per-session-server-gating) |

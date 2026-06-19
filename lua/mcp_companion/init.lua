@@ -48,11 +48,31 @@ function M.setup(opts)
   --   extensions = { mcp_companion = { callback = "mcp_companion.cc", opts = {...} } }
   -- We do NOT call cc.register_extension() here — CC calls M.init(schema) on our module.
 
+  -- Open the Neovim back-channel and register with the bridge so external
+  -- agents can call `neovim_*` tools back into this instance. We reconcile via
+  -- channel.sync() (boot-id aware) on bridge connect AND on every SSE reconnect,
+  -- so a bridge *restart* (which wipes the bridge's registry) is recovered.
+  local channel = require("mcp_companion.native.channel")
+  if channel.enabled() then
+    state.on("bridge_ready", function()
+      channel.sync()
+    end)
+    state.on("bridge_stream_connected", function()
+      channel.sync()
+    end)
+    if state.get().bridge.status == "connected" then
+      channel.sync()
+    end
+  end
+
   -- Autocmds
   local group = vim.api.nvim_create_augroup("MCPCompanion", { clear = true })
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = group,
     callback = function()
+      pcall(function()
+        require("mcp_companion.native.channel").deregister()
+      end)
       bridge.stop()
     end,
   })
@@ -194,7 +214,10 @@ function M.off(event, callback)
   require("mcp_companion.state").off(event, callback)
 end
 
--- Re-export native server public API
+-- Public native-server registration API. Registration-only and setup-time:
+-- call these before any editor connects to the bridge, and register the same
+-- tools across all instances (the bridge freezes the catalog once per process).
+-- See docs/designs/native-neovim-server.md.
 M.add_server = function(...)
   return require("mcp_companion.native").add_server(...)
 end

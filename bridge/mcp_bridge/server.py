@@ -43,6 +43,7 @@ from mcp_bridge.config import (
     _interpolate_dict,  # noqa: PLC2701
     _interpolate_str,  # noqa: PLC2701
 )
+from mcp_bridge import nvim_proxy
 from mcp_bridge.connections import AuthenticationError, ConnectionManager
 from mcp_bridge.sharedserver import SharedServerManager
 
@@ -87,6 +88,14 @@ _token_sessions: dict[str, str] = {}
 # (i.e. before the token is mapped to a session_id).  Applied immediately
 # by TokenRewriteMiddleware when the token is first seen.
 _pending_token_filters: dict[str, set[str]] = {}
+
+# Neovim back-channel routing (tables, virtual-tool injection, REST routes) lives
+# in mcp_bridge.nvim_proxy. server.py only calls its entry points.
+
+# Unique per-process id, surfaced via /health. A change signals a bridge restart
+# so clients re-register their Neovim instances and token bindings.
+_BRIDGE_BOOT_ID = uuid.uuid4().hex
+
 
 # Global schema normalization flag, set at server creation from
 # ``--normalize-schema`` / ``MCP_BRIDGE_NORMALIZE_SCHEMA``.  When True, every
@@ -339,6 +348,10 @@ class ToolProcessingMiddleware(Middleware):
                 is_new = session not in _active_sessions
                 _active_sessions.add(session)
 
+                # Build the session_id -> token reverse map used to route
+                # neovim_* calls back to the editor that owns this chat.
+                nvim_proxy.record_session_token(sid)
+
                 if is_new:
                     try:
                         cp = getattr(session, "client_params", None)
@@ -372,10 +385,12 @@ class ToolProcessingMiddleware(Middleware):
                 len(_tool_cache),
                 cache_age,
             )
-            return self._apply_session_filter(context, _tool_cache)
+            base = self._apply_session_filter(context, _tool_cache)
+            return await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
 
         tools = await self._fetch_or_join(context, call_next, cache_age)
-        return self._apply_session_filter(context, tools)
+        base = self._apply_session_filter(context, tools)
+        return await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
 
     async def _fetch_or_join(
         self,
@@ -484,6 +499,7 @@ class ToolProcessingMiddleware(Middleware):
             )
         return out
 
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
@@ -502,6 +518,13 @@ class ToolProcessingMiddleware(Middleware):
           the correct MCP semantics: "the tool ran but something went wrong".
         """
         tool_name = context.message.name if context.message else "unknown"
+
+        # Virtual native server: intercept `neovim_*` and route over the
+        # back-channel instead of the upstream proxy. These tools are never in
+        # FastMCP's registry, so we must handle them before call_next.
+        if nvim_proxy.is_nvim_tool(tool_name):
+            return await nvim_proxy.call_nvim_tool(context, tool_name, _session_disabled)
+
         # Per-session blocklist check: if the calling session has disabled
         # the server that owns this tool, reject immediately.
         if context.fastmcp_context is not None:
@@ -837,7 +860,7 @@ def create_bridge(
     # Register meta-tools (available immediately; server proxies mount in lifespan)
     from mcp_bridge.meta_tools import register_meta_tools
 
-    register_meta_tools(bridge, config, conn_manager)
+    register_meta_tools(bridge, config, conn_manager, ss_manager)
 
     # Health endpoint
     @bridge.custom_route("/health", methods=["GET"])
@@ -852,7 +875,11 @@ def create_bridge(
             config_path=config.config_path,
             pending_oauth=auth_failed,
         )
-        return JSONResponse(response.model_dump(mode="json"))
+        payload = response.model_dump(mode="json")
+        # boot_id changes only when this bridge *process* (re)starts. Clients use
+        # it to detect a restart and re-register Neovim instances + token binds.
+        payload["boot_id"] = _BRIDGE_BOOT_ID
+        return JSONResponse(payload)
 
     # --- Session management REST API ---
     # These endpoints allow external clients (e.g. the Neovim plugin) to
@@ -1130,6 +1157,9 @@ def create_bridge(
                     token, sorted(new_disabled) if new_disabled else [])
         return JSONResponse({"token": token, "session_id": None, "pending": True,
                              "disabled_servers": sorted(new_disabled) if new_disabled else []})
+
+    # Neovim back-channel REST API (/neovim/instances, /neovim/bind).
+    nvim_proxy.register_routes(bridge, _notify_tool_list_changed)
 
     if return_ss_manager:
         return bridge, ss_manager

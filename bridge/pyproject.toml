@@ -9,6 +9,7 @@ readme = "README.md"
 
 dependencies = [
     "fastmcp>=3.0,<4",
+    "pynvim>=0.6.0",
 ]
 
 [dependency-groups]
@@ -55,5 +56,6 @@ module = [
     "fastmcp.*",
     "mcp.*",
     "starlette.*",
+    "pynvim.*",
 ]
 ignore_missing_imports = true

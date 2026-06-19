@@ -8,12 +8,16 @@ from fastmcp import Context, FastMCP
 
 from mcp_bridge.config import BridgeConfig, ServerStatusInfo
 from mcp_bridge.connections import ConnectionManager
+from mcp_bridge.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-bridge")
 
 
 def register_meta_tools(
-    bridge: FastMCP, config: BridgeConfig, conn_manager: ConnectionManager
+    bridge: FastMCP,
+    config: BridgeConfig,
+    conn_manager: ConnectionManager,
+    ss_manager: SharedServerManager,
 ) -> None:
     """Register bridge management tools on the FastMCP server."""
 
@@ -56,6 +60,11 @@ def register_meta_tools(
                 invalidate_tool_cache,
             )
 
+            # Start the backing sharedserver first (use + health-poll), so the
+            # connection below has something to reach. No-op for non-sharedserver
+            # servers or ones already up. "Enabled" is the start trigger.
+            await ss_manager.ensure_started(server_name)
+
             # Open persistent connection for HTTP/SSE servers
             if conn_manager.is_http_server(srv):
                 if conn_manager.has_connection(server_name):
@@ -95,6 +104,11 @@ def register_meta_tools(
         # Close persistent connection first (before removing providers)
         if conn_manager.has_connection(server_name):
             await conn_manager.disconnect(server_name)
+
+        # Drop our reference on the backing sharedserver (unuse). It stops after
+        # its grace period if no other client still references it. No-op for
+        # non-sharedserver servers.
+        await ss_manager.ensure_stopped(server_name)
 
         # Remove all providers whose namespace matches server_name.
         # AggregateProvider wraps namespaced providers via wrap_transform(Namespace(...)).

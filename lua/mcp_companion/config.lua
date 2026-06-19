@@ -22,9 +22,7 @@ local M = {}
 --- @class MCPCompanion.BridgeLogConfig
 --- @field level? "trace"|"debug"|"info"|"warn"|"error" Default "info".
 --- @field file? boolean|string Default true (= default path).
---- @field token_in_url? boolean Include session token in URL path (/mcp/<token>) instead of header only.
----   Default false: token is sent via X-MCP-Bridge-Session header only (cleaner, per ACP spec).
----   Set true if your ACP agent does not forward custom HTTP headers to MCP servers.
+--- @field token_in_url? boolean For HTTP ACP agents, also embed the session token in the URL path (/mcp/<token>) in addition to the X-MCP-Bridge-Session header. Default false (header-only; cleaner URLs, per ACP spec, relies on the agent forwarding the header). Set true for belt-and-braces — robust for any client, including ACP agents that don't forward custom HTTP headers. The stdio/mcp-remote fallback always uses the URL regardless of this flag.
 ---   If tools fail in a specific agent, try enabling this and please report at
 ---   https://github.com/georgeharker/mcp-companion/issues with the agent name.
 
@@ -70,7 +68,7 @@ local M = {}
 --- @class MCPCompanion.Config
 --- @field bridge MCPCompanion.BridgeConfig
 --- @field cc MCPCompanion.CCConfig
---- @field native_servers table<string, {enabled: boolean}>
+--- @field native_servers table<string, {enabled: boolean, expose_exec?: boolean, auto_approve?: boolean|string[]|fun(tool_name: string, server_name: string, tool_ctx: table): boolean}>
 --- @field auto_approve boolean|fun(tool_name: string, server_name: string, tool_ctx: table): boolean
 --- @field system_prompt_resources? boolean|string[] Resource name patterns to inject into system prompt
 --- @field ui {enabled: boolean, width: number, height: number, border: string}
@@ -94,11 +92,23 @@ M.defaults = {
       level = "info",
       file = true,    -- true = default path, string = path, false = disabled
     },
+    -- HTTP ACP agents: also put the token in the URL path, not just the header.
+    -- false = header-only (cleaner; the default); true = belt-and-braces (robust).
+    -- The stdio/mcp-remote fallback always uses the URL regardless of this flag.
     token_in_url = false,
   },
 
   native_servers = {
-    neovim = { enabled = true },
+    neovim = {
+      enabled = true,
+      -- expose_exec = false,  -- include the exec tier (run_command/exec_lua)
+      -- Auto-approve spec — same style as a proxied server's `autoApprove`:
+      -- a list of tool-name globs, plus `tier:<read|navigate|write|exec>` alias
+      -- tokens. `true` = approve all, `false`/`{}` = prompt for all, or a
+      -- function(tool_name, server_name, ctx) -> boolean. Applies to in-process
+      -- CodeCompanion chats (external ACP/CLI agents use their host's approval).
+      auto_approve = { "tier:read", "tier:navigate" },
+    },
   },
 
   cc = {

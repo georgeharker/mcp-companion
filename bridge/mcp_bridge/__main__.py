@@ -73,6 +73,23 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
             # to call_next so FastMCP receives the rewritten path.
             request.scope["path"] = new_path
             request.scope["raw_path"] = new_path.encode()
+            # Re-surface the URL token as a header so the FastMCP-layer
+            # middleware can build the session_id -> token reverse map (it only
+            # sees context.session_id, never the URL — see
+            # ToolProcessingMiddleware.on_request in server.py).
+            #
+            # WHY this is needed: header-sending clients (Claude Code, OpenCode,
+            # the documented ACP entry) already send X-MCP-Bridge-Session, so for
+            # them this is a redundant no-op. But URL-only transports — notably
+            # the stdio `mcp-remote` fallback, which forwards neither env nor
+            # headers, only the URL — would otherwise never get the token to the
+            # FastMCP layer, breaking neovim_* routing for that session. This
+            # injection makes /mcp/<token> a self-sufficient correlation channel.
+            # Replace any existing value so URL wins over a stale header.
+            hdr = _ACP_TOKEN_HEADER.encode()
+            headers = [(k, v) for (k, v) in request.scope["headers"] if k.lower() != hdr]
+            headers.append((hdr, url_token.encode()))
+            request.scope["headers"] = headers
 
         # --- Source 2: token in header ---
         header_token: str | None = request.headers.get(_ACP_TOKEN_HEADER)
