@@ -245,6 +245,37 @@ class SharedServerManager:
                     ss.health_timeout,
                 )
 
+    async def ensure_started(self, server_name: str) -> None:
+        """Start (``sharedserver use`` + health-poll) the sharedserver backing
+        *server_name*, if it has one and isn't already started.
+
+        Idempotent: a no-op for non-sharedserver servers or ones already up.
+        Called when a server becomes *enabled* — at boot (``start_all``) or
+        dynamically via ``bridge__enable_server`` — so "enabled" is the single
+        trigger; there is no separate run/lazy control.
+        """
+        ss = self._config.resolve_shared_server(server_name)
+        if ss is None:
+            return  # not a sharedserver-backed server
+        if ss.name in self._active:
+            return  # already started by us
+        srv = self._config.servers.get(server_name)
+        await self._start_one(server_name, ss, srv.url if srv else None)
+
+    async def ensure_stopped(self, server_name: str) -> None:
+        """Drop our reference (``sharedserver unuse``) on *server_name*'s backing
+        sharedserver, if we started it. Idempotent. Called when a server is
+        disabled dynamically via ``bridge__disable_server``."""
+        ss = self._config.resolve_shared_server(server_name)
+        if ss is None or ss.name not in self._active:
+            return
+        try:
+            binary = self._get_binary()
+        except FileNotFoundError:
+            return
+        await self._stop_one(binary, ss.name)
+        self._active.remove(ss.name)
+
     async def stop_all(self) -> None:
         """Call ``sharedserver unuse`` for every server we started."""
         if not self._active:

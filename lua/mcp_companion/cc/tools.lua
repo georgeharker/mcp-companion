@@ -83,6 +83,61 @@ local function _make_bridge_cmd(singleton_client, namespaced_name, display_name,
     end
 end
 
+--- Extract a plain-text payload from an MCP tool result (content blocks).
+--- @param result table MCP result { content = {...}, isError? }
+--- @return string
+local function _result_to_text(result)
+    local content = result and result.content or {}
+    local parts = {}
+    for _, block in ipairs(content) do
+        if block.type == "text" then
+            table.insert(parts, block.text)
+        elseif block.type == "image" then
+            table.insert(parts, "[Image: " .. (block.mimeType or "unknown") .. "]")
+        elseif block.type == "resource" then
+            table.insert(parts, "[Resource: " .. (block.resource and block.resource.uri or "unknown") .. "]")
+        end
+    end
+    return table.concat(parts, "\n")
+end
+
+--- Build the cmds handler for a native (in-process) tool.
+--- Unlike bridge tools, native tools dispatch directly into Lua — no HTTP,
+--- no bridge client. Approval still flows through cc/approval.lua.
+--- @param server_name string Native server name (e.g. "neovim")
+--- @param tool_name string Plain tool name (e.g. "read_buffer")
+--- @return function
+local function _make_native_cmd(server_name, tool_name)
+    return function(self, action, cmd_opts) -- luacheck: ignore 212/self
+        local params = type(action) == "table" and action or {}
+
+        local approval = require("mcp_companion.cc.approval")
+        approval.check(server_name, tool_name, self, function(approved)
+            if not approved then
+                vim.schedule(function()
+                    cmd_opts.output_cb({ status = "error", data = "Tool call denied by user." })
+                end)
+                return
+            end
+
+            vim.schedule(function()
+                local native = require("mcp_companion.native")
+                local ok, result = pcall(native.dispatch, tool_name, params, {
+                    caller = "codecompanion",
+                    chat = self and self.chat,
+                })
+                if not ok then
+                    cmd_opts.output_cb({ status = "error", data = tostring(result) })
+                elseif result.isError then
+                    cmd_opts.output_cb({ status = "error", data = _result_to_text(result) })
+                else
+                    cmd_opts.output_cb({ status = "success", data = _result_to_text(result) })
+                end
+            end)
+        end)
+    end
+end
+
 --- Build output handlers for tool results
 --- @param display_name string Tool display name for output formatting
 --- @return table
@@ -268,6 +323,83 @@ end
 --- the global tool list hasn't changed.
 function M.clear_fingerprint()
     _last_fingerprint = nil
+end
+
+--- Register the in-process native servers (e.g. `neovim`) into CC's MCP registry.
+--- Independent of the bridge connection — native tools dispatch directly in Lua.
+function M.register_native()
+    local cc_mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
+    if not cc_mcp_ok then
+        log.debug("codecompanion.mcp not available, skipping native tool registration")
+        return
+    end
+
+    local state = require("mcp_companion.state")
+    local native_servers = state.field("native_servers") or {}
+    if #native_servers == 0 then
+        return
+    end
+
+    local project = require("mcp_companion.project")
+    local sysp_enabled = project.resolve_tool_system_prompts(config.get().cc.tool_system_prompts)
+
+    local registered_tools = 0
+    for _, server in ipairs(native_servers) do
+        local server_tools = {}
+        local tool_keys = {}
+
+        for _, tool in ipairs(server.tools or {}) do
+            local key = tool._namespaced or (server.name .. "_" .. tool.name)
+            local display = tool._display or tool.name
+            local description = tool.description or ("Neovim tool: " .. display)
+            local input_schema = tool.inputSchema or { type = "object", properties = {} }
+
+            server_tools[key] = {
+                description = description,
+                callback = function()
+                    return {
+                        name = key,
+                        cmds = { _make_native_cmd(server.name, display) },
+                        system_prompt = sysp_enabled and function(_g, _c)
+                            return string.format(
+                                "You can use the `%s` tool from the in-process `%s` server to: %s\n",
+                                display, server.name, description
+                            )
+                        end or nil,
+                        output = _make_output(display),
+                        schema = {
+                            type = "function",
+                            ["function"] = {
+                                name = key,
+                                description = description,
+                                parameters = input_schema,
+                            },
+                        },
+                    }
+                end,
+            }
+            table.insert(tool_keys, key)
+            registered_tools = registered_tools + 1
+        end
+
+        if #tool_keys > 0 then
+            local group = {
+                description = string.format("Control the running Neovim instance (`%s` server)", server.name),
+                tools = tool_keys,
+                system_prompt = sysp_enabled and function(_g, _c)
+                    return string.format(
+                        "You have access to the in-process `%s` server with %d tool(s) "
+                            .. "that act on the running editor.\n",
+                        server.name, #tool_keys
+                    )
+                end or nil,
+                opts = { collapse_tools = true },
+            }
+            cc_mcp.register_tools(server.name, server_tools, group)
+        end
+    end
+
+    log.info("CC native tools registered: %d tool(s)", registered_tools)
 end
 
 --- Unregister all previously registered tools

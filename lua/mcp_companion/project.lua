@@ -116,6 +116,23 @@ local function validate(raw)
         return nil, "tool_system_prompts must be a boolean"
     end
 
+    -- auto_approve: object mapping server name -> spec (boolean | string[]).
+    local auto_approve = raw.auto_approve
+    if auto_approve ~= nil then
+        if type(auto_approve) ~= "table" or vim.islist(auto_approve) then
+            return nil, "auto_approve must be an object mapping server names to specs"
+        end
+        for server_name, spec in pairs(auto_approve) do
+            if type(server_name) ~= "string" or server_name == "" then
+                return nil, "auto_approve keys must be non-empty server names"
+            end
+            if type(spec) ~= "boolean" then
+                local err = check_string_list(spec, "auto_approve." .. server_name)
+                if err then return nil, err end
+            end
+        end
+    end
+
     local adapters = raw.adapters
     local validated_adapters = nil
     if adapters ~= nil then
@@ -154,8 +171,23 @@ local function validate(raw)
         allowed_servers = allowed,
         disabled_servers = disabled,
         tool_system_prompts = tool_system_prompts,
+        auto_approve = auto_approve,
         adapters = validated_adapters,
     }, nil
+end
+
+--- Resolve the per-project auto-approve override for a server, if any.
+--- Returns the spec (boolean | string[]) from ``.mcp-companion.json``'s
+--- ``auto_approve.<server_name>``, or nil if no project file / no override.
+--- @param server_name string
+--- @param start_dir? string Defaults to vim.fn.getcwd().
+--- @return boolean|string[]|nil
+function M.resolve_auto_approve(server_name, start_dir)
+    local cfg = M.resolve(start_dir)
+    if cfg and cfg.auto_approve then
+        return cfg.auto_approve[server_name]
+    end
+    return nil
 end
 
 --- Discover and load the project config, if any.

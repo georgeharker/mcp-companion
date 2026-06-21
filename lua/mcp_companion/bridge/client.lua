@@ -1162,6 +1162,11 @@ function Client:_start_sse()
           self._sse_buf = self._sse_buf:sub(header_end + 4)
           self._sse_connected = true
           log.debug("SSE: Stream connected, processing events")
+          -- A (re)connected stream is the signal that the bridge may have
+          -- restarted; let the native channel reconcile its registration.
+          vim.schedule(function()
+            require("mcp_companion.state").emit("bridge_stream_connected")
+          end)
         else
           return -- Headers not complete yet
         end
