@@ -95,39 +95,41 @@ local function build_bridge_entry(agent_capabilities, token)
   local host = config.bridge.host or "127.0.0.1"
   local port = config.bridge.port or 9741
 
-  -- Check if agent supports HTTP MCP transport
+  -- Token correlation. The bridge's single correlation key is the
+  -- X-MCP-Bridge-Session *header* (read in nvim_proxy.record_session_token /
+  -- the per-chat filter). It can be populated two ways:
+  --   * the agent sends the header directly (needs MCP-SDK header support), or
+  --   * the token rides in the URL path /mcp/<token> and TokenRewriteMiddleware
+  --     injects the header internally.
+  --
+  -- `bridge.token_in_url` (default false) controls the HTTP branch:
+  --   false → /mcp + header only (cleaner; relies on the client forwarding headers)
+  --   true  → /mcp/<token> + header (belt-and-braces; works for any HTTP client)
+  -- The stdio (mcp-remote) branch ALWAYS uses /mcp/<token>: mcp-remote forwards
+  -- neither headers nor env, so the URL is the only channel that can correlate.
   local caps = agent_capabilities and agent_capabilities.mcpCapabilities
+  local token_in_url = config.bridge.token_in_url == true  -- default false (header-only)
+  local plain_url = string.format("http://%s:%d/mcp", host, port)
+  local token_url = string.format("http://%s:%d/mcp/%s", host, port, token)
 
   if caps and caps.http then
-    -- Token is sent via X-MCP-Bridge-Session header (per ACP spec, HTTP MCPs
-    -- must support custom headers). When bridge.token_in_url is true, the token
-    -- is also embedded in the URL path as a fallback for agents whose MCP SDK
-    -- does not forward headers. If your agent fails to route tools, enable
-    -- token_in_url in config and report the agent at:
-    -- https://github.com/georgeharker/mcp-companion/issues
-    local token_in_url = config.bridge and config.bridge.token_in_url
-    local bridge_url
-    if token_in_url then
-      bridge_url = string.format("http://%s:%d/mcp/%s", host, port, token)
-    else
-      bridge_url = string.format("http://%s:%d/mcp", host, port)
-    end
-    log.debug("CC ACP: using HTTP transport for bridge (token=%s url=%s token_in_url=%s)",
+    local bridge_url = token_in_url and token_url or plain_url
+    log.debug("CC ACP: HTTP bridge transport (token=%s url=%s token_in_url=%s)",
       token, bridge_url, tostring(token_in_url))
     return {
       type = "http",
       name = "mcp-bridge",
       url = bridge_url,
+      -- Header is always sent; it is the primary correlation channel.
       headers = { { name = "X-MCP-Bridge-Session", value = token } },
     }
   else
-    -- Fallback: stdio via mcp-remote
-    local bridge_url = string.format("http://%s:%d/mcp", host, port)
-    log.debug("CC ACP: using stdio mcp-remote transport for bridge (token=%s)", token)
+    -- stdio via mcp-remote: token must ride in the URL (env/header not forwarded).
+    log.debug("CC ACP: stdio mcp-remote bridge transport (token=%s url=%s)", token, token_url)
     return {
       name = "mcp-bridge",
       command = "npx",
-      args = { "-y", "mcp-remote", bridge_url },
+      args = { "-y", "mcp-remote", token_url },
       env = { { name = "MCP_ACP_TOKEN", value = token } },
     }
   end
@@ -161,6 +163,7 @@ function M.setup(schema) -- luacheck: ignore 212/schema
   vim.api.nvim_create_autocmd("User", {
     pattern = "CodeCompanionChatCreated",
     callback = function(args)
+      M._auto_native_tools(args.data)
       M._auto_http_tools(args.data)
     end,
   })
@@ -263,6 +266,16 @@ function M.setup(schema) -- luacheck: ignore 212/schema
       }
       log.info("CC ACP: Pre stored pending token for adapter=%s token=%s",
         adapter_name, token)
+
+      -- Register our Neovim instance and bind this token to it BEFORE the agent
+      -- connects and lists tools, so the bridge advertises neovim_* tools for
+      -- this ACP session. bind() queues until registration completes, and the
+      -- bridge fires tools/list_changed on bind so a late bind still refreshes.
+      pcall(function()
+        local channel = require("mcp_companion.native.channel")
+        channel.sync()        -- reconcile registration (recover from a bridge restart)
+        channel.bind(token)   -- track + bind this chat's token to our instance
+      end)
 
       -- If mcpServers is a concrete table (not "inherit_from_config"), inject
       -- directly — transform_to_acp is never called in that path.
@@ -401,18 +414,31 @@ function M.setup(schema) -- luacheck: ignore 212/schema
       -- and _setup_http_per_chat would early-return, leaving the instance
       -- with no _mcp_token and :MCPStatus showing the bridge as disconnected.
       M._wait_for_bridge(30000)
+      -- Per-chat back-channel for CLI agents. The CLI agent connects to the
+      -- bridge via its OWN static MCP config — but that config's URL is
+      -- `${MCP_COMPANION_BRIDGE_URL:-http://127.0.0.1:9741/mcp}`. We mint a
+      -- per-chat token, bind it to this editor, and inject the tokened URL into
+      -- the agent's launch environment (in the exec args, scoped to this spawn).
+      -- The agent then dials /mcp/<token> and the bridge correlates its session
+      -- to this editor (neovim_* routing) + applies the per-chat filter. If the
+      -- env is unset (standalone claude) the `:-` default keeps it tokenless.
+      local prep = M._cli_inject_bridge_env(create_args)
       local instance = _orig_create(create_args)
+      if prep then prep.restore() end
       if instance and instance.bufnr then
-        -- Synthesise adapter shape so _setup_http_per_chat / _resolve_session_allowed
-        -- can read instance.adapter.name the same way they read chat.adapter.name.
-        -- type="cli" is what _setup_http_per_chat dispatches on to consult
-        -- auto_cli_tools instead of auto_http_tools — CLI is a distinct category:
-        -- the CLI agent connects back to the bridge via its own MCP config (no
-        -- bridge-entry injection like ACP, no CC tool_registry like HTTP), so
-        -- only the per-token server filter applies.
+        -- Synthesise an adapter shape so _resolve_session_allowed reads
+        -- instance.adapter.name; type="cli" selects auto_cli_tools.
         instance.adapter = instance.adapter or { name = instance.agent_name, type = "cli" }
         M._cli_instances[instance.bufnr] = instance
-        M._setup_http_per_chat(instance)
+        -- The CLI agent carries the per-chat token via its env-driven bridge URL,
+        -- so its OWN bridge session does tool routing + filtering — exactly like
+        -- ACP. No lite client. Set the token + allowed servers and POST the
+        -- (pending) filter; the bridge applies it when the agent connects.
+        if prep then
+          instance._mcp_token = prep.token
+          instance._mcp_allowed_servers = M._resolve_session_allowed("cli", instance.adapter.name)
+          M._apply_token_filter(instance)
+        end
       end
       return instance
     end
@@ -459,6 +485,45 @@ function M.setup(schema) -- luacheck: ignore 212/schema
   })
 
   log.info("CC extension initialized")
+end
+
+--- Auto-enable the in-process native `neovim` tool group in a new chat.
+--- Independent of the bridge: native tools dispatch directly in Lua. ACP chats
+--- are skipped — they receive `neovim_*` tools via the bridge injection instead.
+--- @param event_data table Event data with bufnr and id
+function M._auto_native_tools(event_data)
+  if not event_data or not event_data.bufnr then return end
+
+  local channel_ok, channel = pcall(require, "mcp_companion.native.channel")
+  if not channel_ok or not channel.enabled() then return end
+
+  local cc_ok, codecompanion = pcall(require, "codecompanion")
+  if not cc_ok then return end
+
+  local chat = codecompanion.buf_get_chat(event_data.bufnr)
+  if not chat or not chat.tool_registry then return end
+
+  -- ACP chats get neovim tools through the bridge (ToolProcessingMiddleware),
+  -- not the in-process CC registry.
+  if chat.adapter and chat.adapter.type == "acp" then return end
+
+  local mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
+  if not mcp_ok then return end
+
+  -- Ensure the native group exists in CC's MCP registry (idempotent; does not
+  -- depend on the bridge being connected).
+  pcall(function() require("mcp_companion.cc.tools").register_native() end)
+
+  chat.tools:refresh({ adapter = chat.adapter })
+  local group = cc_mcp.tool_prefix() .. "neovim"
+  local ok_add = pcall(function()
+    chat.tool_registry:add(group, { config = chat.tools.tools_config })
+  end)
+  if ok_add then
+    log.info("CC: auto-enabled native neovim tool group")
+  else
+    log.debug("CC: failed to add native neovim group (%s)", group)
+  end
 end
 
 --- Auto-enable MCP tool groups in a newly created chat.
@@ -543,6 +608,73 @@ end
 --- depending on adapter.type, so the bridge is the source of truth for which
 --- servers are visible on this session's token.
 --- @param chat table CC chat object or CLI instance (chat-shaped via the cli.create patch)
+--- Inject the per-chat bridge URL into a CLI agent's launch.
+---
+--- Mints a token, binds it to this editor's Neovim instance, and temporarily
+--- wraps the agent's exec as `env MCP_COMPANION_BRIDGE_URL=<url> <cmd> <args…>`
+--- so the spawned agent (and only it) inherits the tokened bridge URL. The agent
+--- config's `${MCP_COMPANION_BRIDGE_URL:-…}` URL then dials /mcp/<token>.
+---
+--- The agent table is mutated in place and MUST be restored via the returned
+--- `restore()` immediately after the (synchronous) spawn.
+--- @param create_args? { agent?: string }
+--- @return { token: string, restore: fun() }|nil
+function M._cli_inject_bridge_env(create_args)
+  -- The token enables BOTH per-chat server filtering (the agent's own session
+  -- carries it) and — when the native server is enabled — the neovim
+  -- back-channel. So it's gated on the bridge being connected, not on native.
+  local bridge = require("mcp_companion.bridge")
+  if not bridge.client or not bridge.client.connected then return nil end
+
+  local cc_ok, cc_config = pcall(require, "codecompanion.config")
+  if not cc_ok then return nil end
+  local agent_name = (create_args and create_args.agent) or cc_config.interactions.cli.agent
+  local agents = cc_config.interactions.cli.agents or {}
+  local agent = agents[agent_name]
+  if not agent or not agent.cmd then return nil end
+
+  -- Mint the token before the agent spawns/lists. Bind it to this editor's
+  -- Neovim instance for the back-channel — only if the native server is enabled.
+  local token = M._generate_token()
+  pcall(function()
+    local channel = require("mcp_companion.native.channel")
+    if channel.enabled() then
+      channel.sync()
+      channel.bind(token)
+    end
+  end)
+
+  local cfg = require("mcp_companion.config").get()
+  local host = cfg.bridge.host or "127.0.0.1"
+  local port = cfg.bridge.port or 9741
+  local token_url = string.format("http://%s:%d/mcp/%s", host, port, token)
+
+  -- Wrap as `env VAR=<url> <cmd> <args…>` — scoped to this spawn only.
+  local orig_cmd, orig_args = agent.cmd, agent.args
+  local wrapped = { "MCP_COMPANION_BRIDGE_URL=" .. token_url, orig_cmd }
+  for _, a in ipairs(orig_args or {}) do
+    table.insert(wrapped, a)
+  end
+  agent.cmd = "env"
+  agent.args = wrapped
+  log.info("CC CLI: injected bridge env for agent=%s (token=%s)", tostring(agent_name), token)
+
+  return {
+    token = token,
+    restore = function()
+      agent.cmd = orig_cmd
+      agent.args = orig_args
+    end,
+  }
+end
+
+--- Create a lightweight per-chat MCP client for an HTTP-adapter chat.
+--- The chat's LLM runs in-process (CC is the host), so CC routes the chat's
+--- tool calls through this client — giving the bridge a tokened session to
+--- filter per chat. CLI and ACP agents are *separate processes* that carry
+--- their own token (via env-URL / mcpServers injection), so they do NOT use
+--- this — see the cli.create patch and ACPSessionPost.
+--- @param chat table CC chat object (HTTP adapter)
 function M._setup_http_per_chat(chat)
   if chat._mcp_client or chat._mcp_token then
     return -- already set up
@@ -556,15 +688,10 @@ function M._setup_http_per_chat(chat)
 
   local token = M._generate_token()
 
-  -- Derive the allowed-servers list for the bridge-side filter.
-  -- Dispatch by adapter.type: CLI instances (synthesised in the cli.create
-  -- patch with type="cli") read auto_cli_tools; everything else (HTTP-adapter
-  -- CC chats) reads auto_http_tools.  A .mcp-companion.json walked up from
-  -- cwd overrides either.  The Neovim-side tool_registry only mirrors the
-  -- HTTP path (in _auto_http_tools); CLI has no CC tool_registry to mirror to.
+  -- Allowed-servers for the bridge-side filter. A .mcp-companion.json walked up
+  -- from cwd overrides the global auto_http_tools setting.
   local adapter_name = chat.adapter and chat.adapter.name
-  local kind = (chat.adapter and chat.adapter.type == "cli") and "cli" or "http"
-  local allowed = M._resolve_session_allowed(kind, adapter_name)
+  local allowed = M._resolve_session_allowed("http", adapter_name)
 
   chat._mcp_token = token
   chat._mcp_allowed_servers = allowed
@@ -670,6 +797,13 @@ function M._apply_token_filter(chat)
   if not chat or not chat._mcp_token then return end
 
   local token = chat._mcp_token
+
+  -- Bind this chat's token to our Neovim instance so the bridge can route
+  -- `neovim_*` tool calls back here. Safe before bridge registration completes.
+  pcall(function()
+    require("mcp_companion.native.channel").bind(token)
+  end)
+
   local allowed = chat._mcp_allowed_servers
 
   -- Nothing to do if no server filter is needed
@@ -887,6 +1021,11 @@ function M._cleanup_session_filter(chat)
   chat._mcp_token = nil
   chat._mcp_allowed_servers = nil
 
+  -- Unbind the token from our Neovim instance on the bridge.
+  pcall(function()
+    require("mcp_companion.native.channel").unbind(token)
+  end)
+
   local cfg = require("mcp_companion.config").get()
   local host = cfg.bridge.host or "127.0.0.1"
   local port = cfg.bridge.port or 9741
@@ -911,6 +1050,8 @@ end
 function M._register_tools()
   local ok, tools = pcall(require, "mcp_companion.cc.tools")
   if ok then
+    -- Native (in-process) servers register independently of the bridge.
+    pcall(tools.register_native)
     tools.register()
   else
     log.warn("Failed to load cc.tools: %s", tostring(tools))

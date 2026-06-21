@@ -214,7 +214,9 @@ mcp-companion.nvim/
 ## Known Limitations
 
 - No tool approval flow (all tools auto-execute)
-- Native (pure-Lua) MCP server registration is not implemented
+- Native (pure-Lua) MCP server registration is not implemented — design for a native
+  Neovim control server (msgpack-RPC back-channel for external agents) in
+  [`docs/designs/native-neovim-server.md`](designs/native-neovim-server.md)
 - `transform_to_acp` (upstream CC) has no HTTP server branch and no nil guard on
   `cfg.cmd`; our patch adds HTTP support but the upstream should be fixed
 - Pending token filters are held in memory — if the bridge restarts between

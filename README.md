@@ -126,7 +126,7 @@ format is supported:
 | `headers` | `object` | HTTP headers (supports interpolation) |
 | `transport` | `string` | `"stdio"`, `"http"`, or `"sse"` (auto-detected from presence of `url`) |
 | `disabled` | `boolean` | Skip this server |
-| `autoApprove` | `string[]` | Tool name patterns to auto-approve |
+| `autoApprove` | `bool \| string[]` | Auto-approve spec — see [Auto-approve spec](#auto-approve-spec) |
 | `auth` | `string\|object` | Authentication config (see below) |
 | `sharedServer` | `string` | Name of a `sharedServers` entry to start before connecting (see below) |
 
@@ -540,6 +540,43 @@ require("codecompanion").setup({
 })
 ```
 
+### Bridge runtime (Python venv)
+
+The Python bridge runs from a venv. On `setup()` the plugin **ensures it's installed**
+via `uv` if it isn't already (`uv venv <target>` + `uv pip install -e <plugin>/bridge`).
+This is async, idempotent, and a no-op once installed — so the `build = "cd bridge && uv
+sync --frozen"` step above is now **optional**.
+
+**Where it installs:**
+
+- **Default (unset `bridge.venv`):** a **plugin-local** venv at `<plugin>/bridge/.venv` —
+  self-contained, nothing leaks into your environment.
+- **Set `bridge.venv = "~/.venv"`** (or any path): install/run from **that** venv, so it
+  can be **shared** with other clients (see below). A user-set venv must **already exist** —
+  the plugin only `uv pip install`s into it (additive) and will **never** `uv venv` (wipe) a
+  venv it doesn't own.
+
+`bridge.python_cmd` resolution order: an explicit custom path → the configured `venv` (once
+the bridge is installed there) → the plugin-local `bridge/.venv` → `python3`.
+
+```lua
+require("mcp_companion").setup({
+    bridge = {
+        -- venv = "~/.venv",               -- opt in to a shared venv (default: plugin-local)
+        -- python_cmd = "/path/to/python", -- pin a python and skip auto-install entirely
+    },
+})
+```
+
+Commands: `:MCPInstall` installs/refreshes into the target venv (`:MCPInstall!` forces a
+reinstall; `:MCPInstall /path/to/venv` targets a specific venv).
+
+**Sharing the bridge with standalone Claude Code.** Only relevant if you opt into a shared
+`bridge.venv`. Put its `bin/` on `PATH` (or `uv tool install <plugin>/bridge` for a global
+`mcp-bridge`), and the [`claude-mcp-bridge`](https://github.com/georgeharker/claude-mcp-bridge)
+plugin will find `mcp-bridge` directly — Neovim and standalone Claude then share one bridge
+process.
+
 ### Features
 
 #### MCP tools as CC tools
@@ -561,6 +598,14 @@ Optionally, resources can be auto-injected into every new chat's system prompt
 MCP prompts become CC slash commands. Type `/mcp:prompt_name` in a chat buffer
 to invoke a prompt. If the prompt defines arguments, you are prompted to fill
 them in before the prompt messages are injected into the chat.
+
+#### Controlling Neovim from an agent
+
+A built-in `neovim` native server exposes your live editor to an agent as
+`neovim_*` tools (open files, read/edit buffers, diagnostics, navigation), with
+risk-tiered approval and multi-instance targeting. Works in CodeCompanion chats
+and for external agents (Claude Code, OpenCode) connected through the bridge.
+See [Controlling Neovim from an agent](docs/neovim-control.md).
 
 #### ACP forwarding
 
@@ -593,12 +638,66 @@ using `/mcp-session` — see [Per-session server gating](#per-session-server-gat
 
 #### Tool approval flow
 
-Tool calls go through a configurable approval chain before execution:
+> **Scope: this approval chain applies to in-process CodeCompanion chats only**
+> — i.e. when CodeCompanion is the host running the LLM inside Neovim. **External
+> ACP / CLI agents (Claude Code, OpenCode, Copilot, …) do NOT use it** — they are
+> their own MCP host and enforce tool permissions on their side. See
+> [Approval for external agents](#approval-for-external-agents) below.
 
-1. **Global auto-approve** — `auto_approve = true` or a custom function
-2. **Native servers** — auto-approved (they run in-process)
-3. **Per-server patterns** — `autoApprove` list in your servers.json
-4. **User prompt** — `vim.ui.select` ("Allow" / "Deny")
+In a CodeCompanion chat, tool calls go through a configurable approval chain
+before execution:
+
+1. **Global auto-approve** — `auto_approve = true` or a custom function (applies
+   to every tool).
+2. **Per-server auto-approve spec** — the same spec for proxied and native
+   servers (see [Auto-approve spec](#auto-approve-spec)). Resolution order is
+   per-project `.mcp-companion.json` `auto_approve.<server>` → plugin-level
+   (`autoApprove` in servers.json for proxied; `native_servers.<name>.auto_approve`
+   for native).
+3. **User prompt** — `vim.ui.select` ("Allow" / "Deny")
+
+#### Approval for external agents
+
+When an external agent reaches the bridge — over ACP (Claude Code, OpenCode via
+CodeCompanion) or as a directly-configured MCP client — **the bridge does not
+approve anything.** This is standard MCP: a server (the bridge is one) executes
+the `tools/call` it receives; **consent is the host/client's responsibility.**
+So tool permissions for these agents are configured **in the agent itself**, not
+in mcp-companion. That governs every tool the agent can reach through the bridge,
+including the `neovim_*` tools.
+
+| Agent | Where permissions live | Docs |
+|---|---|---|
+| **Claude Code** | `permissions` (allow / ask / deny rules) in `settings.json`; `/permissions` UI. MCP tools are named `mcp__<server>__<tool>` (e.g. `mcp__mcp-companion__neovim_edit_buffer`). | [Configure permissions](https://code.claude.com/docs/en/permissions) |
+| **OpenCode** | `permission` config (allow / ask / deny), global or per-agent. | [Permissions](https://opencode.ai/docs/permissions/) |
+| **GitHub Copilot** (e.g. `copilot_acp`) | Per-tool confirmation in the chat UI; admins can set an MCP allow-list. | [Build with agents in VS Code](https://code.visualstudio.com/docs/copilot/agents/overview) · [Agent mode + MCP](https://docs.github.com/en/copilot/tutorials/enhance-agent-mode-with-mcp) |
+
+For example, to make Claude Code *always prompt* before any neovim write/exec
+tool, add an `ask` rule like `mcp__mcp-companion__neovim_edit_buffer` (or a
+broader pattern) in its `settings.json` per the linked docs.
+
+> The bridge's own controls are **exposure**, not approval: per-session server
+> gating (`/mcp-session`, `.mcp-companion.json`) and the `exec` tier being off by
+> default (`native_servers.neovim.expose_exec`). Combine those with the agent's
+> permission rules above.
+
+##### Auto-approve spec
+
+`autoApprove` (proxied, in `servers.json`) and `native_servers.<name>.auto_approve`
+(native, in plugin setup) share one spec:
+
+- `true` — auto-approve **all** tools from the server.
+- `false` / `[]` — auto-approve none (always prompt).
+- `string[]` — a list of match tokens; a tool is approved if **any** matches:
+  - **tool-name glob** — e.g. `"read_*"`, `"get_*"`, `"open_file"`, `"*"`.
+  - **`tier:<tier>` alias** — matches any tool of that internal risk tier
+    (`read` / `navigate` / `write` / `exec`). Only native tools carry a tier, so
+    `tier:*` tokens are no-ops for proxied servers.
+- a `function(tool_name, server_name, ctx) -> boolean` (native config only).
+
+The built-in `neovim` server defaults to `{ "tier:read", "tier:navigate" }` — so
+reads and navigation auto-approve while writes/exec prompt. Override it, e.g.
+`auto_approve = { "tier:read", "edit_buffer" }` or `auto_approve = true`.
 
 #### Bridge lifecycle
 

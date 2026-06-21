@@ -37,6 +37,8 @@ website:
         href: index.md
       - text: "Overview (README)"
         href: README.md
+      - text: "Controlling Neovim from an agent"
+        href: docs/neovim-control.md
 
 format:
   html:

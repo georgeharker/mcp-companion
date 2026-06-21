@@ -32,6 +32,21 @@
             "description": "Whether to add per-tool natural-language system messages alongside the tools array. Useful for models that ignore JSON-Schema descriptions; set to false to save tokens. Overrides the plugin-level cc.tool_system_prompts setting; defaults to true.",
             "type": "boolean"
         },
+        "auto_approve": {
+            "description": "Per-server auto-approve overrides for in-process CodeCompanion tool calls in this project. Keys are server names (proxied servers from your servers.json, or native servers such as 'neovim'). Each value is the auto-approve spec and overrides the plugin-level setting for that server in this project. Applies to in-process CodeCompanion chats only; external ACP/CLI agents use their host harness's own approval.",
+            "type": "object",
+            "additionalProperties": {
+                "description": "Auto-approve spec: true (approve all tools from this server), false or [] (prompt for all), or an array of match tokens — tool-name globs (e.g. 'read_*', 'get_*', 'open_file') and/or 'tier:<read|navigate|write|exec>' aliases. Tier aliases match only native tools (proxied tools carry no tier). A tool is approved if any token matches.",
+                "oneOf": [
+                    { "type": "boolean" },
+                    {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "uniqueItems": true
+                    }
+                ]
+            }
+        },
         "adapters": {
             "description": "Per-adapter server filter overrides. Keys are adapter names for CC chats (e.g. 'moonshot-ai', 'claude', 'copilot_acp') or agent names for CLI sessions (e.g. 'claude_code'). Each value overrides the top-level allowed_servers / disabled_servers for sessions using that specific adapter / agent, allowing different models to see different subsets of MCP servers within the same project.",
             "type": "object",

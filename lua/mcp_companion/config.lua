@@ -22,9 +22,7 @@ local M = {}
 --- @class MCPCompanion.BridgeLogConfig
 --- @field level? "trace"|"debug"|"info"|"warn"|"error" Default "info".
 --- @field file? boolean|string Default true (= default path).
---- @field token_in_url? boolean Include session token in URL path (/mcp/<token>) instead of header only.
----   Default false: token is sent via X-MCP-Bridge-Session header only (cleaner, per ACP spec).
----   Set true if your ACP agent does not forward custom HTTP headers to MCP servers.
+--- @field token_in_url? boolean For HTTP ACP agents, also embed the session token in the URL path (/mcp/<token>) in addition to the X-MCP-Bridge-Session header. Default false (header-only; cleaner URLs, per ACP spec, relies on the agent forwarding the header). Set true for belt-and-braces — robust for any client, including ACP agents that don't forward custom HTTP headers. The stdio/mcp-remote fallback always uses the URL regardless of this flag.
 ---   If tools fail in a specific agent, try enabling this and please report at
 ---   https://github.com/georgeharker/mcp-companion/issues with the agent name.
 
@@ -70,7 +68,7 @@ local M = {}
 --- @class MCPCompanion.Config
 --- @field bridge MCPCompanion.BridgeConfig
 --- @field cc MCPCompanion.CCConfig
---- @field native_servers table<string, {enabled: boolean}>
+--- @field native_servers table<string, {enabled: boolean, expose_exec?: boolean, auto_approve?: boolean|string[]|fun(tool_name: string, server_name: string, tool_ctx: table): boolean}>
 --- @field auto_approve boolean|fun(tool_name: string, server_name: string, tool_ctx: table): boolean
 --- @field system_prompt_resources? boolean|string[] Resource name patterns to inject into system prompt
 --- @field ui {enabled: boolean, width: number, height: number, border: string}
@@ -87,6 +85,16 @@ M.defaults = {
     host = "127.0.0.1",
     idle_timeout = "30m",
     python_cmd = "python3",
+    -- Optional venv to install/run the bridge from. Unset (default): a
+    -- plugin-local venv (<plugin>/bridge/.venv) is created and used —
+    -- self-contained. Set a shared venv to let other clients reuse the install
+    -- (put its bin/ on PATH so the claude-mcp-bridge plugin finds `mcp-bridge`).
+    -- A user-set venv must already exist — the plugin only `uv pip install`s
+    -- into it (additive) and will never `uv venv` (wipe) a venv it doesn't own:
+    --   venv = "~/.venv"
+    -- Either way the bridge is ensured-installed on start via uv, unless
+    -- `python_cmd` is a custom path.
+    venv = nil,
     startup_timeout = 30,
     request_timeout = 60,
     token_key = nil,
@@ -94,11 +102,44 @@ M.defaults = {
       level = "info",
       file = true,    -- true = default path, string = path, false = disabled
     },
+    -- HTTP ACP agents: also put the token in the URL path, not just the header.
+    -- false = header-only (cleaner; the default); true = belt-and-braces (robust).
+    -- The stdio/mcp-remote fallback always uses the URL regardless of this flag.
     token_in_url = false,
   },
 
   native_servers = {
-    neovim = { enabled = true },
+    neovim = {
+      enabled = true,
+      -- expose_exec = false,  -- include the exec tier (run_command/exec_lua)
+      -- Auto-approve spec — same style as a proxied server's `autoApprove`:
+      -- a list of tool-name globs, plus `tier:<read|navigate|write|exec>` alias
+      -- tokens. `true` = approve all, `false`/`{}` = prompt for all, or a
+      -- function(tool_name, server_name, ctx) -> boolean. Applies to in-process
+      -- CodeCompanion chats (external ACP/CLI agents use their host's approval).
+      auto_approve = { "tier:read", "tier:navigate" },
+      -- Window/buffer placement for navigate/display tools (open_file,
+      -- goto_diagnostic, set_cursor, …). These act on a *code* window — the
+      -- first normal (non-chat/tree/terminal/float) window in the current
+      -- tabpage — never the focused window, which is often a CodeCompanion chat.
+      window = {
+        -- Filetypes/buftypes that are NOT a code window (chat, file trees, etc).
+        ignore_filetypes = {
+          "codecompanion", "neo-tree", "NvimTree", "aerial", "Outline",
+          "trouble", "qf", "help", "TelescopePrompt", "neotest-summary",
+          "dap-repl", "dapui_watches", "dapui_stacks", "dapui_breakpoints",
+          "dapui_scopes", "dapui_console", "mcp-companion",
+        },
+        ignore_buftypes = { "nofile", "prompt", "terminal", "quickfix", "help" },
+        -- Where open_file puts a file when there's no code window to reuse:
+        -- "tab" | "split" | "vsplit" | "replace".
+        no_code_window = "tab",
+        -- Where focus lands after open/navigate: "file" | "chat" (stay put).
+        focus = "file",
+        -- Reuse a window already showing the target file instead of re-opening.
+        reuse_visible = true,
+      },
+    },
   },
 
   cc = {
@@ -148,15 +189,28 @@ local function _plugin_dir()
   return nil
 end
 
---- Resolve bridge python command (prefer plugin-local venv)
+--- Resolve bridge python command.
+--- Priority: explicit user path → configured `venv` (if the bridge is installed
+--- there) → plugin-local `bridge/.venv` (legacy build step) → `python3`.
 --- @param user_cmd? string User-specified python command
+--- @param venv? string Configured venv (config.bridge.venv)
 --- @return string python_cmd
-local function _resolve_python_cmd(user_cmd)
+local function _resolve_python_cmd(user_cmd, venv)
   if user_cmd and user_cmd ~= "python3" then
     return user_cmd -- user explicitly set a custom path
   end
 
-  -- Look for plugin-local venv (created by build step)
+  -- Configured venv, only if the bridge is actually installed there (the
+  -- `mcp-bridge` console script is the install marker). install.ensure() puts
+  -- it there on start; until then we fall through to the plugin-local venv.
+  if venv and venv ~= "" then
+    local vpath = vim.fn.expand(venv)
+    if vim.fn.executable(vpath .. "/bin/mcp-bridge") == 1 then
+      return vpath .. "/bin/python"
+    end
+  end
+
+  -- Look for plugin-local venv (created by a build step)
   local root = _plugin_dir()
   if root then
     local venv_python = root .. "/bridge/.venv/bin/python"
@@ -232,8 +286,12 @@ end
 function M.setup(opts)
   _config = vim.tbl_deep_extend("force", {}, M.defaults, opts or {})
 
-  -- Resolve python command (prefer plugin-local venv)
-  _config.bridge.python_cmd = _resolve_python_cmd(_config.bridge.python_cmd)
+  -- Did the user pin a custom python? (before we auto-resolve it to a venv path)
+  local user_py = opts and opts.bridge and opts.bridge.python_cmd
+  _config.bridge._custom_python = user_py ~= nil and user_py ~= "python3"
+
+  -- Resolve python command (prefer configured venv, then plugin-local venv)
+  _config.bridge.python_cmd = _resolve_python_cmd(_config.bridge.python_cmd, _config.bridge.venv)
 
   -- Auto-detect config path if not set
   if not _config.bridge.config then
@@ -268,6 +326,23 @@ end
 function M.bridge_url()
   local cfg = M.get()
   return string.format("http://%s:%d", cfg.bridge.host, cfg.bridge.port)
+end
+
+--- Plugin root directory (contains lua/ and bridge/).
+--- @return string|nil
+function M.plugin_dir()
+  return _plugin_dir()
+end
+
+--- Re-resolve bridge.python_cmd (e.g. after install.ensure() populates the venv).
+--- @return string python_cmd
+function M.refresh_python_cmd()
+  if not _config then return "python3" end
+  -- Re-run from the *original* intent: keep a user-pinned python; otherwise
+  -- re-resolve from scratch ("python3") so a freshly-installed venv is picked.
+  local user = _config.bridge._custom_python and _config.bridge.python_cmd or "python3"
+  _config.bridge.python_cmd = _resolve_python_cmd(user, _config.bridge.venv)
+  return _config.bridge.python_cmd
 end
 
 return M

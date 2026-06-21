@@ -36,6 +36,23 @@ function M.setup(opts)
     log.warn("No servers.json found. Create one or set bridge.config in setup()")
   end
 
+  -- Ensure the bridge is installed in the target venv (bridge.venv if set, else
+  -- the plugin-local bridge/.venv), unless the user pinned a custom python_cmd.
+  -- Async + idempotent (no-op if the current version is already installed); on
+  -- success we re-resolve python_cmd so the (later) bridge start prefers it.
+  if not config.get().bridge._custom_python then
+    require("mcp_companion.install").ensure(nil, function(ok, err, installed)
+      if ok then
+        config.refresh_python_cmd()
+        if installed then
+          vim.notify("[mcp-companion] bridge installed", vim.log.levels.INFO)
+        end
+      else
+        vim.notify("[mcp-companion] bridge install failed: " .. tostring(err), vim.log.levels.WARN)
+      end
+    end)
+  end
+
   -- Initialize native servers
   local native = require("mcp_companion.native")
   native.setup(config.get())
@@ -48,11 +65,31 @@ function M.setup(opts)
   --   extensions = { mcp_companion = { callback = "mcp_companion.cc", opts = {...} } }
   -- We do NOT call cc.register_extension() here — CC calls M.init(schema) on our module.
 
+  -- Open the Neovim back-channel and register with the bridge so external
+  -- agents can call `neovim_*` tools back into this instance. We reconcile via
+  -- channel.sync() (boot-id aware) on bridge connect AND on every SSE reconnect,
+  -- so a bridge *restart* (which wipes the bridge's registry) is recovered.
+  local channel = require("mcp_companion.native.channel")
+  if channel.enabled() then
+    state.on("bridge_ready", function()
+      channel.sync()
+    end)
+    state.on("bridge_stream_connected", function()
+      channel.sync()
+    end)
+    if state.get().bridge.status == "connected" then
+      channel.sync()
+    end
+  end
+
   -- Autocmds
   local group = vim.api.nvim_create_augroup("MCPCompanion", { clear = true })
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = group,
     callback = function()
+      pcall(function()
+        require("mcp_companion.native.channel").deregister()
+      end)
       bridge.stop()
     end,
   })
@@ -70,6 +107,23 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("MCPRestart", function(args)
     bridge.restart({ force = args.bang })
   end, { bang = true, desc = "Restart MCP bridge (use ! to force when other clients attached)" })
+
+  vim.api.nvim_create_user_command("MCPInstall", function(args)
+    local venv = args.args ~= "" and args.args or nil
+    vim.notify("[mcp-companion] installing bridge…", vim.log.levels.INFO)
+    require("mcp_companion.install").ensure(venv, function(ok, err)
+      if ok then
+        require("mcp_companion.config").refresh_python_cmd()
+        vim.notify("[mcp-companion] bridge installed", vim.log.levels.INFO)
+      else
+        vim.notify("[mcp-companion] install failed: " .. tostring(err), vim.log.levels.ERROR)
+      end
+    end, args.bang)
+  end, {
+    nargs = "?",
+    bang = true,
+    desc = "Install/refresh the Python bridge into a venv (default bridge.venv, else plugin-local bridge/.venv); ! forces reinstall",
+  })
 
   vim.api.nvim_create_user_command("MCPLog", function()
     local log_path = log.get_log_path()
@@ -194,7 +248,10 @@ function M.off(event, callback)
   require("mcp_companion.state").off(event, callback)
 end
 
--- Re-export native server public API
+-- Public native-server registration API. Registration-only and setup-time:
+-- call these before any editor connects to the bridge, and register the same
+-- tools across all instances (the bridge freezes the catalog once per process).
+-- See docs/designs/native-neovim-server.md.
 M.add_server = function(...)
   return require("mcp_companion.native").add_server(...)
 end
