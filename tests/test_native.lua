@@ -163,6 +163,60 @@ do
   end
 end
 
+-- ── window placement (never act on the chat window) ──────────────────────────
+section("window placement")
+
+if ok_native then
+  local winpick = require("mcp_companion.native.winpick")
+
+  -- Current window shows the scratch *code* buffer (buftype "", named).
+  local code_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(code_win, buf)
+
+  -- Add a "chat" window: a split whose buffer has filetype=codecompanion.
+  vim.cmd("vsplit")
+  local chat_win = vim.api.nvim_get_current_win()
+  local chat_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(chat_win, chat_buf)
+  vim.bo[chat_buf].filetype = "codecompanion"
+  vim.api.nvim_set_current_win(chat_win) -- simulate the agent running in the chat
+
+  if winpick.code_win() == code_win then
+    ok("code_win() skips the chat window")
+  else
+    err("code_win()", "got " .. tostring(winpick.code_win()) .. " want " .. tostring(code_win))
+  end
+
+  -- open_file from the chat: file lands in the code window, chat untouched.
+  local target = tmp .. ".open"
+  vim.fn.writefile({ "one", "two", "three" }, target)
+  vim.api.nvim_set_current_win(chat_win)
+  local of = rjson(native.dispatch("open_file", { path = target, line = 2 }))
+  local landed = of and of.window == code_win
+  local code_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(code_win))
+  if landed and vim.fn.resolve(code_name) == vim.fn.resolve(vim.fn.fnamemodify(target, ":p")) then
+    ok("open_file opens in the code window, not the chat")
+  else
+    err("open_file placement", vim.inspect(of) .. " code_buf=" .. code_name)
+  end
+  if vim.api.nvim_win_get_buf(chat_win) == chat_buf then
+    ok("open_file left the chat window untouched")
+  else
+    err("open_file chat", "chat window buffer changed")
+  end
+
+  -- get_cursor reads the code window, not the focused chat.
+  vim.api.nvim_set_current_win(chat_win)
+  local gc = rjson(native.dispatch("get_cursor", {}))
+  if gc and gc.buffer == vim.api.nvim_win_get_buf(code_win) then
+    ok("get_cursor reads the code window")
+  else
+    err("get_cursor", vim.inspect(gc))
+  end
+
+  vim.fn.delete(target)
+end
+
 -- ── Results ──────────────────────────────────────────────────────────────────
 table.insert(results, string.format("\n=== RESULTS: %d passed, %d failed ===", pass, fail))
 for _, line in ipairs(results) do

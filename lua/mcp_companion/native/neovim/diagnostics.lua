@@ -2,6 +2,7 @@
 --- @module mcp_companion.native.neovim.diagnostics
 
 local util = require("mcp_companion.native.util")
+local winpick = require("mcp_companion.native.winpick")
 
 --- Map a numeric severity to its name.
 local SEVERITY = {
@@ -70,18 +71,21 @@ M.tools = {
       },
     },
     handler = function(args, _ctx)
-      local sev = args.severity and vim.diagnostic.severity[args.severity] or nil
-      local opts = sev and { severity = sev } or nil
-      local dir = args.direction or "next"
-      if dir == "prev" then
-        vim.diagnostic.jump({ count = -1, severity = sev })
-      elseif dir == "first" then
-        vim.diagnostic.jump({ count = math.huge * -1, severity = sev })
-      else
-        vim.diagnostic.jump({ count = 1, severity = sev })
+      -- Jump in the user's code window, not the focused window (often a chat).
+      local win = winpick.code_win()
+      if not win then
+        return util.err("no code window is open to navigate diagnostics in")
       end
-      local pos = vim.api.nvim_win_get_cursor(0)
-      return util.json({ direction = dir, line = pos[1], col = pos[2] })
+      local sev = args.severity and vim.diagnostic.severity[args.severity] or nil
+      local dir = args.direction or "next"
+      local count = (dir == "prev" and -1) or (dir == "first" and math.huge * -1) or 1
+      vim.api.nvim_win_call(win, function()
+        vim.diagnostic.jump({ count = count, severity = sev })
+      end)
+      winpick.maybe_focus(win)
+      local pos = vim.api.nvim_win_get_cursor(win)
+      local buf = vim.api.nvim_win_get_buf(win)
+      return util.json({ direction = dir, buffer = buf, line = pos[1], col = pos[2] })
     end,
   },
 }

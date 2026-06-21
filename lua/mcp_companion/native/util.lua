@@ -30,19 +30,21 @@ function M.err(msg)
   return { isError = true, content = { { type = "text", text = tostring(msg) } } }
 end
 
---- Best-effort "current file buffer": prefer a visible, listed, normal-file
---- buffer in the current tabpage. This matters for in-process CodeCompanion,
---- where the *current* buffer is the chat window, not the code the user means.
----
---- TODO(heuristic, possibly dubious): "first visible normal-file window in the
---- current tabpage" is a guess. It breaks down with splits/multiple code windows
---- (picks an arbitrary one), floating windows, or when the relevant buffer isn't
---- visible at all. The looped-back/external-agent path has *no* meaningful
---- "current window" either. Revisit once we see real usage — likely we want the
---- caller (chat context / last-active-before-chat buffer / explicit arg) to drive
---- this rather than inferring it here. Always prefer an explicit `buffer=` arg.
+--- Best-effort "current file buffer": the buffer shown in the user's code
+--- window (first non-chat/tree/terminal/float window in the current tabpage).
+--- This matters for in-process CodeCompanion, where the *focused* buffer is the
+--- chat, not the code the user means. Falls back to a visible normal-file buffer
+--- scan, then the focused buffer. Always prefer an explicit `buffer=` arg.
 --- @return integer bufnr
 function M.current_file_buf()
+  -- Primary: the code window's buffer (shares the placement policy with the
+  -- navigate tools, so reads/edits land where open_file/goto_diagnostic act).
+  local ok, winpick = pcall(require, "mcp_companion.native.winpick")
+  if ok then
+    local buf = winpick.code_buf()
+    if buf then return buf end
+  end
+  -- Fallback: first visible normal-file buffer in the current tabpage.
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local buf = vim.api.nvim_win_get_buf(win)
     if vim.api.nvim_buf_is_valid(buf)

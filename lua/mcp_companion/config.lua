@@ -118,6 +118,27 @@ M.defaults = {
       -- function(tool_name, server_name, ctx) -> boolean. Applies to in-process
       -- CodeCompanion chats (external ACP/CLI agents use their host's approval).
       auto_approve = { "tier:read", "tier:navigate" },
+      -- Window/buffer placement for navigate/display tools (open_file,
+      -- goto_diagnostic, set_cursor, …). These act on a *code* window — the
+      -- first normal (non-chat/tree/terminal/float) window in the current
+      -- tabpage — never the focused window, which is often a CodeCompanion chat.
+      window = {
+        -- Filetypes/buftypes that are NOT a code window (chat, file trees, etc).
+        ignore_filetypes = {
+          "codecompanion", "neo-tree", "NvimTree", "aerial", "Outline",
+          "trouble", "qf", "help", "TelescopePrompt", "neotest-summary",
+          "dap-repl", "dapui_watches", "dapui_stacks", "dapui_breakpoints",
+          "dapui_scopes", "dapui_console", "mcp-companion",
+        },
+        ignore_buftypes = { "nofile", "prompt", "terminal", "quickfix", "help" },
+        -- Where open_file puts a file when there's no code window to reuse:
+        -- "tab" | "split" | "vsplit" | "replace".
+        no_code_window = "tab",
+        -- Where focus lands after open/navigate: "file" | "chat" (stay put).
+        focus = "file",
+        -- Reuse a window already showing the target file instead of re-opening.
+        reuse_visible = true,
+      },
     },
   },
 

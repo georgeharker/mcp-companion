@@ -69,6 +69,27 @@ operate on the live buffer, so open, unsaved files don't get clobbered by disk w
 There are also read-only **resources** an agent can pull for context:
 `neovim://buffers`, `neovim://workspace`, `neovim://diagnostics/workspace`.
 
+### Where things open (window placement)
+
+Navigate/display tools (`open_file`, `goto_diagnostic`, `set_cursor`) and the default
+buffer for `get_cursor`/read/edit tools target your **code window** — the first normal
+window in the current tabpage — never the focused window, which during a chat is the
+CodeCompanion buffer. So an agent calling `open_file` won't open over your chat. Tunable:
+
+```lua
+native_servers = {
+  neovim = {
+    window = {
+      no_code_window = "tab",   -- if no code window exists: "tab"|"split"|"vsplit"|"replace"
+      focus = "file",           -- after open/navigate: "file" (go to it) | "chat" (stay)
+      reuse_visible = true,     -- reuse a window already showing the file
+      ignore_filetypes = { "codecompanion", "neo-tree", ... },  -- what counts as "not code"
+      ignore_buftypes = { "nofile", "prompt", "terminal", "quickfix", "help" },
+    },
+  },
+}
+```
+
 ## Safety & permissions
 
 Who approves a tool call depends on how the agent is connected:
@@ -157,8 +178,9 @@ You're using a directly-configured agent with multiple (or zero) editors connect
 through CodeCompanion binds your editor automatically, avoiding this.)
 
 **An edit didn't land where expected.**
-"Current buffer" resolution is best-effort for in-process chats (the chat window isn't your
-code). Prefer passing an explicit `buffer` id, or `open_file` first.
+The default buffer is the one in your code window (the first non-chat/tree/terminal window).
+With multiple code splits it picks the first — prefer passing an explicit `buffer` id, or
+`open_file` first. See *Where things open* above to tune what counts as a code window.
 
 For the architecture behind all this (the back-channel, instance/token association, restart
 recovery), see the design record in the repository (`docs/designs/native-neovim-server.md`).

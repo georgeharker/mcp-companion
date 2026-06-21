@@ -2,6 +2,7 @@
 --- @module mcp_companion.native.neovim.buffers
 
 local util = require("mcp_companion.native.util")
+local winpick = require("mcp_companion.native.winpick")
 
 --- Read a buffer's lines (0-based exclusive end via nvim API; we expose 1-based).
 --- @param buf integer
@@ -67,11 +68,15 @@ M.tools = {
   {
     name = "get_cursor",
     tier = "read",
-    description = "Get the cursor position {buffer, line (1-based), col (0-based)}.",
+    description = "Get the cursor position {buffer, line (1-based), col (0-based)} in the "
+      .. "user's code window (not a chat/tree window).",
     inputSchema = { type = "object", properties = {} },
-    handler = function(_args, ctx)
-      local buf = util.resolve_buf({}, ctx)
-      local win = util.win_for_buf(buf) or 0
+    handler = function(_args, _ctx)
+      local win = winpick.code_win()
+      if not win then
+        return util.err("no code window is open")
+      end
+      local buf = vim.api.nvim_win_get_buf(win)
       local pos = vim.api.nvim_win_get_cursor(win)
       return util.json({ buffer = buf, line = pos[1], col = pos[2] })
     end,
@@ -101,7 +106,9 @@ M.tools = {
   {
     name = "open_file",
     tier = "navigate",
-    description = "Open (or focus) a file in a window and optionally jump to a line.",
+    description = "Open (or focus) a file in the user's code window and optionally jump to a "
+      .. "line. Never opens over a chat/tree/terminal window; opens a new tab if no code "
+      .. "window exists (configurable via native_servers.neovim.window).",
     inputSchema = {
       type = "object",
       properties = {
@@ -114,12 +121,12 @@ M.tools = {
       if not args.path or args.path == "" then
         return util.err("open_file requires 'path'")
       end
-      vim.cmd.edit(vim.fn.fnameescape(args.path))
-      local buf = vim.api.nvim_get_current_buf()
-      if args.line then
-        pcall(vim.api.nvim_win_set_cursor, 0, { args.line, 0 })
+      local win, err = winpick.open(args.path, args.line)
+      if not win then
+        return util.err("open_file failed: " .. tostring(err))
       end
-      return util.json({ buffer = buf, path = vim.api.nvim_buf_get_name(buf) })
+      local buf = vim.api.nvim_win_get_buf(win)
+      return util.json({ buffer = buf, window = win, path = vim.api.nvim_buf_get_name(buf) })
     end,
   },
 
@@ -140,13 +147,24 @@ M.tools = {
       local buf = util.resolve_buf(args, ctx)
       local win = util.win_for_buf(buf)
       if not win then
-        return util.err("buffer " .. buf .. " is not visible in any window")
+        -- Not visible — reveal it in the code window (never a chat window).
+        local cw = winpick.code_win()
+        if cw then
+          local ok = pcall(function()
+            vim.api.nvim_win_call(cw, function() vim.api.nvim_set_current_buf(buf) end)
+          end)
+          if ok then win = cw end
+        end
+      end
+      if not win then
+        return util.err("buffer " .. buf .. " is not visible and no code window is open")
       end
       local ok, e = pcall(vim.api.nvim_win_set_cursor, win, { args.line, args.col or 0 })
       if not ok then
         return util.err("set_cursor failed: " .. tostring(e))
       end
-      return util.json({ buffer = buf, line = args.line, col = args.col or 0 })
+      winpick.maybe_focus(win)
+      return util.json({ buffer = buf, window = win, line = args.line, col = args.col or 0 })
     end,
   },
 
