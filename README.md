@@ -540,6 +540,43 @@ require("codecompanion").setup({
 })
 ```
 
+### Bridge runtime (Python venv)
+
+The Python bridge runs from a venv. On `setup()` the plugin **ensures it's installed**
+via `uv` if it isn't already (`uv venv <target>` + `uv pip install -e <plugin>/bridge`).
+This is async, idempotent, and a no-op once installed — so the `build = "cd bridge && uv
+sync --frozen"` step above is now **optional**.
+
+**Where it installs:**
+
+- **Default (unset `bridge.venv`):** a **plugin-local** venv at `<plugin>/bridge/.venv` —
+  self-contained, nothing leaks into your environment.
+- **Set `bridge.venv = "~/.venv"`** (or any path): install/run from **that** venv, so it
+  can be **shared** with other clients (see below). A user-set venv must **already exist** —
+  the plugin only `uv pip install`s into it (additive) and will **never** `uv venv` (wipe) a
+  venv it doesn't own.
+
+`bridge.python_cmd` resolution order: an explicit custom path → the configured `venv` (once
+the bridge is installed there) → the plugin-local `bridge/.venv` → `python3`.
+
+```lua
+require("mcp_companion").setup({
+    bridge = {
+        -- venv = "~/.venv",               -- opt in to a shared venv (default: plugin-local)
+        -- python_cmd = "/path/to/python", -- pin a python and skip auto-install entirely
+    },
+})
+```
+
+Commands: `:MCPInstall` installs/refreshes into the target venv (`:MCPInstall!` forces a
+reinstall; `:MCPInstall /path/to/venv` targets a specific venv).
+
+**Sharing the bridge with standalone Claude Code.** Only relevant if you opt into a shared
+`bridge.venv`. Put its `bin/` on `PATH` (or `uv tool install <plugin>/bridge` for a global
+`mcp-bridge`), and the [`claude-mcp-bridge`](https://github.com/georgeharker/claude-mcp-bridge)
+plugin will find `mcp-bridge` directly — Neovim and standalone Claude then share one bridge
+process.
+
 ### Features
 
 #### MCP tools as CC tools

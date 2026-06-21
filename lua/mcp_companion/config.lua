@@ -85,6 +85,16 @@ M.defaults = {
     host = "127.0.0.1",
     idle_timeout = "30m",
     python_cmd = "python3",
+    -- Optional venv to install/run the bridge from. Unset (default): a
+    -- plugin-local venv (<plugin>/bridge/.venv) is created and used —
+    -- self-contained. Set a shared venv to let other clients reuse the install
+    -- (put its bin/ on PATH so the claude-mcp-bridge plugin finds `mcp-bridge`).
+    -- A user-set venv must already exist — the plugin only `uv pip install`s
+    -- into it (additive) and will never `uv venv` (wipe) a venv it doesn't own:
+    --   venv = "~/.venv"
+    -- Either way the bridge is ensured-installed on start via uv, unless
+    -- `python_cmd` is a custom path.
+    venv = nil,
     startup_timeout = 30,
     request_timeout = 60,
     token_key = nil,
@@ -158,15 +168,28 @@ local function _plugin_dir()
   return nil
 end
 
---- Resolve bridge python command (prefer plugin-local venv)
+--- Resolve bridge python command.
+--- Priority: explicit user path → configured `venv` (if the bridge is installed
+--- there) → plugin-local `bridge/.venv` (legacy build step) → `python3`.
 --- @param user_cmd? string User-specified python command
+--- @param venv? string Configured venv (config.bridge.venv)
 --- @return string python_cmd
-local function _resolve_python_cmd(user_cmd)
+local function _resolve_python_cmd(user_cmd, venv)
   if user_cmd and user_cmd ~= "python3" then
     return user_cmd -- user explicitly set a custom path
   end
 
-  -- Look for plugin-local venv (created by build step)
+  -- Configured venv, only if the bridge is actually installed there (the
+  -- `mcp-bridge` console script is the install marker). install.ensure() puts
+  -- it there on start; until then we fall through to the plugin-local venv.
+  if venv and venv ~= "" then
+    local vpath = vim.fn.expand(venv)
+    if vim.fn.executable(vpath .. "/bin/mcp-bridge") == 1 then
+      return vpath .. "/bin/python"
+    end
+  end
+
+  -- Look for plugin-local venv (created by a build step)
   local root = _plugin_dir()
   if root then
     local venv_python = root .. "/bridge/.venv/bin/python"
@@ -242,8 +265,12 @@ end
 function M.setup(opts)
   _config = vim.tbl_deep_extend("force", {}, M.defaults, opts or {})
 
-  -- Resolve python command (prefer plugin-local venv)
-  _config.bridge.python_cmd = _resolve_python_cmd(_config.bridge.python_cmd)
+  -- Did the user pin a custom python? (before we auto-resolve it to a venv path)
+  local user_py = opts and opts.bridge and opts.bridge.python_cmd
+  _config.bridge._custom_python = user_py ~= nil and user_py ~= "python3"
+
+  -- Resolve python command (prefer configured venv, then plugin-local venv)
+  _config.bridge.python_cmd = _resolve_python_cmd(_config.bridge.python_cmd, _config.bridge.venv)
 
   -- Auto-detect config path if not set
   if not _config.bridge.config then
@@ -278,6 +305,23 @@ end
 function M.bridge_url()
   local cfg = M.get()
   return string.format("http://%s:%d", cfg.bridge.host, cfg.bridge.port)
+end
+
+--- Plugin root directory (contains lua/ and bridge/).
+--- @return string|nil
+function M.plugin_dir()
+  return _plugin_dir()
+end
+
+--- Re-resolve bridge.python_cmd (e.g. after install.ensure() populates the venv).
+--- @return string python_cmd
+function M.refresh_python_cmd()
+  if not _config then return "python3" end
+  -- Re-run from the *original* intent: keep a user-pinned python; otherwise
+  -- re-resolve from scratch ("python3") so a freshly-installed venv is picked.
+  local user = _config.bridge._custom_python and _config.bridge.python_cmd or "python3"
+  _config.bridge.python_cmd = _resolve_python_cmd(user, _config.bridge.venv)
+  return _config.bridge.python_cmd
 end
 
 return M
