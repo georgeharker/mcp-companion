@@ -276,6 +276,63 @@ class SharedServerManager:
         await self._stop_one(binary, ss.name)
         self._active.remove(ss.name)
 
+    async def restart(self, server_name: str) -> bool:
+        """Hard-restart the sharedserver backing *server_name*.
+
+        Unlike ``ensure_stopped`` + ``ensure_started`` (which decrement/increment
+        a refcount and therefore re-attach to the *same* still-running process
+        within its grace period), this stops the backing process via
+        ``sharedserver admin stop --force`` (graceful SIGTERM, then SIGKILL
+        fallback) — clearing all sharedserver state — then starts a fresh one
+        with ``use`` + health-poll.
+
+        Returns ``True`` if a sharedserver-backed process was restarted, ``False``
+        if *server_name* has no sharedserver (caller handles the plain case).
+        """
+        ss = self._config.resolve_shared_server(server_name)
+        if ss is None:
+            return False
+        try:
+            binary = self._get_binary()
+        except FileNotFoundError as exc:
+            logger.warning("Cannot restart '%s': %s", server_name, exc)
+            return False
+
+        # Stop the backing process (graceful, force fallback) and clear state.
+        await self._stop_force(binary, ss.name)
+        if ss.name in self._active:
+            self._active.remove(ss.name)
+
+        # Respawn from scratch (use + health-poll re-establishes our reference).
+        srv = self._config.servers.get(server_name)
+        await self._start_one(server_name, ss, srv.url if srv else None)
+        return True
+
+    async def _stop_force(self, binary: str, name: str) -> None:
+        """``sharedserver admin stop --force`` — graceful, then SIGKILL fallback.
+
+        A non-zero exit (e.g. "server is not running") is logged and ignored:
+        the goal is simply to ensure the old process is gone before respawning.
+        """
+        cmd = [binary, "admin", "stop", "--force", name]
+        logger.warning("sharedserver admin stop --force '%s'", name)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode != 0:
+                logger.info(
+                    "sharedserver admin stop '%s' exited %s (continuing): %s",
+                    name,
+                    proc.returncode,
+                    stderr.decode().strip() if stderr else "",
+                )
+        except (asyncio.TimeoutError, OSError) as exc:
+            logger.warning("sharedserver admin stop '%s' failed: %s", name, exc)
+
     async def stop_all(self) -> None:
         """Call ``sharedserver unuse`` for every server we started."""
         if not self._active:

@@ -6,7 +6,7 @@ import logging
 
 from fastmcp import Context, FastMCP
 
-from mcp_bridge.config import BridgeConfig, ServerStatusInfo
+from mcp_bridge.config import BridgeConfig, ServerConfig, ServerStatusInfo
 from mcp_bridge.connections import ConnectionManager
 from mcp_bridge.sharedserver import SharedServerManager
 
@@ -150,6 +150,209 @@ def register_meta_tools(
         except Exception as e:
             logger.exception("Failed to unmount server '%s' on disable", server_name)
             return f"Server '{server_name}' disabled but failed to unmount: {e}"
+
+    async def _unmount_server(server_name: str) -> None:
+        """Tear down a server's connection, backing process, and providers.
+
+        Mirrors bridge__disable_server's teardown but does not touch the
+        ``disabled`` flag — the caller decides whether the server stays gone
+        (removed) or is re-mounted with a fresh definition (changed).
+        """
+        if conn_manager.has_connection(server_name):
+            await conn_manager.disconnect(server_name)
+        await ss_manager.ensure_stopped(server_name)
+
+        def _provider_matches(p: object) -> bool:
+            r = repr(p)
+            if f"namespace='{server_name}'" in r or f'namespace="{server_name}"' in r:
+                return True
+            return getattr(p, "_namespace", None) == server_name
+
+        bridge.providers = [p for p in bridge.providers if not _provider_matches(p)]
+
+    async def _mount_server(server_name: str, srv: ServerConfig) -> None:
+        """Start, connect, and mount a server. Mirrors bridge__enable_server."""
+        from mcp_bridge.server import _create_server_proxy
+
+        await ss_manager.ensure_started(server_name)
+        if conn_manager.is_http_server(srv):
+            if conn_manager.is_auth_failed(server_name):
+                conn_manager.reset_auth_failure(server_name)
+            if not conn_manager.has_connection(server_name):
+                conn_manager.register(config, server_name, srv)
+            await conn_manager.connect(config, server_name, srv)
+        proxy = _create_server_proxy(config, server_name, srv)
+        bridge.mount(proxy, namespace=server_name)
+
+    def _drop_providers(server_name: str) -> int:
+        """Remove all mounted providers for *server_name*'s namespace.
+
+        Returns the number removed. Does not touch connections or processes.
+        """
+        before = len(bridge.providers)
+
+        def _matches(p: object) -> bool:
+            r = repr(p)
+            if f"namespace='{server_name}'" in r or f'namespace="{server_name}"' in r:
+                return True
+            return getattr(p, "_namespace", None) == server_name
+
+        bridge.providers = [p for p in bridge.providers if not _matches(p)]
+        return before - len(bridge.providers)
+
+    @bridge.tool()
+    async def bridge__restart_server(server_name: str) -> str:
+        """Restart a single MCP server in place — ditch it and bring it back fresh.
+
+        This is a true restart, not a refcount bounce: for sharedserver-backed
+        servers the backing process is stopped (``sharedserver admin stop
+        --force``: graceful SIGTERM, SIGKILL fallback) and respawned, rather than
+        merely re-attaching to the same still-running process within its grace
+        period. For HTTP/SSE servers the persistent upstream connection is torn
+        down and re-opened; for plain stdio servers the FastMCP proxy is dropped
+        and recreated. Other servers are left untouched.
+
+        Use this when one server is wedged (hung, stale auth, crashed subprocess)
+        and you want to kick just that one without restarting the whole bridge.
+
+        Note: stopping a sharedserver-backed process clears its shared state, so
+        any *other* clients attached to the same shared server will also see it
+        bounce — that is inherent to a real restart.
+
+        Args:
+            server_name: Name of the server to restart.
+
+        Returns:
+            Status message.
+        """
+        if server_name not in config.servers:
+            return f"Error: Server '{server_name}' not found"
+        srv = config.servers[server_name]
+        if srv.disabled:
+            return (
+                f"Server '{server_name}' is disabled — use bridge__enable_server "
+                "to bring it up instead of restarting"
+            )
+
+        from mcp_bridge.server import invalidate_tool_cache
+
+        # 1. Tear down the bridge-side connection + mounted providers. We do NOT
+        #    call ss_manager.ensure_stopped here — that decrements the refcount
+        #    (grace-period reattach). The hard process stop happens in step 2.
+        if conn_manager.is_http_server(srv) and conn_manager.has_connection(server_name):
+            try:
+                await conn_manager.disconnect(server_name)
+            except Exception:
+                logger.exception("restart: failed to disconnect '%s'", server_name)
+        removed = _drop_providers(server_name)
+
+        # 2. Hard-restart the backing process (no-op for non-sharedserver servers).
+        restarted_proc = False
+        try:
+            restarted_proc = await ss_manager.restart(server_name)
+        except Exception as e:
+            logger.exception("restart: failed to restart backing process for '%s'", server_name)
+            return f"Server '{server_name}': failed to restart backing process: {e}"
+
+        # 3. Re-establish the connection and remount the proxy.
+        try:
+            await _mount_server(server_name, srv)
+        except Exception as e:
+            invalidate_tool_cache()
+            logger.exception("restart: failed to remount '%s'", server_name)
+            return f"Server '{server_name}': backing process restarted but remount failed: {e}"
+
+        invalidate_tool_cache()
+        proc_note = "process restarted" if restarted_proc else "connection re-opened"
+        summary = (
+            f"Server '{server_name}' restarted ({proc_note}; "
+            f"{removed} provider(s) replaced)"
+        )
+        logger.info(summary)
+        return summary
+
+    @bridge.tool()
+    async def bridge__reload_config() -> str:
+        """Re-read the config file and apply server changes without a restart.
+
+        Diffs the on-disk config against the running config and applies the
+        minimum work: servers added to the file are mounted (if enabled),
+        removed servers are unmounted, and servers whose definition changed
+        (including a toggled ``disabled`` flag) are remounted. Servers that are
+        byte-for-byte unchanged keep their existing connection untouched.
+
+        Reloads ``servers``, ``sharedServers``, and ``oauth`` from disk by
+        mutating the live config object in place, so all holders (tool filter,
+        health endpoint, meta-tools) see the new values.
+
+        Returns:
+            A summary of what changed.
+        """
+        from mcp_bridge.server import invalidate_tool_cache
+
+        try:
+            new_cfg = BridgeConfig.load(config.config_path)
+        except Exception as e:
+            logger.exception("reload_config: failed to read %s", config.config_path)
+            return f"Error: failed to read config '{config.config_path}': {e}"
+
+        old_servers = dict(config.servers)
+        new_servers = new_cfg.servers
+
+        added = set(new_servers) - set(old_servers)
+        removed = set(old_servers) - set(new_servers)
+        changed = {
+            name
+            for name in set(old_servers) & set(new_servers)
+            if old_servers[name] != new_servers[name]
+        }
+
+        if not (added or removed or changed):
+            return "No config changes detected."
+
+        # 1) Tear down removed + changed servers while the OLD config is still
+        #    live, so sharedServer / connection lookups resolve correctly.
+        for name in removed | changed:
+            try:
+                await _unmount_server(name)
+            except Exception:
+                logger.exception("reload_config: failed to unmount '%s'", name)
+
+        # 2) Swap in the new config in place (same object — preserves all the
+        #    references handed to meta-tools, the lifespan, /health, and the
+        #    _bridge_config global used for tool filtering).
+        config.servers = new_cfg.servers
+        config.shared_servers = new_cfg.shared_servers
+        config.oauth = new_cfg.oauth
+
+        # 3) Mount added + changed servers that are enabled, now reading the
+        #    fresh definitions from the swapped-in config.
+        mounted: list[str] = []
+        failed: list[str] = []
+        for name in added | changed:
+            srv = new_servers[name]
+            if srv.disabled:
+                continue
+            try:
+                await _mount_server(name, srv)
+                mounted.append(name)
+            except Exception as e:
+                failed.append(f"{name} ({e})")
+                logger.exception("reload_config: failed to mount '%s'", name)
+
+        invalidate_tool_cache()
+
+        parts = [
+            f"added={sorted(added)}",
+            f"removed={sorted(removed)}",
+            f"changed={sorted(changed)}",
+            f"mounted={sorted(mounted)}",
+        ]
+        if failed:
+            parts.append(f"failed={failed}")
+        summary = "Config reloaded: " + ", ".join(parts)
+        logger.info(summary)
+        return summary
 
     @bridge.tool()
     async def bridge__session_disable_server(
