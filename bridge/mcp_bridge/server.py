@@ -878,10 +878,16 @@ def create_bridge(
 
     * Every enabled server is **mounted immediately** (proxy created).
     * HTTP/SSE servers are registered with the ``ConnectionManager``.
-    * ``connect_all()`` opens persistent connections and **blocks** until
-      every server has either connected or failed.  This guarantees that
-      by the time the bridge serves its first request, no OAuth race
-      conditions exist.
+    * ``connect_all()`` opens persistent connections in **background tasks
+      and returns immediately** — it does not wait for them to finish.  The
+      bridge starts serving right away so that servers needing OAuth (which
+      may block on a browser flow) don't hold up the rest.  Their tools
+      appear once the connection succeeds: each ``on_connected`` callback
+      invalidates the tool cache and emits ``notifications/tools/list_changed``
+      so clients re-fetch and pick up the newly available tools.
+    * Per-chat *isolated OAuth* servers are the exception: session creation
+      gates on the primer's first connect attempt via ``wait_ready()``
+      (60s timeout) before the session is opened.
     * If an OAuth server fails authentication, it is marked
       ``_auth_failed`` and the factory raises ``AuthenticationError``
       (not retried by ``RetryMiddleware``).
