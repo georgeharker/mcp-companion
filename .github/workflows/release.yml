@@ -1,0 +1,60 @@
+name: Release (mcp-bridge)
+
+# Publishes the `mcp-bridge` package (in bridge/) to PyPI when a tag like
+#   mcp-bridge-v0.1.0
+# is pushed. The `mcp-bridge-v*` prefix is deliberate: this is a monorepo, and the bare `v*`
+# tag space is already used by docs-on-tag.yml — keep release tags namespaced.
+#
+#   git tag mcp-bridge-v0.1.0 && git push origin mcp-bridge-v0.1.0
+#
+# Auth — pick one in the publish job below:
+#   A) Trusted Publishing (OIDC) — DEFAULT, no secrets. PyPI setup at
+#      https://pypi.org/manage/account/publishing/ (pending publisher):
+#         PyPI project:  mcp-bridge
+#         owner/repo:    georgeharker/mcp-companion
+#         workflow:      release.yml
+#         environment:   pypi
+#   B) API token — set repo secret PYPI_API_TOKEN and uncomment the `password:` line.
+#
+# Also create a GitHub environment named "pypi" (Settings → Environments).
+
+on:
+  push:
+    tags: ["mcp-bridge-v*"]
+
+defaults:
+  run:
+    working-directory: bridge
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Build sdist + wheel
+        run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: bridge/dist/   # path is relative to the repo root, not working-directory
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # required for Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Option A (trusted publishing): leave `password` unset — OIDC is used automatically.
+          # Option B (API token): uncomment and set the PYPI_API_TOKEN secret.
+          # password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: true

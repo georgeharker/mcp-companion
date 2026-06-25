@@ -1,0 +1,35 @@
+name: CI (mcp-bridge)
+
+on:
+  push:
+    branches: [main]
+    paths: ["bridge/**", ".github/workflows/ci.yml"]
+  pull_request:
+    paths: ["bridge/**", ".github/workflows/ci.yml"]
+
+defaults:
+  run:
+    working-directory: bridge
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install (project + dev group, from uv.lock)
+        run: uv sync
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Types (mypy)
+        run: uv run mypy mcp_bridge
+
+      - name: Tests (pytest)
+        run: uv run pytest -q
