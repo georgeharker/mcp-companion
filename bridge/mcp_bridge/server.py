@@ -17,18 +17,19 @@ import mcp.types as mt
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server import create_proxy
-from fastmcp.server.providers.proxy import FastMCPProxy
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.middleware.error_handling import (
     ErrorHandlingMiddleware,
     RetryMiddleware,
 )
+from fastmcp.server.providers.proxy import FastMCPProxy
 from fastmcp.tools import Tool
 from fastmcp.tools.tool import ToolResult
 from mcp.server.session import ServerSession
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from mcp_bridge import nvim_proxy
 from mcp_bridge.auth import (
     build_auth,
     clear_oauth_cache,
@@ -43,7 +44,6 @@ from mcp_bridge.config import (
     _interpolate_dict,  # noqa: PLC2701
     _interpolate_str,  # noqa: PLC2701
 )
-from mcp_bridge import nvim_proxy
 from mcp_bridge.connections import AuthenticationError, ConnectionManager
 from mcp_bridge.sharedserver import SharedServerManager
 
@@ -1307,8 +1307,13 @@ def create_bridge(
             logger.info("REST token filter: token=%s session=%s disabled=%s",
                         token, session_id,
                         sorted(_session_disabled.get(session_id, set())))
-            return JSONResponse({"token": token, "session_id": session_id,
-                                 "disabled_servers": sorted(_session_disabled.get(session_id, set()))})
+            return JSONResponse(
+                {
+                    "token": token,
+                    "session_id": session_id,
+                    "disabled_servers": sorted(_session_disabled.get(session_id, set())),
+                }
+            )
 
         # Session not yet connected — store as pending
         current = set(_pending_token_filters.get(token, set()))

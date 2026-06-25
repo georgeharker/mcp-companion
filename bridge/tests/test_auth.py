@@ -12,14 +12,13 @@ from mcp_bridge.auth import (
     _NETWORK_ERROR_GRACE_SECONDS,
     _REFRESH_MARGIN_SECONDS,
     _WAKE_GAP_SECONDS,
+    _BearerAuth,
+    _is_network_error,
     _ProbeOutcome,
     _RefreshOutcome,
-    _is_network_error,
-    _BearerAuth,
     build_auth,
     create_encrypted_store,
 )
-
 
 # ── create_encrypted_store ─────────────────────────────────────────
 
@@ -71,8 +70,8 @@ class TestEncryptedStore:
     def test_derives_encryption_key_from_machine_id(self, tmp_path: Path) -> None:
         """Encryption key is derived deterministically from machine ID + username."""
         # Create two stores - they should use the same derived key
-        store1 = create_encrypted_store(tmp_path / "srv1")
-        store2 = create_encrypted_store(tmp_path / "srv2")
+        create_encrypted_store(tmp_path / "srv1")
+        create_encrypted_store(tmp_path / "srv2")
         # No .key file should be created (key is derived, not stored)
         key_file = tmp_path / ".key"
         assert not key_file.exists()
@@ -168,7 +167,7 @@ class TestBuildAuth:
 
     def test_oauth_uses_encrypted_storage(self, tmp_path: Path) -> None:
         """OAuth provider is configured with encrypted storage at the right path."""
-        result = build_auth(
+        build_auth(
             "srv",
             auth_config="oauth",
             server_url="http://example.com/mcp",
@@ -1094,7 +1093,6 @@ class TestUpstream401Suppression:
         self, tmp_path: Path
     ) -> None:
         """Multi-AS PRM with both same-host and external entries → external wins."""
-        from urllib.parse import urlparse
 
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
@@ -1164,6 +1162,7 @@ class TestUpstream401Suppression:
     async def test_non_401_lets_sdk_flow_complete(self, tmp_path: Path) -> None:
         """A 200 (or other non-401) must allow the SDK flow to finish normally."""
         import time
+
         import fastmcp.client.auth.oauth as fastmcp_oauth_mod
 
         oauth = self._make_oauth(tmp_path)

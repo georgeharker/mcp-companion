@@ -15,8 +15,8 @@ and lost when the bridge restarts.
 from __future__ import annotations
 
 import asyncio
+import enum
 import getpass
-import hashlib
 import logging
 import os
 import platform
@@ -27,21 +27,12 @@ from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import anyio
-import enum
 import httpx
 from cryptography.fernet import Fernet
 from fastmcp.client.auth import OAuth
 from fastmcp.client.auth.oauth import TokenStorageAdapter
-from fastmcp.client.oauth_callback import OAuthCallbackResult, create_oauth_callback_server
+from fastmcp.client.oauth_callback import OAuthCallbackResult
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
-from mcp.shared.auth import OAuthToken
-from mcp.client.auth.utils import (
-    build_oauth_authorization_server_metadata_discovery_urls,
-    build_protected_resource_metadata_discovery_urls,
-    create_oauth_metadata_request,
-    handle_auth_metadata_response,
-    handle_protected_resource_response,
-)
 from key_value.aio.protocols import AsyncKeyValue
 from key_value.aio.stores.filetree import (
     FileTreeStore,
@@ -50,6 +41,14 @@ from key_value.aio.stores.filetree import (
 )
 from key_value.aio.stores.memory import MemoryStore
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+from mcp.client.auth.utils import (
+    build_oauth_authorization_server_metadata_discovery_urls,
+    build_protected_resource_metadata_discovery_urls,
+    create_oauth_metadata_request,
+    handle_auth_metadata_response,
+    handle_protected_resource_response,
+)
+from mcp.shared.auth import OAuthToken
 
 logger = logging.getLogger("mcp-bridge")
 
@@ -302,7 +301,9 @@ class _RefreshTokenOAuth(OAuth):
     _active_flows: ClassVar[dict[int, tuple[anyio.Event, OAuthCallbackResult]]] = {}
     _flow_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
 
-    def __init__(self, *args: Any, _sidecar_store: AsyncKeyValue | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, _sidecar_store: AsyncKeyValue | None = None, **kwargs: Any
+    ) -> None:
         super().__init__(*args, **kwargs)
         # Replace FastMCP's plain TokenStorageAdapter with our expiry-aware
         # subclass so that set_tokens/get_tokens handle absolute expiry
@@ -738,7 +739,9 @@ class _RefreshTokenOAuth(OAuth):
         remaining = ctx.token_expiry_time - now
         last_seen = getattr(self, "_last_seen_at", None)
         first_request = last_seen is None
-        wake_detected = first_request or (last_seen is not None and (now - last_seen) > _WAKE_GAP_SECONDS)
+        wake_detected = first_request or (
+            last_seen is not None and (now - last_seen) > _WAKE_GAP_SECONDS
+        )
 
         if not wake_detected and remaining >= _REFRESH_MARGIN_SECONDS:
             return

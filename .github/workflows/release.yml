@@ -1,11 +1,10 @@
 name: Release (mcp-bridge)
 
-# Publishes the `mcp-bridge` package (in bridge/) to PyPI when a tag like
-#   mcp-bridge-v0.1.0
-# is pushed. The `mcp-bridge-v*` prefix is deliberate: this is a monorepo, and the bare `v*`
-# tag space is already used by docs-on-tag.yml — keep release tags namespaced.
+# Publishes the `mcp-bridge` package (in bridge/) to PyPI when a version tag is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
 #
-#   git tag mcp-bridge-v0.1.0 && git push origin mcp-bridge-v0.1.0
+# Note: this is a monorepo and docs-on-tag.yml also fires on `v*` (it refreshes docs and is
+# inert unless DOCS_SSH_DEST is configured) — both running on a release tag is intended.
 #
 # Auth — pick one in the publish job below:
 #   A) Trusted Publishing (OIDC) — DEFAULT, no secrets. PyPI setup at
@@ -20,7 +19,7 @@ name: Release (mcp-bridge)
 
 on:
   push:
-    tags: ["mcp-bridge-v*"]
+    tags: ["v*"]
 
 defaults:
   run:

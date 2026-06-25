@@ -13,11 +13,10 @@ from mcp_bridge.config import (
     OAuthConfig,
     ServerConfig,
     SharedServerConfig,
-    _interpolate_str,
     _interpolate_dict,
     _interpolate_list,
+    _interpolate_str,
 )
-
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
