@@ -901,6 +901,12 @@ require("mcp_companion").setup({
           file = true,                  -- true = default path, string = explicit path, false = disabled
         },
         token_in_url = false,           -- embed session token in URL path; see Troubleshooting below
+        -- Tri-state control of the bridge's JSON-schema (re)validation of proxied tool calls
+        -- (the upstream server already validates). nil = leave bridge default; false = force off;
+        -- true = force on. The meaningful win is output_validation = false, which removes the
+        -- redundant per-call output validation that is measurably slow for large structured responses.
+        output_validation = nil,        -- nil | false | true  (--[no-]output-validation)
+        input_validation = nil,         -- nil | false | true  (--[no-]input-validation)
     },
     global_env = {},                    -- extra environment variables passed to the bridge process
     log = {

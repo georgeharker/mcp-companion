@@ -43,43 +43,31 @@ logger = logging.getLogger("mcp-bridge")
 # where a new dict happens to land on a recycled id.
 _validator_cache: dict[int, tuple[object, Any]] = {}
 
-# When True, the proxy skips the SDK's input/output schema validation entirely.
-# The upstream server already validates both, so re-checking at the proxy is
-# redundant work on every tool call. Both off by default.
+# Tri-state control of the SDK's *output*-schema validation:
+#   None  → express no preference; the SDK default applies (validate whenever a
+#           tool declares an outputSchema).
+#   True  → force validation on (same effect as the default, stated explicitly).
+#   False → force validation off; the upstream server already validated its own
+#           structured output, so re-checking it at the proxy is redundant work
+#           on every tool call (measurably slow for large structured responses).
 #
-# Note: input validation is already off in the bridge by default
-# (fastmcp's strict_input_validation defaults to False, so the SDK never runs
-# the input jsonschema.validate). The input flag is a hard override that keeps
-# it off even if strict input validation is otherwise enabled.
-_skip_input_validation = False
-_skip_output_validation = False
-
-# A permissive JSON schema (no constraints → matches any instance). Used as a
-# shared object so its cached validator is built exactly once.
-_ANY_SCHEMA: dict[str, Any] = {}
+# Input validation is *not* handled here — it is gated by fastmcp's
+# ``strict_input_validation`` (passed to the FastMCP constructor), which is the
+# only switch that can actually force the input jsonschema.validate on or off.
+_output_validation: bool | None = None
 
 # id(tool) -> (tool, modified-copy). We model_copy each cached Tool at most once
-# when input/output validation is skipped (cleared when a flag changes).
+# when output validation is forced off (cleared when the setting changes).
 _nulled_tool_cache: dict[int, tuple[object, Any]] = {}
 
 
-def set_skip_input_validation(skip: bool) -> None:
-    """Enable/disable skipping input-schema validation at the proxy."""
-    global _skip_input_validation
-    if skip != _skip_input_validation:
-        _skip_input_validation = skip
+def set_output_validation(value: bool | None) -> None:
+    """Set tri-state output-schema validation (None/True/False — see module docs)."""
+    global _output_validation
+    if value != _output_validation:
+        _output_validation = value
         _nulled_tool_cache.clear()
-        if skip:
-            logger.info("fastvalidate: input-schema validation disabled (proxy passthrough)")
-
-
-def set_skip_output_validation(skip: bool) -> None:
-    """Enable/disable skipping output-schema validation at the proxy."""
-    global _skip_output_validation
-    if skip != _skip_output_validation:
-        _skip_output_validation = skip
-        _nulled_tool_cache.clear()
-        if skip:
+        if value is False:
             logger.info("fastvalidate: output-schema validation disabled (proxy passthrough)")
 
 
@@ -157,32 +145,24 @@ def install() -> None:
     # via this module global; swapping it routes validation through the cache.
     setattr(_srv, "jsonschema", _JsonschemaShim())
 
-    # Wrap _get_cached_tool_definition so that, when validation is disabled, the
-    # Tool the handler validates against has its schema(s) neutralised — nulling
-    # outputSchema makes the SDK skip output validation altogether, and replacing
-    # inputSchema with a permissive schema makes input validation a no-op. This
-    # only affects the validation path; the client-facing tools/list response is
-    # built elsewhere and still carries the real schemas.
+    # Wrap _get_cached_tool_definition so that, when output validation is forced
+    # off, the Tool the handler validates against has no outputSchema — which
+    # makes the SDK skip output validation altogether. This only affects the
+    # validation path; the client-facing tools/list response is built elsewhere
+    # and still carries the real outputSchema.
     _orig_get_cached = _srv.Server._get_cached_tool_definition
 
     async def _get_cached_tool_definition(self: Any, tool_name: str) -> Any:
         tool = await _orig_get_cached(self, tool_name)
-        if tool is None:
-            return tool
-        update: dict[str, Any] = {}
-        if _skip_output_validation and tool.outputSchema is not None:
-            update["outputSchema"] = None
-        if _skip_input_validation and tool.inputSchema is not _ANY_SCHEMA:
-            update["inputSchema"] = _ANY_SCHEMA
-        if not update:
+        if _output_validation is not False or tool is None or tool.outputSchema is None:
             return tool
         key = id(tool)
         cached = _nulled_tool_cache.get(key)
         if cached is not None and cached[0] is tool:
             return cached[1]
-        modified = tool.model_copy(update=update)
-        _nulled_tool_cache[key] = (tool, modified)
-        return modified
+        nulled = tool.model_copy(update={"outputSchema": None})
+        _nulled_tool_cache[key] = (tool, nulled)
+        return nulled
 
     _srv.Server._get_cached_tool_definition = _get_cached_tool_definition  # type: ignore[method-assign]
 
