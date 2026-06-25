@@ -325,6 +325,10 @@ local function build_status_view(state)
     { " refresh  ", "Comment" },
     { "R", "Special" },
     { " restart  ", "Comment" },
+    { "x", "Special" },
+    { " restart-srv  ", "Comment" },
+    { "c", "Special" },
+    { " reload-cfg  ", "Comment" },
     { "l", "Special" },
     { " logs  ", "Comment" },
     { "<CR>", "Special" },
@@ -477,6 +481,24 @@ function M.open()
     bridge.restart()
   end, "Restart bridge")
 
+  map("c", function()
+    local bridge_mod = require("mcp_companion.bridge")
+    local client = bridge_mod.client
+    if not client or not client.connected then
+      vim.notify("[mcp-companion] Bridge not connected", vim.log.levels.WARN)
+      return
+    end
+    vim.notify("[mcp-companion] Reloading bridge config...", vim.log.levels.INFO)
+    client:reload_config(function(err, result)
+      if err then
+        vim.notify(string.format("[mcp-companion] Reload failed: %s", tostring(err)), vim.log.levels.ERROR)
+      else
+        vim.notify(string.format("[mcp-companion] %s", result or "config reloaded"), vim.log.levels.INFO)
+        M._fetch_and_render()
+      end
+    end)
+  end, "Reload bridge config")
+
   map("l", function()
     _view = "logs"
     M.render()
@@ -569,6 +591,31 @@ function M.open()
     -- Re-render so the [project off] indicator updates immediately.
     M.render()
   end, "Toggle server in .mcp-companion.json")
+
+  map("x", function()
+    local cursor = vim.api.nvim_win_get_cursor(_win)
+    local line_idx = cursor[1]
+    local line_data = _lines[line_idx]
+    if not line_data or not line_data.server_name then
+      return
+    end
+    local srv_name = line_data.server_name
+    if srv_name == "_bridge" then return end
+    local bridge_mod = require("mcp_companion.bridge")
+    local client = bridge_mod.client
+    if not client or not client.connected then
+      vim.notify("[mcp-companion] Bridge not connected", vim.log.levels.WARN)
+      return
+    end
+    vim.notify(string.format("[mcp-companion] Restarting %s...", srv_name), vim.log.levels.INFO)
+    client:restart_server(srv_name, function(err, result)
+      if err then
+        vim.notify(string.format("[mcp-companion] Restart failed: %s", tostring(err)), vim.log.levels.ERROR)
+      else
+        vim.notify(string.format("[mcp-companion] %s", result or "done"), vim.log.levels.INFO)
+      end
+    end)
+  end, "Restart server under cursor")
 
   map("S", function()
     local cursor = vim.api.nvim_win_get_cursor(_win)
