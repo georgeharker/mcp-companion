@@ -30,6 +30,37 @@ local function _fingerprint(servers)
     return tostring(#names) .. ":" .. table.concat(names, ",")
 end
 
+--- Normalize a tool parameters schema so downstream JSON encoding always
+--- produces a valid object schema for CodeCompanion/OpenAI-style tools.
+---
+--- Empty Lua tables are ambiguous and may be serialized as [] by some layers,
+--- which strict adapters reject for `function.parameters`. Treat empty/missing
+--- schemas as an object with no properties.
+---
+--- @param schema any
+--- @return table
+local function _normalize_parameters_schema(schema)
+    if type(schema) ~= "table" then
+        return { type = "object", properties = {} }
+    end
+
+    if next(schema) == nil then
+        return { type = "object", properties = {} }
+    end
+
+    local normalized = vim.deepcopy(schema)
+
+    if normalized.type == nil then
+        normalized.type = "object"
+    end
+
+    if normalized.type == "object" and normalized.properties == nil then
+        normalized.properties = {}
+    end
+
+    return normalized
+end
+
 --- Build the cmds handler for a bridge tool.
 --- CC calls cmds[i](self, action, cmd_opts) where self is the CodeCompanion.Tools
 --- object (self.chat is the active CC chat). action is the parsed tool input from
@@ -225,7 +256,9 @@ function M.register()
             local captured_display = display
             local captured_namespaced = namespaced
             local captured_description = tool.description or ("MCP tool: " .. display)
-            local captured_input_schema = tool.inputSchema or { type = "object", properties = {} }
+            local captured_input_schema = _normalize_parameters_schema(
+                tool.inputSchema
+            )
 
             server_tools[key] = {
                 description = captured_description,
@@ -352,7 +385,7 @@ function M.register_native()
             local key = tool._namespaced or (server.name .. "_" .. tool.name)
             local display = tool._display or tool.name
             local description = tool.description or ("Neovim tool: " .. display)
-            local input_schema = tool.inputSchema or { type = "object", properties = {} }
+            local input_schema = _normalize_parameters_schema(tool.inputSchema)
 
             server_tools[key] = {
                 description = description,
