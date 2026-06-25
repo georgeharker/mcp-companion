@@ -10,11 +10,11 @@ connect to it over HTTP. The Lua plugin layer adds Neovim-specific features:
 tool registration, editor context, slash commands, ACP forwarding, and a status
 UI.
 
-> ⚠️ **The combiner was renamed `mcp-bridge` → [`mcp-combiner`](./combiner/).** The Python package,
+> ⚠️ **The combiner was renamed `mcp-bridge` → [`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/combiner).** The Python package,
 > command, and import are now `mcp-combiner` / `mcp-combiner` / `mcp_combiner`; its admin tools are
 > `combiner__*`; config env vars are `MCP_COMBINER_*` (and `MCP_COMPANION_COMBINER_URL` →
 > `MCP_COMPANION_COMBINER_URL`). If you ran an earlier build, see
-> [`combiner/README.md`](./combiner/README.md) to migrate (reinstall + a one-off OAuth re-auth). The
+> [`combiner/README.md`](https://github.com/georgeharker/mcp-companion/blob/main/combiner/README.md) to migrate (reinstall + a one-off OAuth re-auth). The
 > `mcp-companion` repo and Neovim plugin keep their name.
 
 > 📖 Rendered documentation:
