@@ -104,13 +104,43 @@ def _instance_for_session(session_id: str | None) -> str | None:
     return instance_id
 
 
+def _normalize_tool_parameters(params: Any) -> dict[str, Any]:
+    """Return a strict JSON-schema object for tool parameters.
+
+    Some hosts/providers reject malformed schemas very aggressively. In
+    particular, empty or ambiguous values must never become [] where an
+    object schema is expected.
+    """
+    if not isinstance(params, dict) or not params:
+        return {"type": "object", "properties": {}}
+
+    out = dict(params)
+
+    if not isinstance(out.get("properties"), dict):
+        out["properties"] = {}
+
+    if "type" not in out or out["type"] is None:
+        out["type"] = "object"
+
+    if out["type"] == "object" and "properties" not in out:
+        out["properties"] = {}
+
+    if "required" in out and not isinstance(out["required"], list):
+        out.pop("required", None)
+
+    return out
+
+
 def _inject_instance_arg(params: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of an inputSchema with the optional nvim_instance arg added."""
-    out = dict(params) if isinstance(params, dict) else {"type": "object"}
+    out = _normalize_tool_parameters(params)
     props = dict(out.get("properties") or {})
-    props[_NVIM_INSTANCE_ARG] = {"type": "string", "description": _NVIM_INSTANCE_DESC}
+    props[_NVIM_INSTANCE_ARG] = {
+        "type": "string",
+        "description": _NVIM_INSTANCE_DESC,
+    }
     out["properties"] = props
-    out.setdefault("type", "object")
+    out["type"] = "object"
     return out
 
 
@@ -127,7 +157,9 @@ def _build_nvim_tools(manifest: dict[str, Any]) -> list[Tool]:
     out: list[Tool] = []
     server = manifest.get(_NVIM_SERVER) or {}
     for tool in server.get("tools", []):
-        params = tool.get("inputSchema") or {"type": "object", "properties": {}}
+        params = _normalize_tool_parameters(
+            tool.get("inputSchema") or {"type": "object", "properties": {}}
+        )
         out.append(
             FunctionTool(
                 fn=lambda: None,  # never called — handled in call_nvim_tool
