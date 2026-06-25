@@ -890,8 +890,16 @@ def create_bridge(
       (60s timeout) before the session is opened.
     * If an OAuth server fails authentication, it is marked
       ``_auth_failed`` and the factory raises ``AuthenticationError``
-      (not retried by ``RetryMiddleware``).
-    * The only way to retry is ``bridge__enable_server`` (manual toggle).
+      (not retried by ``RetryMiddleware``).  The auto-reconnect health
+      monitor skips auth-failed servers, so recovery is manual via one of
+      the meta-tools:
+        - ``bridge__enable_server`` — re-arm a disabled or auth-failed
+          server (clears the auth-failed flag and reconnects).
+        - ``bridge__restart_server`` — kick a single wedged server (stale
+          auth, hung, crashed subprocess): tears down + respawns just that
+          server's process/connection, no full bridge restart.
+        - ``bridge__reload_config`` — apply on-disk config changes without
+          a restart.
 
     CLI overrides (when provided) take precedence over the ``oauth`` section
     of the config file:

@@ -816,6 +816,8 @@ Agent: [calls todoist_get_tasks autonomously via bridge]
 |---|---|
 | `:MCPStatus` | Toggle the status floating window |
 | `:MCPRestart` | Restart the MCP bridge |
+| `:MCPRestartServer <name>` | Restart a single server (stops + respawns its backing process; no full bridge restart) |
+| `:MCPReload` | Re-read the config file and apply server changes without a restart |
 | `:MCPLog` | Open the log file in a buffer |
 | `:MCPToggleServer <name>` | Globally enable/disable a server |
 | `:MCPSaveProjectConfig [shortest\|allowed\|disabled]` | Snapshot the current chat session's MCP server visibility to `.mcp-companion.json` (see [Per-project defaults](#per-project-defaults-mcp-companionjson)) |
@@ -835,6 +837,8 @@ counts. Key bindings:
 | `S` | Toggle the server for **this chat session only** — equivalent to `/mcp-session` on the chat the status window was opened from |
 | `r` | Refresh from the bridge |
 | `R` | Restart the bridge |
+| `x` | Restart the server under the cursor (calls `bridge__restart_server`; respawns its backing process, no full bridge restart) |
+| `c` | Reload the bridge config from disk and apply server changes (calls `bridge__reload_config`; no restart) |
 | `l` / `s` | Switch to logs / status view |
 | `q` | Close the window |
 
