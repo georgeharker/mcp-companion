@@ -1,9 +1,9 @@
 """End-to-end test of both Phase 2 halves.
 
-Starts a real bridge subprocess and a real headless Neovim with the plugin.
+Starts a real combiner subprocess and a real headless Neovim with the plugin.
 The plugin's `channel.lua` opens its own socket and registers/binds itself with
-the bridge over REST. Then an MCP client connects to `/mcp/<token>` and calls a
-`neovim_*` tool, which the bridge routes back into the live editor.
+the combiner over REST. Then an MCP client connects to `/mcp/<token>` and calls a
+`neovim_*` tool, which the combiner routes back into the live editor.
 
 Exercises: channel.lua → /neovim/instances + /neovim/bind → NvimChannelManager
 → frozen manifest over the channel → ToolProcessingMiddleware injection +
@@ -30,7 +30,7 @@ from fastmcp import Client
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PLUGIN_ROOT = _REPO_ROOT  # rtp root (contains lua/)
-_BRIDGE_DIR = _REPO_ROOT / "bridge"
+_COMBINER_DIR = _REPO_ROOT / "combiner"
 _PORT = 9743
 _TOKEN = "abcdef01-2345-6789-abcd-ef0123456789"
 
@@ -48,27 +48,27 @@ async def _poll_health(timeout: float = 20.0) -> None:
             except Exception:
                 pass
             await asyncio.sleep(0.25)
-    raise TimeoutError("bridge did not become healthy")
+    raise TimeoutError("combiner did not become healthy")
 
 
 @pytest.fixture
-async def bridge_and_nvim() -> AsyncIterator[None]:
+async def combiner_and_nvim() -> AsyncIterator[None]:
     tmpdir = tempfile.mkdtemp(prefix="mcpc-e2e-")
     cfg_path = os.path.join(tmpdir, "servers.json")
     with open(cfg_path, "w") as f:
         json.dump({"mcpServers": {}}, f)  # no upstreams — keeps startup fast
 
-    bridge = subprocess.Popen(
-        [sys.executable, "-m", "mcp_bridge", "--config", cfg_path, "--port", str(_PORT)],
-        cwd=str(_BRIDGE_DIR),
+    combiner = subprocess.Popen(
+        [sys.executable, "-m", "mcp_combiner", "--config", cfg_path, "--port", str(_PORT)],
+        cwd=str(_COMBINER_DIR),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
     # Headless nvim: set up the plugin, seed a buffer, then register + bind over
-    # the channel. channel.start() opens its own socket and POSTs to the bridge.
+    # the channel. channel.start() opens its own socket and POSTs to the combiner.
     setup = (
-        f"lua require('mcp_companion.config').setup({{bridge={{port={_PORT},host='127.0.0.1'}}}})"
+        f"lua require('mcp_companion.config').setup({{combiner={{port={_PORT},host='127.0.0.1'}}}})"
     )
     native = "lua require('mcp_companion.native').setup({native_servers={neovim={enabled=true}}})"
     seed = "lua vim.api.nvim_buf_set_lines(0,0,-1,false,{'alpha','beta','gamma'})"
@@ -90,8 +90,8 @@ async def bridge_and_nvim() -> AsyncIterator[None]:
         yield None
     finally:
         nvim.terminate()
-        bridge.terminate()
-        for p in (nvim, bridge):
+        combiner.terminate()
+        for p in (nvim, combiner):
             try:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -114,9 +114,9 @@ async def test_tokenless_client_must_name_instance() -> None:
         json.dump({"mcpServers": {}}, f)
     sock = os.path.join(tmpdir, "nv.sock")
 
-    bridge = subprocess.Popen(
-        [sys.executable, "-m", "mcp_bridge", "--config", cfg, "--port", str(port)],
-        cwd=str(_BRIDGE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    combiner = subprocess.Popen(
+        [sys.executable, "-m", "mcp_combiner", "--config", cfg, "--port", str(port)],
+        cwd=str(_COMBINER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     nvim = subprocess.Popen(
         ["nvim", "--headless", "--noplugin", "-u", "NONE", "--listen", sock,
@@ -177,8 +177,8 @@ async def test_tokenless_client_must_name_instance() -> None:
             assert "alpha" in text
     finally:
         nvim.terminate()
-        bridge.terminate()
-        for p in (nvim, bridge):
+        combiner.terminate()
+        for p in (nvim, combiner):
             try:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -186,7 +186,7 @@ async def test_tokenless_client_must_name_instance() -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-async def test_agent_calls_neovim_tool_through_bridge(bridge_and_nvim: None) -> None:
+async def test_agent_calls_neovim_tool_through_combiner(combiner_and_nvim: None) -> None:
     url = f"http://127.0.0.1:{_PORT}/mcp/{_TOKEN}"
 
     async with Client(url) as client:
@@ -203,7 +203,7 @@ async def test_agent_calls_neovim_tool_through_bridge(bridge_and_nvim: None) -> 
         assert "neovim_list_buffers" in names, f"neovim tools not surfaced; saw {sorted(names)}"
         assert "neovim_read_buffer" in names
 
-        # Call back into the live editor through the bridge.
+        # Call back into the live editor through the combiner.
         result = await client.call_tool("neovim_read_buffer", {"buffer": 1})
         text = "".join(
             block.text for block in result.content if getattr(block, "type", None) == "text"

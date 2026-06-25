@@ -31,24 +31,24 @@ function M.setup(opts)
     end
   end
 
-  -- Check for config file — warn but don't block (bridge will error later)
-  if not config.get().bridge.config then
-    log.warn("No servers.json found. Create one or set bridge.config in setup()")
+  -- Check for config file — warn but don't block (combiner will error later)
+  if not config.get().combiner.config then
+    log.warn("No servers.json found. Create one or set combiner.config in setup()")
   end
 
-  -- Ensure the bridge is installed in the target venv (bridge.venv if set, else
-  -- the plugin-local bridge/.venv), unless the user pinned a custom python_cmd.
+  -- Ensure the combiner is installed in the target venv (combiner.venv if set, else
+  -- the plugin-local combiner/.venv), unless the user pinned a custom python_cmd.
   -- Async + idempotent (no-op if the current version is already installed); on
-  -- success we re-resolve python_cmd so the (later) bridge start prefers it.
-  if not config.get().bridge._custom_python then
+  -- success we re-resolve python_cmd so the (later) combiner start prefers it.
+  if not config.get().combiner._custom_python then
     require("mcp_companion.install").ensure(nil, function(ok, err, installed)
       if ok then
         config.refresh_python_cmd()
         if installed then
-          vim.notify("[mcp-companion] bridge installed", vim.log.levels.INFO)
+          vim.notify("[mcp-companion] combiner installed", vim.log.levels.INFO)
         end
       else
-        vim.notify("[mcp-companion] bridge install failed: " .. tostring(err), vim.log.levels.WARN)
+        vim.notify("[mcp-companion] combiner install failed: " .. tostring(err), vim.log.levels.WARN)
       end
     end)
   end
@@ -57,27 +57,27 @@ function M.setup(opts)
   local native = require("mcp_companion.native")
   native.setup(config.get())
 
-  -- Setup bridge lifecycle
-  local bridge = require("mcp_companion.bridge")
-  bridge.setup(config.get())
+  -- Setup combiner lifecycle
+  local combiner = require("mcp_companion.combiner")
+  combiner.setup(config.get())
 
   -- NOTE: CC extension registration is handled via CC's extensions config:
   --   extensions = { mcp_companion = { callback = "mcp_companion.cc", opts = {...} } }
   -- We do NOT call cc.register_extension() here — CC calls M.init(schema) on our module.
 
-  -- Open the Neovim back-channel and register with the bridge so external
+  -- Open the Neovim back-channel and register with the combiner so external
   -- agents can call `neovim_*` tools back into this instance. We reconcile via
-  -- channel.sync() (boot-id aware) on bridge connect AND on every SSE reconnect,
-  -- so a bridge *restart* (which wipes the bridge's registry) is recovered.
+  -- channel.sync() (boot-id aware) on combiner connect AND on every SSE reconnect,
+  -- so a combiner *restart* (which wipes the combiner's registry) is recovered.
   local channel = require("mcp_companion.native.channel")
   if channel.enabled() then
-    state.on("bridge_ready", function()
+    state.on("combiner_ready", function()
       channel.sync()
     end)
-    state.on("bridge_stream_connected", function()
+    state.on("combiner_stream_connected", function()
       channel.sync()
     end)
-    if state.get().bridge.status == "connected" then
+    if state.get().combiner.status == "connected" then
       channel.sync()
     end
   end
@@ -90,11 +90,11 @@ function M.setup(opts)
       pcall(function()
         require("mcp_companion.native.channel").deregister()
       end)
-      bridge.stop()
+      combiner.stop()
     end,
   })
 
-  -- Bridge is started by CC extension setup (cc/init.lua) when CodeCompanion loads,
+  -- Combiner is started by CC extension setup (cc/init.lua) when CodeCompanion loads,
   -- ensuring it's healthy before any ACP session is created.
   -- Manual start available via :MCPStart command.
 
@@ -105,16 +105,16 @@ function M.setup(opts)
   end, { desc = "Toggle MCP Companion status window" })
 
   vim.api.nvim_create_user_command("MCPRestart", function(args)
-    bridge.restart({ force = args.bang })
-  end, { bang = true, desc = "Restart MCP bridge (use ! to force when other clients attached)" })
+    combiner.restart({ force = args.bang })
+  end, { bang = true, desc = "Restart MCP combiner (use ! to force when other clients attached)" })
 
   vim.api.nvim_create_user_command("MCPInstall", function(args)
     local venv = args.args ~= "" and args.args or nil
-    vim.notify("[mcp-companion] installing bridge…", vim.log.levels.INFO)
+    vim.notify("[mcp-companion] installing combiner…", vim.log.levels.INFO)
     require("mcp_companion.install").ensure(venv, function(ok, err)
       if ok then
         require("mcp_companion.config").refresh_python_cmd()
-        vim.notify("[mcp-companion] bridge installed", vim.log.levels.INFO)
+        vim.notify("[mcp-companion] combiner installed", vim.log.levels.INFO)
       else
         vim.notify("[mcp-companion] install failed: " .. tostring(err), vim.log.levels.ERROR)
       end
@@ -122,7 +122,7 @@ function M.setup(opts)
   end, {
     nargs = "?",
     bang = true,
-    desc = "Install/refresh the Python bridge into a venv (default bridge.venv, else plugin-local bridge/.venv); ! forces reinstall",
+    desc = "Install/refresh the Python combiner into a venv (default combiner.venv, else plugin-local combiner/.venv); ! forces reinstall",
   })
 
   vim.api.nvim_create_user_command("MCPRestartServer", function(args)
@@ -131,9 +131,9 @@ function M.setup(opts)
       vim.notify("[mcp-companion] Usage: :MCPRestartServer <server_name>", vim.log.levels.WARN)
       return
     end
-    local client = bridge.client
+    local client = combiner.client
     if not client or not client.connected then
-      vim.notify("[mcp-companion] Bridge not connected", vim.log.levels.WARN)
+      vim.notify("[mcp-companion] Combiner not connected", vim.log.levels.WARN)
       return
     end
     vim.notify(string.format("[mcp-companion] Restarting %s...", server_name), vim.log.levels.INFO)
@@ -146,13 +146,13 @@ function M.setup(opts)
     end)
   end, {
     nargs = 1,
-    desc = "Restart a single MCP server (stops + respawns its backing process; no full bridge restart)",
+    desc = "Restart a single MCP server (stops + respawns its backing process; no full combiner restart)",
     complete = function()
       local srv_state = require("mcp_companion.state")
       local servers = srv_state.field("servers") or {}
       local names = {}
       for _, srv in ipairs(servers) do
-        if srv.name ~= "_bridge" then
+        if srv.name ~= "_combiner" then
           table.insert(names, srv.name)
         end
       end
@@ -161,12 +161,12 @@ function M.setup(opts)
   })
 
   vim.api.nvim_create_user_command("MCPReload", function()
-    local client = bridge.client
+    local client = combiner.client
     if not client or not client.connected then
-      vim.notify("[mcp-companion] Bridge not connected", vim.log.levels.WARN)
+      vim.notify("[mcp-companion] Combiner not connected", vim.log.levels.WARN)
       return
     end
-    vim.notify("[mcp-companion] Reloading bridge config...", vim.log.levels.INFO)
+    vim.notify("[mcp-companion] Reloading combiner config...", vim.log.levels.INFO)
     client:reload_config(function(err, result)
       if err then
         vim.notify(string.format("[mcp-companion] Reload failed: %s", tostring(err)), vim.log.levels.ERROR)
@@ -174,7 +174,7 @@ function M.setup(opts)
         vim.notify(string.format("[mcp-companion] %s", result or "config reloaded"), vim.log.levels.INFO)
       end
     end)
-  end, { desc = "Reload the bridge config file and apply server changes (no restart)" })
+  end, { desc = "Reload the combiner config file and apply server changes (no restart)" })
 
   vim.api.nvim_create_user_command("MCPLog", function()
     local log_path = log.get_log_path()
@@ -191,9 +191,9 @@ function M.setup(opts)
       vim.notify("[mcp-companion] Usage: :MCPToggleServer <server_name>", vim.log.levels.WARN)
       return
     end
-    local client = bridge.client
+    local client = combiner.client
     if not client or not client.connected then
-      vim.notify("[mcp-companion] Bridge not connected", vim.log.levels.WARN)
+      vim.notify("[mcp-companion] Combiner not connected", vim.log.levels.WARN)
       return
     end
     vim.notify(string.format("[mcp-companion] Toggling %s...", server_name), vim.log.levels.INFO)
@@ -213,7 +213,7 @@ function M.setup(opts)
       local servers = srv_state.field("servers") or {}
       local names = {}
       for _, srv in ipairs(servers) do
-        if srv.name ~= "_bridge" then
+        if srv.name ~= "_combiner" then
           table.insert(names, srv.name)
         end
       end
@@ -251,19 +251,19 @@ function M.setup(opts)
 
   -- Register on_ready callback
   if config.get().on_ready then
-    state.on("bridge_ready", function()
-      config.get().on_ready(bridge)
+    state.on("combiner_ready", function()
+      config.get().on_ready(combiner)
     end)
   end
 
   -- Register on_error callback
   if config.get().on_error then
-    state.on("bridge_error", function(err)
+    state.on("combiner_error", function(err)
       config.get().on_error(err)
     end)
   end
 
-  log.info("Setup complete (config: %s)", config.get().bridge.config or "none")
+  log.info("Setup complete (config: %s)", config.get().combiner.config or "none")
 end
 
 --- Get current state module
@@ -272,16 +272,16 @@ function M.get_state()
   return require("mcp_companion.state")
 end
 
---- Get bridge module (lifecycle + client)
+--- Get combiner module (lifecycle + client)
 --- @return table
-function M.get_bridge()
-  return require("mcp_companion.bridge")
+function M.get_combiner()
+  return require("mcp_companion.combiner")
 end
 
 --- Alias for compatibility
 --- @return table
 function M.get_hub_instance()
-  return require("mcp_companion.bridge")
+  return require("mcp_companion.combiner")
 end
 
 --- Subscribe to events
@@ -300,8 +300,8 @@ function M.off(event, callback)
 end
 
 -- Public native-server registration API. Registration-only and setup-time:
--- call these before any editor connects to the bridge, and register the same
--- tools across all instances (the bridge freezes the catalog once per process).
+-- call these before any editor connects to the combiner, and register the same
+-- tools across all instances (the combiner freezes the catalog once per process).
 -- See docs/designs/native-neovim-server.md.
 M.add_server = function(...)
   return require("mcp_companion.native").add_server(...)

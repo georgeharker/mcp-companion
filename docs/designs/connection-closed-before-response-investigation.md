@@ -2,7 +2,7 @@
 
 ## Symptom
 
-When Neovim starts and finds a pre-existing bridge process already running, connection fails:
+When Neovim starts and finds a pre-existing combiner process already running, connection fails:
 
 ```
 [mcp-companion] Initialize failed: Connection closed before response completed
@@ -11,13 +11,13 @@ When Neovim starts and finds a pre-existing bridge process already running, conn
 
 ## Error chain
 
-1. `lua/mcp_companion/bridge/client.lua:336` — TCP EOF with incomplete chunked body
-2. `lua/mcp_companion/bridge/client.lua:547` — `initialize` request callback receives the error
-3. `lua/mcp_companion/bridge/init.lua:260` — `_create_client()` propagates to caller
+1. `lua/mcp_companion/combiner/client.lua:336` — TCP EOF with incomplete chunked body
+2. `lua/mcp_companion/combiner/client.lua:547` — `initialize` request callback receives the error
+3. `lua/mcp_companion/combiner/init.lua:260` — `_create_client()` propagates to caller
 
 ## Root cause
 
-The bridge Python process enters an unrecoverable state where every new `POST /mcp`
+The combiner Python process enters an unrecoverable state where every new `POST /mcp`
 (initialize) request returns:
 
 ```
@@ -35,9 +35,9 @@ connection closes within ~1 ms.
 Existing sessions (established before the process entered this state) continue to work —
 `tools/list` with a valid session ID returns 200 with cached results.
 
-## Bridge-side failure mode
+## Combiner-side failure mode
 
-Bridge log (`~/.local/state/nvim/mcp-bridge.log`) showed:
+Combiner log (`~/.local/state/nvim/mcp-combiner.log`) showed:
 
 - ~185 ASGI errors per minute from process startup onward:
   ```
@@ -48,7 +48,7 @@ Bridge log (`~/.local/state/nvim/mcp-bridge.log`) showed:
 
 ### MCP SDK session manager internals
 
-The bridge uses `StreamableHTTPSessionManager(stateless=False)` (stateful mode).
+The combiner uses `StreamableHTTPSessionManager(stateless=False)` (stateful mode).
 
 For a new session `initialize` request the path is:
 
@@ -92,7 +92,7 @@ is closed with no data.
 
 ### What triggers the initial corruption
 
-The bridge log showed the first ASGI errors appeared immediately after a `Basic Memory`
+The combiner log showed the first ASGI errors appeared immediately after a `Basic Memory`
 MCP server reconnection event. The reconnect likely caused a `ClosedResourceError` in the
 shared anyio task group of the session manager, leaving the internal streams in a broken
 state for all subsequent new-session requests.
@@ -103,24 +103,24 @@ state for all subsequent new-session requests.
   same empty-body response
 - Missing session ID in the request — that returns `400 Bad Request: Missing session ID`
   (a different, healthy code path)
-- The bridge health endpoint — `GET /health` returns 200 throughout
+- The combiner health endpoint — `GET /health` returns 200 throughout
 
 ## Scope of failure
 
-Once the bridge enters this state:
+Once the combiner enters this state:
 
 - New MCP sessions cannot be established (initialize always fails)
 - Existing sessions remain fully functional
-- The only recovery is restarting the bridge process
+- The only recovery is restarting the combiner process
 
 ## Affected code paths
 
 | File | Lines | Description |
 |---|---|---|
-| `lua/mcp_companion/bridge/init.lua` | 50–61 | Pre-existing bridge detection → `_create_client()` |
-| `lua/mcp_companion/bridge/init.lua` | 239–266 | `_create_client()` — no retry on failure |
-| `lua/mcp_companion/bridge/client.lua` | 533–614 | `Client:connect()` — single initialize attempt |
-| `lua/mcp_companion/bridge/client.lua` | 320–340 | TCP EOF handler → "Connection closed" error |
+| `lua/mcp_companion/combiner/init.lua` | 50–61 | Pre-existing combiner detection → `_create_client()` |
+| `lua/mcp_companion/combiner/init.lua` | 239–266 | `_create_client()` — no retry on failure |
+| `lua/mcp_companion/combiner/client.lua` | 533–614 | `Client:connect()` — single initialize attempt |
+| `lua/mcp_companion/combiner/client.lua` | 320–340 | TCP EOF handler → "Connection closed" error |
 
 ## Potential mitigations (not yet implemented)
 
@@ -128,23 +128,23 @@ Once the bridge enters this state:
 
 Retry `_create_client()` up to N times (e.g. 3) with a short delay (e.g. 2 s) before
 declaring failure. Transient failures (race on startup, brief process churn) would recover
-automatically. Persistent failures (bridge stuck in broken state) would still fail after
+automatically. Persistent failures (combiner stuck in broken state) would still fail after
 N×delay seconds, but with a more informative error message.
 
 Pros: simple, non-destructive, no process management  
-Cons: does not recover a persistently broken bridge; adds latency before final failure
+Cons: does not recover a persistently broken combiner; adds latency before final failure
 
-### Option B — Force-restart on exhausted retries (pre-existing bridge)
+### Option B — Force-restart on exhausted retries (pre-existing combiner)
 
-After N failed retries, if the bridge was found pre-existing (not spawned by this Neovim
+After N failed retries, if the combiner was found pre-existing (not spawned by this Neovim
 instance), force-kill the process on the configured port (e.g. via `lsof -ti tcp:<port>`)
-and start a fresh bridge.
+and start a fresh combiner.
 
 Pros: fully automatic recovery  
-Cons: kills a process we did not start; other Neovim instances sharing the bridge lose
+Cons: kills a process we did not start; other Neovim instances sharing the combiner lose
 their connections; platform-specific (`lsof`)
 
-### Option C — Improve bridge Python-side resilience
+### Option C — Improve combiner Python-side resilience
 
 Patch `StreamableHTTPSessionManager` (or the FastMCP wrapper) to catch
 `anyio.ClosedResourceError` inside `run_server` / `_handle_stateful_request` and reset
@@ -153,10 +153,10 @@ the internal task group + streams rather than leaving them in a broken state.
 Pros: fixes the root cause; no Lua-side changes  
 Cons: requires changes to vendored/upstream Python dependencies (mcp SDK or FastMCP)
 
-### Option D — Expose a `/reset` or `/restart` bridge endpoint
+### Option D — Expose a `/reset` or `/restart` combiner endpoint
 
-Add a bridge HTTP endpoint (e.g. `POST /admin/restart`) that reinitialises the
+Add a combiner HTTP endpoint (e.g. `POST /admin/restart`) that reinitialises the
 `StreamableHTTPSessionManager` in-process without restarting the OS process.
 
 Pros: clean, avoids process kill; cross-platform  
-Cons: requires bridge Python changes; existing sessions still drop
+Cons: requires combiner Python changes; existing sessions still drop

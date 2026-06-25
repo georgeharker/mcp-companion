@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from mcp_bridge.nvim_channel import NoInstanceError, NvimChannelManager
+from mcp_combiner.nvim_channel import NoInstanceError, NvimChannelManager
 
-# lua/ lives at <repo>/lua; this file is <repo>/bridge/tests/test_nvim_channel.py
+# lua/ lives at <repo>/lua; this file is <repo>/combiner/tests/test_nvim_channel.py
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LUA_DIR = _REPO_ROOT / "lua"
 

@@ -2,9 +2,9 @@
 
 ## Overview
 
-The bridge supports OAuth 2.1 Authorization Code + PKCE for upstream MCP servers
+The combiner supports OAuth 2.1 Authorization Code + PKCE for upstream MCP servers
 that require user authentication (e.g. Google Workspace via workspace-mcp, ClickUp).
-All OAuth logic lives in the Python bridge (`bridge/mcp_bridge/`); the Rust
+All OAuth logic lives in the Python combiner (`combiner/mcp_combiner/`); the Rust
 `sharedserver` binary is only a process supervisor and has no OAuth involvement.
 
 The implementation is built on three layers:
@@ -15,7 +15,7 @@ The implementation is built on three layers:
 2. **FastMCP** (`fastmcp.client.auth.OAuth`) — wraps the MCP SDK provider with
    token storage adapters, static client info support, and a uvicorn-based OAuth
    callback server.
-3. **Bridge** (`mcp_bridge.auth._RefreshTokenOAuth`) — our subclass of FastMCP's
+3. **Combiner** (`mcp_combiner.auth._RefreshTokenOAuth`) — our subclass of FastMCP's
    `OAuth` that fixes several upstream issues and adds Google-specific behaviour.
 
 ## Configuration
@@ -50,7 +50,7 @@ The `auth` field supports three forms:
 | `{"oauth": {...}}` | OAuth with explicit client_id, scopes, etc. |
 | `{"bearer": "token"}` | Static Bearer token (no OAuth) |
 
-Global settings in the bridge config:
+Global settings in the combiner config:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -80,7 +80,7 @@ All token files are encrypted with Fernet (symmetric AES-128-CBC + HMAC-SHA256).
 
 Key derivation priority:
 
-1. **`MCP_BRIDGE_TOKEN_KEY` env var** — set via Lua `config.bridge.token_key` or
+1. **`MCP_COMBINER_TOKEN_KEY` env var** — set via Lua `config.combiner.token_key` or
    directly. Derives a Fernet key via `derive_jwt_key(material, salt)`.
 2. **Machine ID + username fallback** — `f"{platform.node()}:{getpass.getuser()}:mcp-companion-tokens"`
    with the same derivation. Stable across restarts but provides obfuscation, not
@@ -98,7 +98,7 @@ triggering a fresh OAuth flow rather than crashing.
 | `mcp-oauth-client-info` | `{server_url}/client_info` | `OAuthClientInformationFull` (dynamic client registration) | Until `client_secret_expires_at` |
 | `mcp-oauth-token-expiry` | `{server_url}/token_expiry` | `{"expires_at": <absolute_timestamp>}` | 1 year |
 
-The `mcp-oauth-token-expiry` sidecar is a bridge-level addition (see [Token Expiry
+The `mcp-oauth-token-expiry` sidecar is a combiner-level addition (see [Token Expiry
 Problem](#2-token-expiry-problem-and-sidecar-fix)).
 
 ## Auth Selection
@@ -119,11 +119,11 @@ def build_auth(server_name, *, auth_config, server_url, token_dir, cache_tokens)
 
 `_build_oauth()` creates a `_RefreshTokenOAuth` instance with an encrypted file
 store (or `None` for in-memory). The `_RefreshTokenOAuth` class is the heart of
-the bridge's OAuth handling.
+the combiner's OAuth handling.
 
 ## OAuth Flow Lifecycle
 
-### On Bridge Startup (cached tokens exist)
+### On Combiner Startup (cached tokens exist)
 
 ```
 _make_disconnected_client()
@@ -221,7 +221,7 @@ a token issued hours ago appear freshly minted. The SDK then sends the expired a
 token, gets a 401, and triggers a full browser re-auth — even though a silent refresh
 would have worked.
 
-**Fix**: The bridge persists an absolute expiry timestamp in a sidecar key
+**Fix**: The combiner persists an absolute expiry timestamp in a sidecar key
 (`mcp-oauth-token-expiry` collection) alongside the token. On init:
 
 1. **Sidecar exists, token not expired** → use cached access token as-is.
@@ -243,7 +243,7 @@ connection and the health-check monitor can trigger reconnection. Each reconnect
 creates a new `_RefreshTokenOAuth` instance, each of which may start a browser-based
 OAuth flow. Both flows try to start a uvicorn callback server on the same port
 (e.g. 9876). The second bind fails, uvicorn calls `sys.exit(1)`, and the
-`SystemExit` propagates through anyio's TaskGroup, killing the entire bridge.
+`SystemExit` propagates through anyio's TaskGroup, killing the entire combiner.
 
 **Fix** (two layers):
 
@@ -254,21 +254,21 @@ OAuth flow. Both flows try to start a uvicorn callback server on the same port
 
 2. **`SystemExit` catch in `_open()`** (in `ConnectionManager`): Defense-in-depth —
    catches `SystemExit` from uvicorn's port bind failure and treats it as a transient
-   error (health-check will retry later) instead of letting it kill the bridge.
+   error (health-check will retry later) instead of letting it kill the combiner.
 
 ### 4. Google Refresh Token
 
 **Problem**: Google's OAuth only issues a `refresh_token` when the authorization
 request includes `access_type=offline`. The standard MCP OAuth flow does not include
 this parameter, so Google issues only a short-lived access token. Without a refresh
-token, the bridge must open a browser every time the token expires (~1 hour).
+token, the combiner must open a browser every time the token expires (~1 hour).
 
 **Fix**: `redirect_handler()` inspects the authorization URL. If the host is
 `accounts.google.com`, it injects `access_type=offline` and `prompt=consent` into
 the query parameters. `prompt=consent` forces Google to re-issue a refresh token
 even when the user previously consented.
 
-This is the only Google-specific code in the bridge. All other fixes are generic
+This is the only Google-specific code in the combiner. All other fixes are generic
 and work with any OAuth provider.
 
 ## Connection Manager Integration
@@ -286,7 +286,7 @@ Auth-failure semantics:
 - OAuth is attempted **once** per server during `connect_all()`.
 - If it fails → `_auth_failed=True`, monitor stops retrying, factory raises
   `AuthenticationError`.
-- **Only recovery**: `bridge__enable_server` meta-tool → `reset_auth_failure()` →
+- **Only recovery**: `combiner__enable_server` meta-tool → `reset_auth_failure()` →
   `connect()` for a single fresh attempt.
 
 ## Stale Client Detection
@@ -312,8 +312,8 @@ triggers a fresh OAuth flow with new registration.
 | Server returns 403 + insufficient_scope | **Re-auth with updated scopes** |
 | Stale client (ClientNotFoundError) | **Clear cache + retry** with fresh registration |
 | Stale client during tool call | **Clear cache directory** → full re-auth on next attempt |
-| Auth failure on startup | **Marked `_auth_failed`** — no auto-retry; manual `bridge__enable_server` |
-| Bridge restart with cached tokens | **Proactive refresh** during `_initialize()` — no browser |
+| Auth failure on startup | **Marked `_auth_failed`** — no auto-retry; manual `combiner__enable_server` |
+| Combiner restart with cached tokens | **Proactive refresh** during `_initialize()` — no browser |
 
 ## Key Functions Reference
 
@@ -321,7 +321,7 @@ triggers a fresh OAuth flow with new registration.
 
 ```python
 class _RefreshTokenOAuth(OAuth):
-    """Full OAuth subclass with all bridge-level fixes."""
+    """Full OAuth subclass with all combiner-level fixes."""
 
     # Class-level state for callback server singleton
     _active_flows: ClassVar[dict[int, tuple[anyio.Event, OAuthCallbackResult]]]
@@ -396,7 +396,7 @@ pattern applies to any external OAuth 2.1 provider.
 5. Note the **Client ID** and **Client Secret**
 
 > **Scopes**: workspace-mcp requests its own scopes from Google. You do not need
-> to configure scopes in the bridge — they come from the upstream server's
+> to configure scopes in the combiner — they come from the upstream server's
 > `.well-known/oauth-protected-resource` metadata.
 
 ### Step 2: Enable Google APIs
@@ -514,17 +514,17 @@ Instead of hardcoding secrets, you can use 1Password secret references:
 }
 ```
 
-The bridge resolves `op://` references via the 1Password CLI before use.
+The combiner resolves `op://` references via the 1Password CLI before use.
 
 ### Step 5: First Run
 
-On first launch, the bridge will:
+On first launch, the combiner will:
 
 1. Start the `workspace-mcp` shared server process
 2. Discover OAuth metadata from `http://localhost:8002/.well-known/oauth-protected-resource`
 3. Open your browser to Google's consent screen
 4. You authorize the requested scopes
-5. The bridge receives the auth code on `http://localhost:9876/callback`
+5. The combiner receives the auth code on `http://localhost:9876/callback`
 6. Tokens are exchanged, encrypted, and stored to disk
 
 Subsequent restarts silently refresh the cached token — no browser interaction
@@ -535,11 +535,11 @@ required (see [Token Expiry Problem and Sidecar Fix](#2-token-expiry-problem-and
 Check that the server connected successfully:
 
 ```
-# In Neovim, open the status window (or ask the agent to call bridge__status)
+# In Neovim, open the status window (or ask the agent to call combiner__status)
 :MCPStatus
 ```
 
-Or check the bridge log at `~/.local/state/nvim/mcp-bridge.log` for:
+Or check the combiner log at `~/.local/state/nvim/mcp-combiner.log` for:
 ```
 Persistent connection opened: gws
 ```
@@ -550,15 +550,15 @@ Persistent connection opened: gws
 |---------|-------|-----|
 | Browser opens on every restart | Token refresh failing — check log for `Token refresh failed` | Ensure metadata discovery works (check `.well-known` endpoints) |
 | `OAuth callback timed out after 300.0 seconds` | Browser flow not completed within 5 minutes | Complete the consent flow faster, or re-enable the server |
-| `[Errno 48] address already in use` on callback port | Previous callback server still running | Wait for it to timeout, or restart the bridge |
-| `401 Unauthorized` on tool calls | Access token expired and refresh failed | Check that `access_type=offline` is being injected (bridge handles this automatically for Google) |
+| `[Errno 48] address already in use` on callback port | Previous callback server still running | Wait for it to timeout, or restart the combiner |
+| `401 Unauthorized` on tool calls | Access token expired and refresh failed | Check that `access_type=offline` is being injected (combiner handles this automatically for Google) |
 | `Token refresh failed: 404` | Token endpoint URL incorrect | Ensure workspace-mcp's `.well-known/oauth-protected-resource` returns correct `authorization_servers` |
-| Server shows `_auth_failed` | OAuth failed on startup and was not retried | Use `bridge__enable_server` meta-tool to retry |
+| Server shows `_auth_failed` | OAuth failed on startup and was not retried | Use `combiner__enable_server` meta-tool to retry |
 
 ### Other OAuth Providers
 
 The same pattern works for any MCP server that implements RFC 9728
-(Protected Resource Metadata). The bridge auto-discovers the OAuth endpoints:
+(Protected Resource Metadata). The combiner auto-discovers the OAuth endpoints:
 
 ```
 server_url → .well-known/oauth-protected-resource
@@ -568,7 +568,7 @@ server_url → .well-known/oauth-protected-resource
 ```
 
 Provider-specific notes:
-- **Google**: Bridge automatically injects `access_type=offline` +
+- **Google**: Combiner automatically injects `access_type=offline` +
   `prompt=consent` for refresh token support
 - **ClickUp**: Works out of the box — ClickUp's MCP proxy handles its own
   endpoint discovery
@@ -576,7 +576,7 @@ Provider-specific notes:
 
 ## Upstream SDK Issues
 
-These are known issues in the vendored MCP SDK and FastMCP that the bridge works
+These are known issues in the vendored MCP SDK and FastMCP that the combiner works
 around:
 
 1. **oauth_metadata not persisted** — `OAuthClientProvider._initialize()` loads

@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mcp_bridge.config import BridgeConfig, SharedServerConfig
-from mcp_bridge.sharedserver import SharedServerManager, _build_use_cmd, _require_binary
+from mcp_combiner.config import CombinerConfig, SharedServerConfig
+from mcp_combiner.sharedserver import SharedServerManager, _build_use_cmd, _require_binary
 
 
 def _mock_async_process(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> AsyncMock:
@@ -114,7 +114,7 @@ def test_build_use_cmd_empty_env() -> None:
 # ── SharedServerManager ────────────────────────────────────────────
 
 
-def _make_config(*, sharedserver_data: dict[str, Any] | None = None) -> BridgeConfig:
+def _make_config(*, sharedserver_data: dict[str, Any] | None = None) -> CombinerConfig:
     ss = sharedserver_data or {
         "command": "uvx",
         "args": ["workspace-mcp", "--transport", "streamable-http"],
@@ -136,7 +136,7 @@ def _make_config(*, sharedserver_data: dict[str, Any] | None = None) -> BridgeCo
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(raw, f)
         path = f.name
-    config = BridgeConfig.load(path)
+    config = CombinerConfig.load(path)
     os.unlink(path)
     return config
 
@@ -150,7 +150,7 @@ async def test_start_all_calls_sharedserver_use() -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/sharedserver"),
         patch("asyncio.create_subprocess_exec", mock_exec),
-        patch("mcp_bridge.sharedserver._poll_url", new=AsyncMock(return_value=True)),
+        patch("mcp_combiner.sharedserver._poll_url", new=AsyncMock(return_value=True)),
     ):
         await mgr.start_all()
 
@@ -226,7 +226,7 @@ async def test_start_all_no_sharedserver_config() -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(raw, f)
         path = f.name
-    config = BridgeConfig.load(path)
+    config = CombinerConfig.load(path)
     os.unlink(path)
 
     mgr = SharedServerManager(config)
@@ -248,7 +248,7 @@ async def test_health_poll_timeout_warns_but_continues() -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/sharedserver"),
         patch("asyncio.create_subprocess_exec", mock_exec),
-        patch("mcp_bridge.sharedserver._poll_url", new=AsyncMock(return_value=False)),
+        patch("mcp_combiner.sharedserver._poll_url", new=AsyncMock(return_value=False)),
     ):
         await mgr.start_all()
 

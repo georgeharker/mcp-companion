@@ -1,7 +1,7 @@
-"""Back-channel from the bridge into live Neovim instances.
+"""Back-channel from the combiner into live Neovim instances.
 
-The bridge is a single shared process serving N Neovim instances. To let an
-external agent *control* an editor, the bridge must reach back into the specific
+The combiner is a single shared process serving N Neovim instances. To let an
+external agent *control* an editor, the combiner must reach back into the specific
 instance that owns a chat. This module owns that link.
 
 Design (see docs/designs/native-neovim-server.md):
@@ -10,9 +10,9 @@ Design (see docs/designs/native-neovim-server.md):
   socket), created lazily and evicted on connection error.
 * A **per-instance FIFO queue + single worker** serialises calls to each
   instance — at most one in-flight RPC per instance, executed in order. This is
-  the bridge-side half of the ordering guarantee; Neovim's main loop is the
+  the combiner-side half of the ordering guarantee; Neovim's main loop is the
   other half (see the re-entrancy/loop-back notes in the design doc).
-* The bridge's *only* RPC into Neovim is the single ``dispatch`` entry point —
+* The combiner's *only* RPC into Neovim is the single ``dispatch`` entry point —
   never raw ``vim.api``. Tool curation + (absence of) approval live in Lua.
 
 Phase 2 (fast-sync) uses ``asyncio.to_thread`` around synchronous pynvim, which
@@ -29,7 +29,7 @@ from typing import Any
 
 import pynvim
 
-logger = logging.getLogger("mcp-bridge.nvim")
+logger = logging.getLogger("mcp-combiner.nvim")
 
 # The single curation boundary. Args arrive as `...` from exec_lua.
 _DISPATCH_LUA = "return require('mcp_companion.native').dispatch(...)"
@@ -91,7 +91,7 @@ class NvimChannelManager:
         self._instances: dict[str, _Instance] = {}
         self._default_timeout = default_timeout
         # The tool/resource catalog is captured once from whichever instance
-        # connects first, then frozen for the life of the bridge process. The
+        # connects first, then frozen for the life of the combiner process. The
         # lock makes the first-fetch single-flight under concurrent tools/list.
         self._manifest: dict[str, Any] | None = None
         self._manifest_lock = asyncio.Lock()
@@ -174,9 +174,9 @@ class NvimChannelManager:
         """Return the frozen tool/resource catalog, capturing it once.
 
         On first call the manifest is fetched from whichever instance is
-        registered and then **locked for the life of the bridge process** —
+        registered and then **locked for the life of the combiner process** —
         subsequent instances never change it. Returns None only if no instance
-        has ever been available to capture from yet (so the bridge advertises no
+        has ever been available to capture from yet (so the combiner advertises no
         ``neovim`` tools until the first editor connects).
         """
         if self._manifest is not None:

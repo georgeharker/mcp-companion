@@ -4,7 +4,7 @@
 --- The catalog is **fixed and curated** — there is intentionally no public
 --- `add_tool`/`add_server` DSL (see docs/designs/native-neovim-server.md). The
 --- single entry point is `M.dispatch(name, args, ctx)`, which is also the only
---- function the Python bridge ever invokes over msgpack-RPC.
+--- function the Python combiner ever invokes over msgpack-RPC.
 --- @module mcp_companion.native
 
 local util = require("mcp_companion.native.util")
@@ -175,8 +175,8 @@ function M.read_resource(uri, ctx)
 end
 
 --- Produce the tool/resource manifest for every native server.
---- Fetched by the bridge over the channel (a trivial exec_lua) at instance
---- registration and associated with that instance — so the bridge advertises
+--- Fetched by the combiner over the channel (a trivial exec_lua) at instance
+--- registration and associated with that instance — so the combiner advertises
 --- `neovim` tools to agents iff a live instance is attached.
 --- @return table<string, { tools: table[], resources: table[] }>
 function M.manifest()
@@ -225,9 +225,9 @@ end
 -- ── Public registration API ────────────────────────────────────────────────
 -- Register extra native servers/tools/resources. **Registration-only and
 -- setup-time:** call these from your plugin's setup(), before any editor
--- connects to the bridge. The bridge captures the tool catalog once (frozen
--- per bridge process), so tools added after an instance has connected — or
--- tools that differ between instances — are NOT reflected in the bridge's
+-- connects to the combiner. The combiner captures the tool catalog once (frozen
+-- per combiner process), so tools added after an instance has connected — or
+-- tools that differ between instances — are NOT reflected in the combiner's
 -- advertised manifest. Keep registrations identical across instances.
 
 --- Register a native server, optionally with tools/resources/prompts inline.

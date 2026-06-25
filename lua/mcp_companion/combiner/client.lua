@@ -1,5 +1,5 @@
 --- mcp-companion.nvim — MCP HTTP Client (JSON-RPC over Streamable HTTP)
---- @module mcp_companion.bridge.client
+--- @module mcp_companion.combiner.client
 ---
 --- FastMCP Streamable HTTP sends ALL responses as SSE (text/event-stream)
 --- with Transfer-Encoding: chunked, then CLOSES the TCP connection.
@@ -14,7 +14,7 @@ local log = require("mcp_companion.log")
 --- @field host string
 --- @field port number
 --- @field base_path string URL path prefix for MCP (default: "/mcp")
---- @field token? string Session token sent as X-MCP-Bridge-Session header
+--- @field token? string Session token sent as X-MCP-Combiner-Session header
 --- @field session_id? string MCP session ID
 --- @field request_id number Monotonic counter
 --- @field connected boolean
@@ -39,7 +39,7 @@ Client.__index = Client
 --- @field request_timeout? number
 --- @field poll_interval? number
 --- @field base_path? string  URL path prefix for MCP (default: "/mcp")
---- @field token? string      Session token sent as X-MCP-Bridge-Session header on every request
+--- @field token? string      Session token sent as X-MCP-Combiner-Session header on every request
 --- @field lite? boolean      If true, skip SSE/polling/capability fetching (lightweight session-only client)
 
 --- Create a new MCP HTTP client
@@ -300,7 +300,7 @@ function Client:_http_request(method, path, body, timeout_ms, callback)
     end
 
     if self.token then
-      table.insert(headers, "X-MCP-Bridge-Session: " .. self.token)
+      table.insert(headers, "X-MCP-Combiner-Session: " .. self.token)
     end
 
     if body then
@@ -542,7 +542,7 @@ end
 --- Initialize MCP session
 --- @param callback fun(ok: boolean, err?: string)
 function Client:connect(callback)
-  log.debug("Connecting to bridge at %s:%d", self.host, self.port)
+  log.debug("Connecting to combiner at %s:%d", self.host, self.port)
 
   self:request("initialize", {
     protocolVersion = "2025-03-26",
@@ -645,7 +645,7 @@ function Client:disconnect()
   log.debug("Client disconnected")
 end
 
---- Fetch server names from bridge health endpoint
+--- Fetch server names from combiner health endpoint
 --- Used for correct tool name parsing (servers may have hyphens in names)
 --- @param callback fun()
 function Client:_fetch_server_names(callback)
@@ -684,9 +684,9 @@ function Client:_fetch_server_names(callback)
       for name, _ in pairs(data.servers) do
         table.insert(names, name)
       end
-      -- Add "bridge" for meta-tools (bridge__status, bridge__enable_server, etc.)
+      -- Add "combiner" for meta-tools (combiner__status, combiner__enable_server, etc.)
       -- These use double underscore but we still need to match the prefix
-      table.insert(names, "bridge")
+      table.insert(names, "combiner")
       table.sort(names, function(a, b) return #a > #b end)
 
       self._known_server_names = names
@@ -698,7 +698,7 @@ function Client:_fetch_server_names(callback)
   })
 end
 
---- Refresh all capabilities from bridge
+--- Refresh all capabilities from combiner
 --- @param callback? fun() Called when all refreshes complete
 function Client:refresh_capabilities(callback)
   local state = require("mcp_companion.state")
@@ -766,7 +766,7 @@ function Client:_update_server_state()
       if tool.name:sub(1, #prefix) == prefix then
         server_name = srv_name
         tool_name = tool.name:sub(#prefix + 1)
-        -- Strip leading underscore if present (for bridge__ meta-tools)
+        -- Strip leading underscore if present (for combiner__ meta-tools)
         if tool_name:sub(1, 1) == "_" then
           tool_name = tool_name:sub(2)
         end
@@ -779,9 +779,9 @@ function Client:_update_server_state()
       server_name, tool_name = tool.name:match("^(.-)_(.+)$")
     end
 
-    -- If still no match, it's a bridge-level tool
+    -- If still no match, it's a combiner-level tool
     if not server_name or server_name == "" then
-      server_name = "_bridge"
+      server_name = "_combiner"
       tool_name = tool.name
     end
 
@@ -804,18 +804,18 @@ function Client:_update_server_state()
   -- Group resources by server namespace.
   -- Resource URIs use arbitrary schemes (e.g. "ui://", "memory://") that don't
   -- correspond to server names. Match by looking for a known server name in the
-  -- URI path, falling back to _bridge.
+  -- URI path, falling back to _combiner.
   local known_server_set = {} -- luacheck: ignore 421
   for name in pairs(server_map) do
     known_server_set[name] = true
   end
 
   for _, res in ipairs(self.resources) do
-    local assigned = "_bridge"
+    local assigned = "_combiner"
     if res.uri then
       -- Check if any known server name appears as a path component in the URI
       for name in pairs(known_server_set) do
-        if name ~= "_bridge" and res.uri:find("/" .. name .. "/", 1, true) then
+        if name ~= "_combiner" and res.uri:find("/" .. name .. "/", 1, true) then
           assigned = name
           break
         end
@@ -875,7 +875,7 @@ function Client:_update_server_state()
   state.update("servers", servers)
 end
 
---- Refresh server health/status from the bridge /health endpoint
+--- Refresh server health/status from the combiner /health endpoint
 --- Updates _server_health and re-runs _update_server_state to merge disabled info
 --- @param callback? fun()
 function Client:_refresh_server_health(callback)
@@ -896,7 +896,7 @@ function Client:_refresh_server_health(callback)
           for name, _ in pairs(data.servers) do
             table.insert(names, name)
           end
-          table.insert(names, "bridge")
+          table.insert(names, "combiner")
           table.sort(names, function(a, b) return #a > #b end)
           self._known_server_names = names
         end
@@ -913,7 +913,7 @@ function Client:_refresh_server_health(callback)
 end
 
 --- Toggle a server's enabled/disabled state
---- Calls bridge__enable_server or bridge__disable_server, then refreshes
+--- Calls combiner__enable_server or combiner__disable_server, then refreshes
 --- @param server_name string
 --- @param callback? fun(err?: string, result?: string)
 function Client:toggle_server(server_name, callback)
@@ -929,7 +929,7 @@ function Client:toggle_server(server_name, callback)
     return
   end
 
-  local tool_name = info.disabled and "bridge__enable_server" or "bridge__disable_server"
+  local tool_name = info.disabled and "combiner__enable_server" or "combiner__disable_server"
   local action = info.disabled and "Enabling" or "Disabling"
   log.info("%s server: %s", action, server_name)
 
@@ -965,14 +965,14 @@ function Client:toggle_server(server_name, callback)
   end)
 end
 
---- Restart a single MCP server on the bridge — ditch it and bring it back
+--- Restart a single MCP server on the combiner — ditch it and bring it back
 --- fresh (stops + respawns the backing process for sharedserver-backed servers,
 --- re-opens the connection otherwise). Refreshes health + capabilities after.
 --- @param server_name string
 --- @param callback? fun(err?: string, result?: string)
 function Client:restart_server(server_name, callback)
   log.info("Restarting server: %s", server_name)
-  self:call_tool("bridge__restart_server", { server_name = server_name }, function(err, result)
+  self:call_tool("combiner__restart_server", { server_name = server_name }, function(err, result)
     if err then
       log.error("Failed to restart server %s: %s", server_name, tostring(err))
       if callback then
@@ -1002,13 +1002,13 @@ function Client:restart_server(server_name, callback)
   end)
 end
 
---- Ask the bridge to re-read its config file and apply server changes.
+--- Ask the combiner to re-read its config file and apply server changes.
 --- Refreshes health + capabilities afterwards so the UI reflects the new
---- server/tool set without a bridge restart.
+--- server/tool set without a combiner restart.
 --- @param callback? fun(err?: string, result?: string)
 function Client:reload_config(callback)
-  log.info("Reloading bridge config")
-  self:call_tool("bridge__reload_config", {}, function(err, result)
+  log.info("Reloading combiner config")
+  self:call_tool("combiner__reload_config", {}, function(err, result)
     if err then
       log.error("Failed to reload config: %s", tostring(err))
       if callback then
@@ -1040,7 +1040,7 @@ function Client:reload_config(callback)
   end)
 end
 
---- Call a tool on the bridge
+--- Call a tool on the combiner
 --- @param name string Tool name (namespaced: "server_tool")
 --- @param arguments table Tool arguments
 --- @param callback? fun(err?: string, result?: table)
@@ -1237,10 +1237,10 @@ function Client:_start_sse()
           self._sse_buf = self._sse_buf:sub(header_end + 4)
           self._sse_connected = true
           log.debug("SSE: Stream connected, processing events")
-          -- A (re)connected stream is the signal that the bridge may have
+          -- A (re)connected stream is the signal that the combiner may have
           -- restarted; let the native channel reconcile its registration.
           vim.schedule(function()
-            require("mcp_companion.state").emit("bridge_stream_connected")
+            require("mcp_companion.state").emit("combiner_stream_connected")
           end)
         else
           return -- Headers not complete yet

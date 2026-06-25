@@ -5,20 +5,20 @@ Outstanding work for mcp-companion.nvim, in priority order.
 ## Feature: E2E test suite (M11)
 
 No automated end-to-end tests. Current tests:
-- `test_cc_tools.lua`: CC tool registration against test bridge on port 9742
-- `test_real_servers.lua`: integration test against production bridge on port 9741
+- `test_cc_tools.lua`: CC tool registration against test combiner on port 9742
+- `test_real_servers.lua`: integration test against production combiner on port 9741
 
 Needs a proper E2E suite that can run in CI without a live Neovim instance, covering:
-- Bridge lifecycle (start, connect, poll, stop)
+- Combiner lifecycle (start, connect, poll, stop)
 - CC tool registration and callback execution
 - ACP session injection (mock CC ACP Connection)
 
 ## TODO: Native Lua MCP server registration (M9)
 
 `native/init.lua` is a stub. The original plan included an API for registering MCP
-servers, tools, resources, and prompts directly from Lua without going through the bridge.
+servers, tools, resources, and prompts directly from Lua without going through the combiner.
 
-Given that all real use cases go through the bridge (and the bridge handles arbitrary
+Given that all real use cases go through the combiner (and the combiner handles arbitrary
 MCP servers), this is low priority. The API surface is preserved but unimplemented.
 
 If implemented, it would allow plugins to register tools directly:
@@ -36,7 +36,7 @@ Files: `native/init.lua`, `init.lua` (wire up public API).
 ## Closed
 
 - **M0** — Scaffold: all files, Lua modules load
-- **M1** — Python bridge: FastMCP proxy, health endpoint, 19 test tools, 6 pytest passing
+- **M1** — Python combiner: FastMCP proxy, health endpoint, 19 test tools, 6 pytest passing
 - **M3** — Lua config/state/log: fully implemented, 17 tests passing
 - **M5** — Lua MCP HTTP client: vim.uv TCP, multi-session, 3/3 passing
 - **M6** — CC tool registration: direct CC tools API, fingerprint dedup, 32/32 tests passing

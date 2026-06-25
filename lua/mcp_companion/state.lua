@@ -12,7 +12,7 @@ local M = {}
 --- @field resource_templates table[] MCP resource template definitions
 --- @field prompts table[] MCP prompt definitions
 
---- @class MCPCompanion.BridgeState
+--- @class MCPCompanion.CombinerState
 --- @field status string "disconnected"|"connecting"|"healthy"|"connected"|"error"
 --- @field port? number
 --- @field pid? number
@@ -23,7 +23,7 @@ local M = {}
 --- @type table
 local _state = {
   setup_state = "not_started", -- not_started | in_progress | completed | failed
-  bridge = {
+  combiner = {
     status = "disconnected",
     port = nil,
     pid = nil,
@@ -48,7 +48,7 @@ local _event_subs = {}
 function M.reset()
   _state = {
     setup_state = "not_started",
-    bridge = { status = "disconnected", port = nil, pid = nil, clients = 0, error = nil },
+    combiner = { status = "disconnected", port = nil, pid = nil, clients = 0, error = nil },
     servers = {},
     native_servers = {},
     errors = {},

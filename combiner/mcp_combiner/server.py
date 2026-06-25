@@ -1,4 +1,4 @@
-"""FastMCP bridge server — proxies multiple MCP servers through one endpoint."""
+"""FastMCP combiner server — proxies multiple MCP servers through one endpoint."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ from mcp.server.session import ServerSession
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mcp_bridge import nvim_proxy
-from mcp_bridge.auth import (
+from mcp_combiner import nvim_proxy
+from mcp_combiner.auth import (
     build_auth,
     clear_oauth_cache,
     is_stale_client_error,
 )
-from mcp_bridge.config import (
-    BridgeConfig,
+from mcp_combiner.config import (
+    CombinerConfig,
     HealthResponse,
     ServerConfig,
     ServerStatusInfo,
@@ -44,10 +44,10 @@ from mcp_bridge.config import (
     _interpolate_dict,  # noqa: PLC2701
     _interpolate_str,  # noqa: PLC2701
 )
-from mcp_bridge.connections import AuthenticationError, ConnectionManager
-from mcp_bridge.sharedserver import SharedServerManager
+from mcp_combiner.connections import AuthenticationError, ConnectionManager
+from mcp_combiner.sharedserver import SharedServerManager
 
-logger = logging.getLogger("mcp-bridge")
+logger = logging.getLogger("mcp-combiner")
 
 # Track failed servers to avoid repeated errors
 _failed_servers: dict[str, str] = {}  # server_name -> error message
@@ -64,7 +64,7 @@ _tool_cache: list[Tool] | None = None
 _tool_cache_time: float = 0
 
 # --- Session registry for ToolListChanged notifications ---
-# Weak references to all active ServerSessions connected to this bridge.
+# Weak references to all active ServerSessions connected to this combiner.
 # Populated by ToolProcessingMiddleware on each request; entries are
 # automatically removed when the session is garbage-collected.
 _active_sessions: weakref.WeakSet[ServerSession] = weakref.WeakSet()
@@ -76,11 +76,11 @@ _active_sessions: weakref.WeakSet[ServerSession] = weakref.WeakSet()
 # session ID (used by the Neovim plugin for ACP session filtering).
 _session_disabled: dict[str, set[str]] = {}
 
-# Token registry: token -> bridge session_id.
+# Token registry: token -> combiner session_id.
 # The Neovim plugin generates a UUID token per chat and embeds it as the MCP
 # URL path (/mcp/<token>).  TokenRewriteMiddleware rewrites the path to /mcp
 # and records token -> mcp-session-id from the FastMCP response header.
-# GET /sessions/token/{token} lets the Lua side look up the bridge session_id.
+# GET /sessions/token/{token} lets the Lua side look up the combiner session_id.
 _token_sessions: dict[str, str] = {}
 
 # Pending token filters: token -> set of disabled server names.
@@ -90,15 +90,15 @@ _token_sessions: dict[str, str] = {}
 _pending_token_filters: dict[str, set[str]] = {}
 
 # Neovim back-channel routing (tables, virtual-tool injection, REST routes) lives
-# in mcp_bridge.nvim_proxy. server.py only calls its entry points.
+# in mcp_combiner.nvim_proxy. server.py only calls its entry points.
 
-# Unique per-process id, surfaced via /health. A change signals a bridge restart
+# Unique per-process id, surfaced via /health. A change signals a combiner restart
 # so clients re-register their Neovim instances and token bindings.
-_BRIDGE_BOOT_ID = uuid.uuid4().hex
+_COMBINER_BOOT_ID = uuid.uuid4().hex
 
 
 # Global schema normalization flag, set at server creation from
-# ``--normalize-schema`` / ``MCP_BRIDGE_NORMALIZE_SCHEMA``.  When True, every
+# ``--normalize-schema`` / ``MCP_COMBINER_NORMALIZE_SCHEMA``.  When True, every
 # tool emitted from ``tools/list`` is normalized at cache-fill time so strict
 # providers (e.g. moonshot-ai/kimi) accept the resulting schemas.
 _normalize_schemas_global: bool = False
@@ -140,7 +140,7 @@ async def _notify_session_by_id(session_id: str) -> None:
 
 
 # Global config reference for tool filtering
-_bridge_config: BridgeConfig | None = None
+_combiner_config: CombinerConfig | None = None
 
 
 def _matches_filter(tool_name: str, patterns: list[str]) -> bool:
@@ -159,11 +159,11 @@ def _find_server_for_tool(tool_name: str) -> tuple[str | None, str]:
     Returns (server_name, local_tool_name) or (None, tool_name) if no match.
     FastMCP namespaces tools as "servername_toolname" with single underscore.
     """
-    if _bridge_config is None:
+    if _combiner_config is None:
         return None, tool_name
 
     # Check each server name to see if the tool starts with it
-    for server_name in _bridge_config.servers:
+    for server_name in _combiner_config.servers:
         prefix = server_name + "_"
         if tool_name.startswith(prefix):
             local_name = tool_name[len(prefix) :]
@@ -174,7 +174,7 @@ def _find_server_for_tool(tool_name: str) -> tuple[str | None, str]:
 
 def _filter_tools(tools: list[Tool]) -> list[Tool]:
     """Filter tools based on server-specific tool_filter patterns."""
-    if _bridge_config is None:
+    if _combiner_config is None:
         return tools
 
     filtered: list[Tool] = []
@@ -184,12 +184,12 @@ def _filter_tools(tools: list[Tool]) -> list[Tool]:
         server_name, local_name = _find_server_for_tool(name)
 
         if server_name is None:
-            # Bridge tools (no server prefix) - always include
+            # Combiner tools (no server prefix) - always include
             filtered.append(tool)
             continue
 
         # Get server config
-        srv = _bridge_config.servers.get(server_name)
+        srv = _combiner_config.servers.get(server_name)
         if srv is None or not srv.tool_filter:
             # No filter configured - include all tools from this server
             filtered.append(tool)
@@ -212,7 +212,7 @@ def invalidate_tool_cache() -> None:
     _tool_cache_time = 0
     # Drop cached JSON-schema validators so a reload or newly-connected server
     # never validates a tool call against a stale schema.
-    from mcp_bridge import fastvalidate
+    from mcp_combiner import fastvalidate
 
     fastvalidate.clear_cache()
     logger.info("Tool cache invalidated")
@@ -541,7 +541,7 @@ class ToolProcessingMiddleware(Middleware):
                     if sess_server in blocked:
                         raise NotFoundError(
                             f"Tool '{tool_name}' is unavailable — server '{sess_server}' "
-                            "is disabled for this session. Use bridge__session_enable_server "
+                            "is disabled for this session. Use combiner__session_enable_server "
                             "to re-enable it."
                         )
             except NotFoundError:
@@ -564,15 +564,15 @@ class ToolProcessingMiddleware(Middleware):
             logger.warning("Tool '%s' blocked by auth failure: %s", tool_name, e)
             raise ToolError(
                 f"Tool '{tool_name}' is unavailable — the server's authentication "
-                f"failed. Use bridge__enable_server to retry authentication."
+                f"failed. Use combiner__enable_server to retry authentication."
             ) from e
         except Exception as e:
             # Extract server name by stripping the known namespace prefix.
             # FastMCP namespaces as "servername_toolname"; longest match wins
             # to handle server names that are prefixes of each other.
             server_name: str | None = None
-            if _bridge_config:
-                for sname in sorted(_bridge_config.servers, key=len, reverse=True):
+            if _combiner_config:
+                for sname in sorted(_combiner_config.servers, key=len, reverse=True):
                     if tool_name.startswith(sname + "_"):
                         server_name = sname
                         break
@@ -600,7 +600,7 @@ class ToolProcessingMiddleware(Middleware):
                     server_name,
                     e,
                 )
-                from mcp_bridge.config import OAuthConfig
+                from mcp_combiner.config import OAuthConfig
 
                 token_dir = OAuthConfig().token_dir_path
                 clear_oauth_cache(server_name, token_dir)
@@ -681,7 +681,7 @@ def _effective_isolate(srv: ServerConfig) -> bool:
     return True
 
 
-def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> FastMCP:
+def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -> FastMCP:
     """Create a proxy for a single upstream MCP server.
 
     When a persistent connection is available (HTTP/SSE servers), the proxy
@@ -739,7 +739,7 @@ def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> 
     return create_proxy(proxy_config.model_dump(exclude_none=True), name=name)
 
 
-def _create_isolated_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> FastMCP:
+def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -> FastMCP:
     """Build a per-chat-isolated proxy for an HTTP/SSE server (``isolate: true``).
 
     Uses FastMCP's ``StatefulProxyClient``: a single base client (one transport,
@@ -787,7 +787,7 @@ def _create_isolated_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -
             if mgr.is_auth_failed(name):
                 raise AuthenticationError(
                     f"Server '{name}' is disabled due to an authentication error: "
-                    f"{mgr.auth_error(name)}. Use bridge__enable_server to retry."
+                    f"{mgr.auth_error(name)}. Use combiner__enable_server to retry."
                 )
             # Wait for the primer's first connect (and thus its OAuth flow) to
             # finish before opening this chat's session, so the token already
@@ -796,7 +796,7 @@ def _create_isolated_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -
             if mgr.is_auth_failed(name):
                 raise AuthenticationError(
                     f"Server '{name}' is disabled due to an authentication error: "
-                    f"{mgr.auth_error(name)}. Use bridge__enable_server to retry."
+                    f"{mgr.auth_error(name)}. Use combiner__enable_server to retry."
                 )
             return oauth_stateful.new_stateful()
 
@@ -834,7 +834,7 @@ def _needs_oauth(srv: ServerConfig) -> bool:
 
 
 @overload
-def create_bridge(
+def create_combiner(
     config_path: str,
     *,
     oauth_cache_tokens: bool | None = ...,
@@ -847,7 +847,7 @@ def create_bridge(
 
 
 @overload
-def create_bridge(
+def create_combiner(
     config_path: str,
     *,
     oauth_cache_tokens: bool | None = ...,
@@ -859,7 +859,7 @@ def create_bridge(
 ) -> FastMCP: ...
 
 
-def create_bridge(
+def create_combiner(
     config_path: str,
     *,
     oauth_cache_tokens: bool | None = None,
@@ -869,7 +869,7 @@ def create_bridge(
     output_validation: bool | None = None,
     return_ss_manager: bool = False,
 ) -> FastMCP | tuple[FastMCP, SharedServerManager]:
-    """Create the bridge FastMCP server from a config file.
+    """Create the combiner FastMCP server from a config file.
 
     Reads servers.json, creates a proxy for each enabled server,
     mounts them under namespaced prefixes, and adds meta-tools + health.
@@ -880,7 +880,7 @@ def create_bridge(
     * HTTP/SSE servers are registered with the ``ConnectionManager``.
     * ``connect_all()`` opens persistent connections in **background tasks
       and returns immediately** — it does not wait for them to finish.  The
-      bridge starts serving right away so that servers needing OAuth (which
+      combiner starts serving right away so that servers needing OAuth (which
       may block on a browser flow) don't hold up the rest.  Their tools
       appear once the connection succeeds: each ``on_connected`` callback
       invalidates the tool cache and emits ``notifications/tools/list_changed``
@@ -893,12 +893,12 @@ def create_bridge(
       (not retried by ``RetryMiddleware``).  The auto-reconnect health
       monitor skips auth-failed servers, so recovery is manual via one of
       the meta-tools:
-        - ``bridge__enable_server`` — re-arm a disabled or auth-failed
+        - ``combiner__enable_server`` — re-arm a disabled or auth-failed
           server (clears the auth-failed flag and reconnects).
-        - ``bridge__restart_server`` — kick a single wedged server (stale
+        - ``combiner__restart_server`` — kick a single wedged server (stale
           auth, hung, crashed subprocess): tears down + respawns just that
-          server's process/connection, no full bridge restart.
-        - ``bridge__reload_config`` — apply on-disk config changes without
+          server's process/connection, no full combiner restart.
+        - ``combiner__reload_config`` — apply on-disk config changes without
           a restart.
 
     CLI overrides (when provided) take precedence over the ``oauth`` section
@@ -907,17 +907,17 @@ def create_bridge(
     - *oauth_cache_tokens*: ``False`` disables disk token caching globally.
     - *oauth_token_dir*: path override for the OAuth token directory.
 
-    If *return_ss_manager* is True, returns a tuple of (bridge, ss_manager)
+    If *return_ss_manager* is True, returns a tuple of (combiner, ss_manager)
     so the caller can explicitly call stop_all() on shutdown.
     """
-    global _bridge_config
+    global _combiner_config
     global _conn_manager
     global _normalize_schemas_global
 
     # Replace the MCP SDK's per-call jsonschema.validate (which rebuilds the
     # validator + re-checks the meta-schema on every tool call) with a cached
     # validator. Idempotent; cache is cleared on reload via invalidate_tool_cache.
-    from mcp_bridge import fastvalidate
+    from mcp_combiner import fastvalidate
 
     fastvalidate.install()
     # Tri-state output-schema validation (None = SDK default, True = force on,
@@ -926,8 +926,8 @@ def create_bridge(
     # Input validation is driven natively via strict_input_validation below.
     fastvalidate.set_output_validation(output_validation)
 
-    config = BridgeConfig.load(config_path)
-    _bridge_config = config  # Store for tool filtering
+    config = CombinerConfig.load(config_path)
+    _combiner_config = config  # Store for tool filtering
     _normalize_schemas_global = normalize_schemas
     if normalize_schemas:
         logger.info("Schema normalization enabled globally for tools/list")
@@ -981,12 +981,12 @@ def create_bridge(
                 logger.exception("Failed to mount server '%s'", name)
 
         # Start persistent connections to HTTP/SSE upstreams in the background.
-        # OAuth servers get exactly one auth attempt here.  The bridge starts
+        # OAuth servers get exactly one auth attempt here.  The combiner starts
         # serving immediately; servers requiring OAuth are available once the
         # user completes the browser flow.  If auth fails the connection is
-        # marked _auth_failed — no retry until manual toggle via bridge__enable_server.
+        # marked _auth_failed — no retry until manual toggle via combiner__enable_server.
         await conn_manager.connect_all(config)
-        logger.info("Connection tasks started — bridge is ready")
+        logger.info("Connection tasks started — combiner is ready")
 
         try:
             yield
@@ -994,9 +994,9 @@ def create_bridge(
             await conn_manager.close_all()
             await ss_manager.stop_all()
 
-    bridge = FastMCP(
-        name="mcp-bridge",
-        instructions="MCP Bridge — proxies multiple MCP servers through a single endpoint.",
+    combiner = FastMCP(
+        name="mcp-combiner",
+        instructions="MCP Combiner — proxies multiple MCP servers through a single endpoint.",
         # Tri-state input-schema validation. None → fastmcp's own default
         # (off — inputs are coerced, not strictly validated); True → force
         # strict validation on; False → force it off. This is the only switch
@@ -1022,12 +1022,12 @@ def create_bridge(
     )
 
     # Register meta-tools (available immediately; server proxies mount in lifespan)
-    from mcp_bridge.meta_tools import register_meta_tools
+    from mcp_combiner.meta_tools import register_meta_tools
 
-    register_meta_tools(bridge, config, conn_manager, ss_manager)
+    register_meta_tools(combiner, config, conn_manager, ss_manager)
 
     # Health endpoint
-    @bridge.custom_route("/health", methods=["GET"])
+    @combiner.custom_route("/health", methods=["GET"])
     async def health_check(request: Request) -> JSONResponse:
         server_statuses: dict[str, ServerStatusInfo] = {
             name: config.get_server_status(name) for name in config.servers
@@ -1040,9 +1040,9 @@ def create_bridge(
             pending_oauth=auth_failed,
         )
         payload = response.model_dump(mode="json")
-        # boot_id changes only when this bridge *process* (re)starts. Clients use
+        # boot_id changes only when this combiner *process* (re)starts. Clients use
         # it to detect a restart and re-register Neovim instances + token binds.
-        payload["boot_id"] = _BRIDGE_BOOT_ID
+        payload["boot_id"] = _COMBINER_BOOT_ID
         return JSONResponse(payload)
 
     # --- Session management REST API ---
@@ -1050,7 +1050,7 @@ def create_bridge(
     # list active MCP sessions and manage per-session server filters by
     # session ID, without needing to be the session owner.
 
-    @bridge.custom_route("/sessions", methods=["GET"])
+    @combiner.custom_route("/sessions", methods=["GET"])
     async def list_sessions(request: Request) -> JSONResponse:
         """List active MCP sessions with their IDs, client info, and filter state."""
         sessions_out: list[dict[str, Any]] = []
@@ -1081,7 +1081,7 @@ def create_bridge(
             sessions_out.append(entry)
         return JSONResponse({"sessions": sessions_out})
 
-    @bridge.custom_route("/sessions/{session_id}/filter", methods=["GET", "POST", "DELETE"])
+    @combiner.custom_route("/sessions/{session_id}/filter", methods=["GET", "POST", "DELETE"])
     async def manage_session_filter(request: Request) -> JSONResponse:
         """Manage per-session server blocklist by session ID.
 
@@ -1177,8 +1177,8 @@ def create_bridge(
             if not isinstance(allowed, list):
                 return JSONResponse({"error": "allowed_servers must be a list"}, status_code=400)
             allowed_set = set(allowed)
-            # Disable all servers not in allowed list (except _bridge meta-server)
-            disabled_list = [s for s in config.servers if s not in allowed_set and s != "_bridge"]
+            # Disable all servers not in allowed list (except _combiner meta-server)
+            disabled_list = [s for s in config.servers if s not in allowed_set and s != "_combiner"]
         elif disabled is None:
             disabled_list = []
         else:
@@ -1212,9 +1212,9 @@ def create_bridge(
             }
         )
 
-    @bridge.custom_route("/sessions/token/{token}", methods=["GET"])
+    @combiner.custom_route("/sessions/token/{token}", methods=["GET"])
     async def lookup_session_token(request: Request) -> JSONResponse:
-        """Look up the bridge session_id associated with a token.
+        """Look up the combiner session_id associated with a token.
 
         The token is a UUID generated by the Neovim plugin per chat and
         embedded as the URL path suffix (/mcp/<token>).
@@ -1228,7 +1228,7 @@ def create_bridge(
         logger.debug("Token lookup: %s -> %s", token, session_id)
         return JSONResponse({"token": token, "session_id": session_id})
 
-    @bridge.custom_route("/sessions/token/{token}/filter", methods=["GET", "POST", "DELETE"])
+    @combiner.custom_route("/sessions/token/{token}/filter", methods=["GET", "POST", "DELETE"])
     async def manage_token_filter(request: Request) -> JSONResponse:
         """Manage per-session server blocklist by token.
 
@@ -1289,7 +1289,7 @@ def create_bridge(
                 return current
             if allowed is not None:
                 allowed_set = set(allowed)
-                d = {s for s in config.servers if s not in allowed_set and s != "_bridge"}
+                d = {s for s in config.servers if s not in allowed_set and s != "_combiner"}
                 return d if d else None
             if disabled_list is not None:
                 return set(disabled_list) if disabled_list else None
@@ -1328,8 +1328,8 @@ def create_bridge(
                              "disabled_servers": sorted(new_disabled) if new_disabled else []})
 
     # Neovim back-channel REST API (/neovim/instances, /neovim/bind).
-    nvim_proxy.register_routes(bridge, _notify_tool_list_changed)
+    nvim_proxy.register_routes(combiner, _notify_tool_list_changed)
 
     if return_ss_manager:
-        return bridge, ss_manager
-    return bridge
+        return combiner, ss_manager
+    return combiner

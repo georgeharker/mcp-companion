@@ -208,7 +208,7 @@ test("resolve_allowed: no project file, auto=true → nil (no filter)", function
 end)
 
 test("resolve_allowed: project disabled_servers + no known list → nil + warns", function()
-    -- We can't invert disabled→allowed without the bridge's known-server list.
+    -- We can't invert disabled→allowed without the combiner's known-server list.
     with_tempdir(function(tmp)
         write_file(tmp .. "/.mcp-companion.json",
             '{"disabled_servers": ["clickup"]}')

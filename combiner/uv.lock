@@ -690,8 +690,8 @@ wheels = [
 ]
 
 [[package]]
-name = "mcp-bridge"
-version = "0.1.0"
+name = "mcp-combiner"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

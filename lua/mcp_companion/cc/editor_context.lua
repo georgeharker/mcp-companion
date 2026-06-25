@@ -55,11 +55,11 @@ local function fetch_resource_sync(client, uri)
 end
 
 --- Register MCP resources as CC #editor_context entries.
---- Called on bridge_ready and servers_updated events.
+--- Called on combiner_ready and servers_updated events.
 function M.register()
-    local bridge = require("mcp_companion.bridge")
+    local combiner = require("mcp_companion.combiner")
 
-    if not bridge.client or not bridge.client.connected then
+    if not combiner.client or not combiner.client.connected then
         return
     end
 
@@ -90,7 +90,7 @@ function M.register()
     local count = 0
 
     for _, server in ipairs(servers) do
-        if server.name ~= "_bridge" then
+        if server.name ~= "_combiner" then
             for _, resource in ipairs(server.resources or {}) do
                 local var_name = string.format("mcp:%s", resource.name or resource.uri or "unknown")
                 local captured_uri = resource.uri
@@ -101,7 +101,7 @@ function M.register()
                         or string.format("MCP resource: %s", captured_name),
                     ---@param args {Chat?: table, is_slash_command?: boolean}
                     callback = function(args)
-                        local content = fetch_resource_sync(bridge.client, captured_uri)
+                        local content = fetch_resource_sync(combiner.client, captured_uri)
                         local text = content
                             or string.format("[Error reading resource: %s]", captured_name)
 
@@ -145,7 +145,7 @@ function M._setup_system_prompt_injection()
         return
     end
 
-    local bridge = require("mcp_companion.bridge")
+    local combiner = require("mcp_companion.combiner")
 
     -- Collect resources to inject
     local to_inject = {} --- @type {uri: string, name: string}[]
@@ -153,7 +153,7 @@ function M._setup_system_prompt_injection()
     local servers = state.field("servers") or {}
 
     for _, server in ipairs(servers) do
-        if server.name ~= "_bridge" then
+        if server.name ~= "_combiner" then
             for _, resource in ipairs(server.resources or {}) do
                 local include = false
                 if spr == true then
@@ -229,7 +229,7 @@ function M._setup_system_prompt_injection()
             -- Fetch and inject each resource
             vim.defer_fn(function()
                 for _, res in ipairs(to_inject) do
-                    local content = fetch_resource_sync(bridge.client, res.uri)
+                    local content = fetch_resource_sync(combiner.client, res.uri)
                     if content and content ~= "" then
                         chat:add_message({
                             role = "system",
@@ -251,7 +251,7 @@ function M._setup_system_prompt_injection()
     log.info("System prompt injection configured for %d resources", #to_inject)
 end
 
---- Tear down the system prompt injection autocmd (e.g. on bridge disconnect).
+--- Tear down the system prompt injection autocmd (e.g. on combiner disconnect).
 function M.teardown()
     if _augroup then
         pcall(vim.api.nvim_del_augroup_by_id, _augroup)

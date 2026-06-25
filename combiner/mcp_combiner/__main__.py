@@ -1,4 +1,4 @@
-"""CLI entry point for mcp-bridge."""
+"""CLI entry point for mcp-combiner."""
 
 import argparse
 import atexit
@@ -15,20 +15,20 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response
 
-from mcp_bridge.server import (
+from mcp_combiner.server import (
     _pending_token_filters,
     _token_sessions,
-    create_bridge,
+    create_combiner,
 )
-from mcp_bridge.sharedserver import cleanup as cleanup_sharedservers
-from mcp_bridge.sharedserver import register_for_cleanup
+from mcp_combiner.sharedserver import cleanup as cleanup_sharedservers
+from mcp_combiner.sharedserver import register_for_cleanup
 
 logger = logging.getLogger(__name__)
 
-_mcp_log = logging.getLogger("mcp-bridge.requests")
+_mcp_log = logging.getLogger("mcp-combiner.requests")
 
 # Header name the Neovim plugin sets on ACP-injected mcpServers entries.
-_ACP_TOKEN_HEADER = "x-mcp-bridge-session"
+_ACP_TOKEN_HEADER = "x-mcp-combiner-session"
 
 # UUID pattern: validates tokens from both header and URL path.
 _TOKEN_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -44,7 +44,7 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
 
     Accepts the token from two sources:
       1. URL path: /mcp/<token>[/...] — rewrites to /mcp so FastMCP sees a plain request.
-      2. HTTP header: X-MCP-Bridge-Session — fallback.
+      2. HTTP header: X-MCP-Combiner-Session — fallback.
 
     On first request carrying a token, records token->session_id from the response
     header.  If a pending filter was stored via POST /sessions/token/<token>/filter
@@ -79,7 +79,7 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
             # ToolProcessingMiddleware.on_request in server.py).
             #
             # WHY this is needed: header-sending clients (Claude Code, OpenCode,
-            # the documented ACP entry) already send X-MCP-Bridge-Session, so for
+            # the documented ACP entry) already send X-MCP-Combiner-Session, so for
             # them this is a redundant no-op. But URL-only transports — notably
             # the stdio `mcp-remote` fallback, which forwards neither env nor
             # headers, only the URL — would otherwise never get the token to the
@@ -131,7 +131,7 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
                 # Apply any pending filter that was stored before the client connected
                 pending = _pending_token_filters.pop(token, None)
                 if pending:
-                    from mcp_bridge.server import _session_disabled
+                    from mcp_combiner.server import _session_disabled
 
                     _session_disabled[sid] = pending
                     logger.info(
@@ -197,29 +197,29 @@ def _signal_handler(signum: int, frame: types.FrameType | None) -> None:
 
 
 def create_app() -> Starlette:
-    """Factory function for creating the bridge ASGI app.
+    """Factory function for creating the combiner ASGI app.
 
     Reads config from environment variables set by main().
     """
-    config_path = os.environ["MCP_BRIDGE_CONFIG"]
-    oauth_cache_str = os.environ.get("MCP_BRIDGE_OAUTH_CACHE")
+    config_path = os.environ["MCP_COMBINER_CONFIG"]
+    oauth_cache_str = os.environ.get("MCP_COMBINER_OAUTH_CACHE")
     oauth_cache_tokens: bool | None = None
     if oauth_cache_str == "True":
         oauth_cache_tokens = True
     elif oauth_cache_str == "False":
         oauth_cache_tokens = False
-    oauth_token_dir = os.environ.get("MCP_BRIDGE_OAUTH_TOKEN_DIR")
-    normalize_schemas = os.environ.get("MCP_BRIDGE_NORMALIZE_SCHEMA") == "1"
+    oauth_token_dir = os.environ.get("MCP_COMBINER_OAUTH_TOKEN_DIR")
+    normalize_schemas = os.environ.get("MCP_COMBINER_NORMALIZE_SCHEMA") == "1"
 
     def _tristate(name: str) -> bool | None:
         """Read a tri-state flag from env: '1' → True, '0' → False, unset → None."""
         v = os.environ.get(name)
         return None if v is None else v == "1"
 
-    input_validation = _tristate("MCP_BRIDGE_INPUT_VALIDATION")
-    output_validation = _tristate("MCP_BRIDGE_OUTPUT_VALIDATION")
+    input_validation = _tristate("MCP_COMBINER_INPUT_VALIDATION")
+    output_validation = _tristate("MCP_COMBINER_OUTPUT_VALIDATION")
 
-    bridge, ss_manager = create_bridge(
+    combiner, ss_manager = create_combiner(
         config_path,
         oauth_cache_tokens=oauth_cache_tokens,
         oauth_token_dir=oauth_token_dir,
@@ -234,7 +234,7 @@ def create_app() -> Starlette:
 
     # Use streamable HTTP with stateful mode.
     # Stateless mode doesn't support GET for SSE streams, which OpenCode needs.
-    app = bridge.http_app(
+    app = combiner.http_app(
         path="/mcp",
         stateless_http=False,
     )
@@ -248,8 +248,8 @@ def create_app() -> Starlette:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="mcp-bridge",
-        description="MCP proxy bridge server",
+        prog="mcp-combiner",
+        description="MCP combiner — aggregates multiple MCP servers behind one endpoint",
     )
     parser.add_argument(
         "--config",
@@ -292,7 +292,7 @@ def main() -> None:
         default=None,
         help=(
             "Directory for OAuth token files "
-            "(default: ~/.cache/mcp-companion/oauth-tokens; overrides config)"
+            "(default: ~/.cache/mcp-combiner/oauth-tokens; overrides config)"
         ),
     )
     parser.add_argument(
@@ -314,7 +314,7 @@ def main() -> None:
         help=(
             "Tri-state JSON-schema validation of tool *input* arguments. "
             "--input-validation forces it on; --no-input-validation forces it "
-            "off; omit to leave the bridge default (off — inputs are coerced, "
+            "off; omit to leave the combiner default (off — inputs are coerced, "
             "not strictly validated)."
         ),
     )
@@ -343,7 +343,7 @@ def main() -> None:
         choices=["trace", "debug", "info", "warn", "error"],
         default="info",
         help=(
-            "Verbosity for the bridge logger and httpx/mcp-client loggers "
+            "Verbosity for the combiner logger and httpx/mcp-client loggers "
             "(default: info).  Use 'debug' to capture OAuth metadata-discovery, "
             "token refresh, and httpx request/response detail."
         ),
@@ -352,17 +352,17 @@ def main() -> None:
     args = parser.parse_args()
 
     # Set env vars for app factory
-    os.environ["MCP_BRIDGE_CONFIG"] = args.config
+    os.environ["MCP_COMBINER_CONFIG"] = args.config
     if args.oauth_cache is not None:
-        os.environ["MCP_BRIDGE_OAUTH_CACHE"] = str(args.oauth_cache)
+        os.environ["MCP_COMBINER_OAUTH_CACHE"] = str(args.oauth_cache)
     if args.oauth_token_dir:
-        os.environ["MCP_BRIDGE_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
+        os.environ["MCP_COMBINER_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
     if args.normalize_schema:
-        os.environ["MCP_BRIDGE_NORMALIZE_SCHEMA"] = "1"
+        os.environ["MCP_COMBINER_NORMALIZE_SCHEMA"] = "1"
     if args.input_validation is not None:
-        os.environ["MCP_BRIDGE_INPUT_VALIDATION"] = "1" if args.input_validation else "0"
+        os.environ["MCP_COMBINER_INPUT_VALIDATION"] = "1" if args.input_validation else "0"
     if args.output_validation is not None:
-        os.environ["MCP_BRIDGE_OUTPUT_VALIDATION"] = "1" if args.output_validation else "0"
+        os.environ["MCP_COMBINER_OUTPUT_VALIDATION"] = "1" if args.output_validation else "0"
 
     # Resolve --log-level to a stdlib logging numeric level.
     # "trace" is treated as DEBUG since stdlib has no TRACE.
@@ -375,16 +375,16 @@ def main() -> None:
     }
     level = _level_map[args.log_level]
 
-    # Stderr handler on the bridge logger.  Without this only WARNING+ would
+    # Stderr handler on the combiner logger.  Without this only WARNING+ would
     # appear because Python's root logger defaults to WARNING.
-    bridge_logger = logging.getLogger("mcp-bridge")
-    bridge_logger.setLevel(level)
-    if not bridge_logger.handlers:
+    combiner_logger = logging.getLogger("mcp-combiner")
+    combiner_logger.setLevel(level)
+    if not combiner_logger.handlers:
         stderr_handler = logging.StreamHandler()
         stderr_handler.setLevel(level)
         stderr_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
-        bridge_logger.addHandler(stderr_handler)
-        bridge_logger.propagate = False  # avoid duplicate messages via root
+        combiner_logger.addHandler(stderr_handler)
+        combiner_logger.propagate = False  # avoid duplicate messages via root
 
     # Configure file logging if requested.  File handler always runs at the
     # requested level (decoupled from the file's presence so you can pick
@@ -399,12 +399,12 @@ def main() -> None:
         file_handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )
-        # Root catches non-bridge loggers (fastmcp, mcp.client.auth, httpx, …)
+        # Root catches non-combiner loggers (fastmcp, mcp.client.auth, httpx, …)
         logging.getLogger().addHandler(file_handler)
         logging.getLogger().setLevel(level)
-        # propagate=False on bridge_logger means the root handler won't see
+        # propagate=False on combiner_logger means the root handler won't see
         # its messages — attach explicitly.
-        bridge_logger.addHandler(file_handler)
+        combiner_logger.addHandler(file_handler)
         logger.info("Logging to %s at level %s", log_path, args.log_level)
     else:
         # No file — still apply level globally so DEBUG-on-stderr works.

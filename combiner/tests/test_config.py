@@ -1,4 +1,4 @@
-"""Tests for mcp-bridge config loading."""
+"""Tests for mcp-combiner config loading."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from mcp_bridge.config import (
-    BridgeConfig,
+from mcp_combiner.config import (
+    CombinerConfig,
     OAuthConfig,
     ServerConfig,
     SharedServerConfig,
@@ -25,7 +25,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test_load_config() -> None:
-    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    config = CombinerConfig.load(str(FIXTURES / "servers.json"))
     assert "everything" in config.servers
     assert "disabled-server" in config.servers
     assert "http-example" in config.servers
@@ -33,7 +33,7 @@ def test_load_config() -> None:
 
 
 def test_load_config_sharedserver_parsed() -> None:
-    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    config = CombinerConfig.load(str(FIXTURES / "servers.json"))
     srv = config.servers["sharedserver-example"]
     # Server entry just holds a reference name
     assert srv.shared_server == "goog_ws"
@@ -45,13 +45,13 @@ def test_load_config_sharedserver_parsed() -> None:
 
 
 def test_server_status_sharedserver_name() -> None:
-    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    config = CombinerConfig.load(str(FIXTURES / "servers.json"))
     status = config.get_server_status("sharedserver-example")
     assert status.shared_server == "goog_ws"
 
 
 def test_server_status_no_sharedserver() -> None:
-    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    config = CombinerConfig.load(str(FIXTURES / "servers.json"))
     status = config.get_server_status("everything")
     assert status.shared_server is None
 
@@ -64,7 +64,7 @@ def test_oauth_config_defaults() -> None:
     assert cfg.cache_tokens is True
     assert cfg.token_dir is None
     # token_dir_path returns default when token_dir is None
-    assert cfg.token_dir_path == Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
+    assert cfg.token_dir_path == Path.home() / ".cache" / "mcp-combiner" / "oauth-tokens"
 
 
 def test_oauth_config_from_dict_defaults() -> None:
@@ -93,9 +93,9 @@ def test_oauth_config_from_dict_token_dir_camel() -> None:
     assert cfg.token_dir_path == Path("/tmp/my-tokens")
 
 
-def test_bridge_config_oauth_defaults() -> None:
-    """BridgeConfig has sensible OAuth defaults when no oauth key in file."""
-    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+def test_combiner_config_oauth_defaults() -> None:
+    """CombinerConfig has sensible OAuth defaults when no oauth key in file."""
+    config = CombinerConfig.load(str(FIXTURES / "servers.json"))
     assert config.oauth.cache_tokens is True
     assert config.oauth.token_dir is None
 
@@ -151,7 +151,7 @@ def test_server_config_isolate_false_explicit() -> None:
 def test_server_config_unknown_key_warns(caplog: pytest.LogCaptureFixture) -> None:
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="mcp-bridge"):
+    with caplog.at_level(logging.WARNING, logger="mcp-combiner"):
         ServerConfig.from_dict("svg", {"url": "http://x/mcp", "bogusKey": 1})
     assert any("bogusKey" in r.message for r in caplog.records)
 
@@ -159,7 +159,7 @@ def test_server_config_unknown_key_warns(caplog: pytest.LogCaptureFixture) -> No
 def test_sharedserver_config_unknown_key_warns(caplog: pytest.LogCaptureFixture) -> None:
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="mcp-bridge"):
+    with caplog.at_level(logging.WARNING, logger="mcp-combiner"):
         # `isolate` belongs on the mcpServers entry, not the sharedServers block
         SharedServerConfig.from_dict("gws", {"command": "x", "isolate": True})
     assert any("isolate" in r.message for r in caplog.records)
@@ -214,7 +214,7 @@ class TestAutoApprove:
 
 
 def test_enabled_servers() -> None:
-    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    config = CombinerConfig.load(str(FIXTURES / "servers.json"))
     enabled = config.get_enabled_servers()
     assert "everything" in enabled
     assert "disabled-server" not in enabled
@@ -222,7 +222,7 @@ def test_enabled_servers() -> None:
 
 
 def test_to_fastmcp_config_stdio() -> None:
-    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    config = CombinerConfig.load(str(FIXTURES / "servers.json"))
     fmcp = config.to_fastmcp_config("everything")
     dumped = fmcp.model_dump(exclude_none=True)
     assert "mcpServers" in dumped
@@ -231,7 +231,7 @@ def test_to_fastmcp_config_stdio() -> None:
 
 
 def test_to_fastmcp_config_http() -> None:
-    config = BridgeConfig.load(str(FIXTURES / "servers.json"))
+    config = CombinerConfig.load(str(FIXTURES / "servers.json"))
     fmcp = config.to_fastmcp_config("http-example")
     dumped = fmcp.model_dump(exclude_none=True)
     assert dumped["mcpServers"]["default"]["url"] == "http://localhost:9999/mcp"
@@ -339,7 +339,7 @@ class TestExpansionInConfig:
         """``command`` field expands ``${VAR}``."""
         with patch.dict(os.environ, {"MY_CMD": "/usr/local/bin/my-server"}):
             srv = ServerConfig.from_dict("t", {"command": "${MY_CMD}", "args": []})
-            config = BridgeConfig(servers={"t": srv})
+            config = CombinerConfig(servers={"t": srv})
             dumped = config.to_fastmcp_config("t").model_dump(exclude_none=True)
             assert dumped["mcpServers"]["default"]["command"] == "/usr/local/bin/my-server"
 
@@ -347,7 +347,7 @@ class TestExpansionInConfig:
         """``args`` list entries expand ``${VAR}``."""
         with patch.dict(os.environ, {"PKG": "cool-pkg"}):
             srv = ServerConfig.from_dict("t", {"command": "npx", "args": ["-y", "${PKG}"]})
-            config = BridgeConfig(servers={"t": srv})
+            config = CombinerConfig(servers={"t": srv})
             dumped = config.to_fastmcp_config("t").model_dump(exclude_none=True)
             assert dumped["mcpServers"]["default"]["args"] == ["-y", "cool-pkg"]
 
@@ -355,7 +355,7 @@ class TestExpansionInConfig:
         """``env`` dict values expand ``${VAR}``."""
         with patch.dict(os.environ, {"SECRET": "s3cr3t"}):
             srv = ServerConfig.from_dict("t", {"command": "npx", "env": {"API_KEY": "${SECRET}"}})
-            config = BridgeConfig(servers={"t": srv})
+            config = CombinerConfig(servers={"t": srv})
             dumped = config.to_fastmcp_config("t").model_dump(exclude_none=True)
             assert dumped["mcpServers"]["default"]["env"]["API_KEY"] == "s3cr3t"
 
@@ -365,7 +365,7 @@ class TestExpansionInConfig:
             srv = ServerConfig.from_dict(
                 "t", {"url": "https://${MCP_HOST}/mcp", "transport": "http"}
             )
-            config = BridgeConfig(servers={"t": srv})
+            config = CombinerConfig(servers={"t": srv})
             dumped = config.to_fastmcp_config("t").model_dump(exclude_none=True)
             assert dumped["mcpServers"]["default"]["url"] == "https://remote.example.com/mcp"
 
@@ -380,7 +380,7 @@ class TestExpansionInConfig:
                     "headers": {"Authorization": "Bearer ${TOKEN}"},
                 },
             )
-            config = BridgeConfig(servers={"t": srv})
+            config = CombinerConfig(servers={"t": srv})
             dumped = config.to_fastmcp_config("t").model_dump(exclude_none=True)
             assert dumped["mcpServers"]["default"]["headers"]["Authorization"] == "Bearer tok123"
 
@@ -393,7 +393,7 @@ class TestExpansionInConfig:
                 "t",
                 {"url": "http://localhost:${MISSING_PORT:-3000}/mcp", "transport": "http"},
             )
-            config = BridgeConfig(servers={"t": srv})
+            config = CombinerConfig(servers={"t": srv})
             dumped = config.to_fastmcp_config("t").model_dump(exclude_none=True)
             assert dumped["mcpServers"]["default"]["url"] == "http://localhost:3000/mcp"
 
@@ -401,7 +401,7 @@ class TestExpansionInConfig:
         """Expansion happens at ``to_fastmcp_config`` time, not at load time."""
         with patch.dict(os.environ, {"MY_CMD": "resolved"}):
             srv = ServerConfig.from_dict("t", {"command": "${MY_CMD}", "args": []})
-            config = BridgeConfig(servers={"t": srv})
+            config = CombinerConfig(servers={"t": srv})
             # Raw value still has the template
             assert config.servers["t"].command == "${MY_CMD}"
             # Expanded value is different

@@ -1,10 +1,10 @@
-"""sharedserver integration for mcp-bridge.
+"""sharedserver integration for mcp-combiner.
 
 Provides helpers to start and stop HTTP server processes via the ``sharedserver``
 CLI tool, and to poll a URL until the server is reachable.
 
-sharedserver owns the process lifetime — the bridge only increments/decrements
-the reference count.  Multiple clients (Neovim instances, bridge processes) can
+sharedserver owns the process lifetime — the combiner only increments/decrements
+the reference count.  Multiple clients (Neovim instances, combiner processes) can
 attach to the same named server concurrently; it stays alive as long as any
 client holds a reference.
 
@@ -25,9 +25,9 @@ import shutil
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mcp_bridge.config import BridgeConfig, SharedServerConfig
+    from mcp_combiner.config import CombinerConfig, SharedServerConfig
 
-logger = logging.getLogger("mcp-bridge.sharedserver")
+logger = logging.getLogger("mcp-combiner.sharedserver")
 
 
 def _require_binary() -> str:
@@ -88,19 +88,19 @@ def _build_use_cmd(
     """Build the ``sharedserver use`` argv list.
 
     ``pid`` should be the long-lived process that owns the sharedserver
-    reference (e.g. the bridge process).  sharedserver tracks this PID and
+    reference (e.g. the combiner process).  sharedserver tracks this PID and
     decrements the refcount when it exits.  Without an explicit ``--pid`` the
     tool defaults to the *caller's* PID, which for async subprocess calls is
-    the same as the bridge process — but we pass it explicitly for clarity.
+    the same as the combiner process — but we pass it explicitly for clarity.
     """
-    from mcp_bridge.config import _interpolate_dict, _interpolate_list, _interpolate_str
+    from mcp_combiner.config import _interpolate_dict, _interpolate_list, _interpolate_str
 
     cmd = [binary, "use", ss.name]
 
     if ss.grace_period:
         cmd += ["--grace-period", ss.grace_period]
 
-    # Tie the sharedserver reference to the bridge process explicitly.
+    # Tie the sharedserver reference to the combiner process explicitly.
     cmd += ["--pid", str(pid if pid is not None else os.getpid())]
 
     # Expand env vars in the process environment entries
@@ -117,19 +117,19 @@ def _build_use_cmd(
 
 
 class SharedServerManager:
-    """Manages sharedserver lifecycle for all servers in a ``BridgeConfig``.
+    """Manages sharedserver lifecycle for all servers in a ``CombinerConfig``.
 
     Usage::
 
         mgr = SharedServerManager(config)
         await mgr.start_all()
-        # ... bridge runs ...
+        # ... combiner runs ...
         await mgr.stop_all()
     """
 
     def __init__(
         self,
-        config: "BridgeConfig",
+        config: "CombinerConfig",
     ) -> None:
         self._config = config
         self._binary: str | None = None
@@ -151,7 +151,7 @@ class SharedServerManager:
         single-longest timeout instead of the sum of all timeouts.
 
         Servers that fail to start or become healthy are logged as warnings —
-        the bridge continues mounting other servers.
+        the combiner continues mounting other servers.
         """
         servers_with_ss = [
             name
@@ -259,7 +259,7 @@ class SharedServerManager:
 
         Idempotent: a no-op for non-sharedserver servers or ones already up.
         Called when a server becomes *enabled* — at boot (``start_all``) or
-        dynamically via ``bridge__enable_server`` — so "enabled" is the single
+        dynamically via ``combiner__enable_server`` — so "enabled" is the single
         trigger; there is no separate run/lazy control.
         """
         ss = self._config.resolve_shared_server(server_name)
@@ -273,7 +273,7 @@ class SharedServerManager:
     async def ensure_stopped(self, server_name: str) -> None:
         """Drop our reference (``sharedserver unuse``) on *server_name*'s backing
         sharedserver, if we started it. Idempotent. Called when a server is
-        disabled dynamically via ``bridge__disable_server``."""
+        disabled dynamically via ``combiner__disable_server``."""
         ss = self._config.resolve_shared_server(server_name)
         if ss is None or ss.name not in self._active:
             return

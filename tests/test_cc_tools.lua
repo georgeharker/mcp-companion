@@ -8,13 +8,13 @@
 ---   2. mcp-companion.nvim on runtimepath
 ---   3. npx available (for @modelcontextprotocol/server-everything)
 ---
---- The test manages its own bridge instance on port 9742 to avoid
---- conflicting with any production bridge on 9741.
+--- The test manages its own combiner instance on port 9742 to avoid
+--- conflicting with any production combiner on 9741.
 
 local pass = 0
 local fail = 0
 local results = {}
-local _bridge_job = nil   -- track the test bridge process for cleanup
+local _combiner_job = nil   -- track the test combiner process for cleanup
 
 local function ok(name)
     pass = pass + 1
@@ -48,21 +48,21 @@ local function print_results()
     end
 end
 
---- Locate the bridge directory relative to this file
-local function find_bridge_dir()
+--- Locate the combiner directory relative to this file
+local function find_combiner_dir()
     -- Try relative to this file's location
     local this_file = debug.getinfo(1, "S").source:sub(2)  -- strip leading '@'
     -- this_file is e.g. .../mcp-companion.nvim/lua/mcp_companion/test_cc_tools.lua
     local plugin_root = this_file:match("^(.*)/lua/")
     if plugin_root then
-        local bridge = plugin_root .. "/bridge"
-        if vim.fn.isdirectory(bridge) == 1 then
-            return bridge
+        local combiner = plugin_root .. "/combiner"
+        if vim.fn.isdirectory(combiner) == 1 then
+            return combiner
         end
     end
     -- Fallback: look relative to cwd
     local cwd = vim.fn.getcwd()
-    for _, rel in ipairs({ "bridge", "../bridge" }) do
+    for _, rel in ipairs({ "combiner", "../combiner" }) do
         local p = cwd .. "/" .. rel
         if vim.fn.isdirectory(p) == 1 then
             return p
@@ -73,28 +73,28 @@ end
 
 local TEST_PORT = 9742
 
---- Start a test bridge on TEST_PORT and wait until /health responds.
+--- Start a test combiner on TEST_PORT and wait until /health responds.
 --- Returns true on success, false + message on failure.
-local function start_test_bridge(bridge_dir, fixture_path)
-    local python = bridge_dir .. "/.venv/bin/python"
+local function start_test_combiner(combiner_dir, fixture_path)
+    local python = combiner_dir .. "/.venv/bin/python"
     if vim.fn.executable(python) == 0 then
         return false, "python not found at " .. python
     end
 
     local cmd = {
-        python, "-m", "mcp_bridge",
+        python, "-m", "mcp_combiner",
         "--config", fixture_path,
         "--port", tostring(TEST_PORT),
     }
 
-    _bridge_job = vim.fn.jobstart(cmd, {
-        cwd = bridge_dir,
+    _combiner_job = vim.fn.jobstart(cmd, {
+        cwd = combiner_dir,
         on_stderr = function(_jid, _data)
-            -- suppress noisy bridge logs during test
+            -- suppress noisy combiner logs during test
         end,
     })
 
-    if _bridge_job <= 0 then
+    if _combiner_job <= 0 then
         return false, "jobstart failed"
     end
 
@@ -113,19 +113,19 @@ local function start_test_bridge(bridge_dir, fixture_path)
     end
 
     if not ready then
-        vim.fn.jobstop(_bridge_job)
-        _bridge_job = nil
-        return false, string.format("bridge did not become healthy within 12s on port %d", TEST_PORT)
+        vim.fn.jobstop(_combiner_job)
+        _combiner_job = nil
+        return false, string.format("combiner did not become healthy within 12s on port %d", TEST_PORT)
     end
 
     return true, nil
 end
 
---- Stop the test bridge if we started it
-local function stop_test_bridge()
-    if _bridge_job and _bridge_job > 0 then
-        vim.fn.jobstop(_bridge_job)
-        _bridge_job = nil
+--- Stop the test combiner if we started it
+local function stop_test_combiner()
+    if _combiner_job and _combiner_job > 0 then
+        vim.fn.jobstop(_combiner_job)
+        _combiner_job = nil
     end
 end
 
@@ -167,34 +167,34 @@ if ok_cc then
     end
 end
 
--- ── 3. Start test bridge + connect ──────────────────────────────────────────
-section("Bridge startup + connection")
+-- ── 3. Start test combiner + connect ──────────────────────────────────────────
+section("Combiner startup + connection")
 
-local bridge_dir = find_bridge_dir()
+local combiner_dir = find_combiner_dir()
 local fixture = nil
-if bridge_dir then
-    fixture = bridge_dir .. "/tests/fixtures/servers.json"
-    ok("bridge_dir: " .. bridge_dir)
+if combiner_dir then
+    fixture = combiner_dir .. "/tests/fixtures/servers.json"
+    ok("combiner_dir: " .. combiner_dir)
 else
-    err("bridge_dir", "could not locate bridge/ directory")
+    err("combiner_dir", "could not locate combiner/ directory")
 end
 
-local bridge_started = false
-if bridge_dir and fixture and vim.fn.filereadable(fixture) == 1 then
+local combiner_started = false
+if combiner_dir and fixture and vim.fn.filereadable(fixture) == 1 then
     ok("fixture found: " .. fixture)
-    local started, start_err = start_test_bridge(bridge_dir, fixture)
+    local started, start_err = start_test_combiner(combiner_dir, fixture)
     if started then
-        bridge_started = true
-        ok(string.format("test bridge started on port %d", TEST_PORT))
+        combiner_started = true
+        ok(string.format("test combiner started on port %d", TEST_PORT))
     else
-        err("start_test_bridge", tostring(start_err))
+        err("start_test_combiner", tostring(start_err))
     end
 else
     err("fixture servers.json", "not found at " .. tostring(fixture))
 end
 
-if bridge_started and ok_cfg then
-    cfg.setup({ bridge = { config = fixture, port = TEST_PORT } })
+if combiner_started and ok_cfg then
+    cfg.setup({ combiner = { config = fixture, port = TEST_PORT } })
 end
 
 -- All remaining state lives here so Lua scoping is flat
@@ -204,8 +204,8 @@ local servers = {}
 local tools_tbl = nil
 local registered_names = {}
 
-if bridge_started then
-    local Client = require("mcp_companion.bridge.client")
+if combiner_started then
+    local Client = require("mcp_companion.combiner.client")
     client = Client.new({ host = "127.0.0.1", port = TEST_PORT })
 
     local connect_done = false
@@ -244,9 +244,9 @@ if connected then
         ok(string.format("total tools across servers: %d", total_tools))
     end
 
-    -- Wire bridge module so cc/tools.lua can find the client
-    local bridge_mod = require("mcp_companion.bridge")
-    bridge_mod.client = client
+    -- Wire combiner module so cc/tools.lua can find the client
+    local combiner_mod = require("mcp_companion.combiner")
+    combiner_mod.client = client
 end
 
 -- ── 5. Register tools ────────────────────────────────────────────────────────
@@ -412,8 +412,8 @@ if client then
     ok("client disconnected")
 end
 
-stop_test_bridge()
-ok("test bridge stopped")
+stop_test_combiner()
+ok("test combiner stopped")
 
 -- ── Print results ────────────────────────────────────────────────────────────
 print_results()
