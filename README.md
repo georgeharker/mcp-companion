@@ -129,6 +129,41 @@ format is supported:
 | `autoApprove` | `bool \| string[]` | Auto-approve spec — see [Auto-approve spec](#auto-approve-spec) |
 | `auth` | `string\|object` | Authentication config (see below) |
 | `sharedServer` | `string` | Name of a `sharedServers` entry to start before connecting (see below) |
+| `toolFilter` | `string[]` | Glob patterns; only matching tool names are exposed (empty = all) |
+| `isolate` | `boolean` | Give each chat its own upstream MCP session — see [isolate](#isolate--per-chat-sessions) |
+
+### isolate — per-chat sessions
+
+By default every chat shares one persistent upstream connection to an HTTP/SSE
+server, and therefore one upstream `Mcp-Session-Id`. A *stateful* server that
+keys state on the session — e.g. a server that tracks a "current document" —
+then sees all chats as the same session, so two concurrent chats clash.
+
+Set `"isolate": true` on such a server and the bridge opens a **separate
+upstream session per chat** (still one upstream server *instance*, shared
+transport). The server is handed a distinct, stable `Mcp-Session-Id` per chat
+and partitions its per-session state automatically — no clash. The session is
+torn down when the chat ends; an abandoned one is just an idle upstream session
+the server can expire.
+
+`isolate` is tri-state:
+
+- **absent (default)** — off; all chats share one upstream session.
+- **`true`** — on; per-chat upstream sessions. If the server uses `auth`/OAuth,
+  the token is shared across the per-chat sessions, so it still authenticates
+  once (no extra browser windows).
+- **`false`** — explicitly off (distinct from absent for layered overrides).
+
+Only applies to HTTP/SSE servers. An explicit `true` on a **stdio** server is
+ignored with a warning — stdio has one session per process, so per-chat
+isolation would need a subprocess per chat, which the bridge does not do.
+
+```jsonc
+"svg-mcp": {
+  "url": "http://127.0.0.1:9745/mcp",
+  "isolate": true        // each chat gets its own document/session state
+}
+```
 
 ### sharedServer — per-server process management
 

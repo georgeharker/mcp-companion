@@ -666,6 +666,21 @@ class ToolProcessingMiddleware(Middleware):
         return new_tool
 
 
+def _effective_isolate(srv: ServerConfig) -> bool:
+    """Resolve the tri-state ``isolate`` into the actual per-chat-session decision.
+
+    ``isolate`` is ``None`` (absent → off), ``True`` (forced on) or ``False``
+    (forced off). Per-chat isolation only applies to HTTP/SSE servers; stdio is
+    never isolated (an explicit ``true`` there can't be honoured — it would need
+    a subprocess per chat — so the caller logs a warning).
+    """
+    if not srv.isolate:
+        return False
+    if not ConnectionManager.is_http_server(srv):
+        return False  # stdio: cannot isolate (caller warns)
+    return True
+
+
 def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> FastMCP:
     """Create a proxy for a single upstream MCP server.
 
@@ -679,7 +694,15 @@ def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> 
 
     For servers without auth and without a persistent connection we fall
     back to the simpler dict-based ``create_proxy(config_dict)`` path.
+
+    Per-chat isolation (``isolate: true``, HTTP/SSE only): instead of one shared
+    upstream session, a ``StatefulProxyClient`` opens a distinct upstream session
+    per downstream chat (one server instance, shared transport), so a stateful
+    server is handed a unique ``Mcp-Session-Id`` per chat. See ``_create_isolated_proxy``.
     """
+    if _effective_isolate(srv):
+        return _create_isolated_proxy(config, name, srv)
+
     # Prefer persistent connection if available
     if _conn_manager and _conn_manager.has_connection(name):
         factory = _conn_manager.get_client_factory(name)
@@ -714,6 +737,50 @@ def _create_server_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> 
     # No auth — use the standard config-dict path (preserves headers)
     proxy_config = config.to_fastmcp_config(name)
     return create_proxy(proxy_config.model_dump(exclude_none=True), name=name)
+
+
+def _create_isolated_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -> FastMCP:
+    """Build a per-chat-isolated proxy for an HTTP/SSE server (``isolate: true``).
+
+    Uses FastMCP's ``StatefulProxyClient``: a single base client (one transport,
+    one server instance) whose ``new_stateful`` factory opens — and caches — a
+    *separate upstream session per downstream chat*. The upstream server thus
+    assigns a distinct, stable ``Mcp-Session-Id`` per chat, so a stateful server
+    (e.g. svg-mcp's current document) partitions its state per chat with no
+    clash between concurrent chats. The per-chat session is force-disconnected
+    when the downstream session ends; an abandoned one is just an idle upstream
+    HTTP session the server can expire — never a leaked process.
+    """
+    from fastmcp.client.transports.http import StreamableHttpTransport
+    from fastmcp.client.transports.sse import SSETransport
+    from fastmcp.server.providers.proxy import StatefulProxyClient
+
+    url = _interpolate_str(srv.url) if srv.url else ""
+    headers = _interpolate_dict(srv.headers) if srv.headers else {}
+
+    transport: StreamableHttpTransport | SSETransport
+    if srv.transport == Transport.SSE:
+        transport = SSETransport(url=url, headers=headers)
+    else:
+        transport = StreamableHttpTransport(url=url, headers=headers)
+
+    # Auth (if configured) is held on the shared base client, so the OAuth flow
+    # runs once and every per-chat session reuses the same token — forcing
+    # isolate on an auth'd server does not multiply browser windows.
+    auth: httpx.Auth | None = build_auth(
+        name,
+        auth_config=srv.auth,
+        server_url=srv.url,
+        token_dir=config.oauth.token_dir_path,
+        cache_tokens=config.oauth.cache_tokens,
+    )
+
+    stateful: StatefulProxyClient[Any] = (
+        StatefulProxyClient(transport, auth=auth) if auth is not None
+        else StatefulProxyClient(transport)
+    )
+    logger.info("Server '%s': per-chat session isolation enabled (isolate=true)", name)
+    return FastMCPProxy(client_factory=stateful.new_stateful, name=name)
 
 
 def _needs_oauth(srv: ServerConfig) -> bool:
@@ -833,8 +900,19 @@ def create_bridge(
         # raises AuthenticationError for all subsequent calls.
         enabled = config.get_enabled_servers()
         for name, srv in enabled.items():
-            # Pre-register HTTP/SSE servers for persistent connections.
-            if conn_manager.is_http_server(srv):
+            # isolate is HTTP/SSE-only; an explicit true on a stdio server can't
+            # be honoured (it would need a subprocess per chat).
+            if srv.isolate and not conn_manager.is_http_server(srv):
+                logger.warning(
+                    "Server '%s': isolate=true ignored — only HTTP/SSE servers "
+                    "support per-chat sessions (stdio has one session per process)",
+                    name,
+                )
+
+            # Pre-register HTTP/SSE servers for persistent connections — except
+            # isolated servers, which manage their own per-chat sessions and must
+            # not hold a shared persistent connection.
+            if conn_manager.is_http_server(srv) and not _effective_isolate(srv):
                 conn_manager.register(config, name, srv)
 
             try:

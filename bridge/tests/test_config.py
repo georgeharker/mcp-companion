@@ -128,6 +128,25 @@ def test_server_config_from_dict_http() -> None:
     assert srv.url == "http://example.com/mcp"
 
 
+def test_server_config_isolate_absent_is_none() -> None:
+    srv = ServerConfig.from_dict("remote", {"url": "http://example.com/mcp"})
+    assert srv.isolate is None
+
+
+def test_server_config_isolate_true() -> None:
+    srv = ServerConfig.from_dict(
+        "svg", {"url": "http://example.com/mcp", "isolate": True}
+    )
+    assert srv.isolate is True
+
+
+def test_server_config_isolate_false_explicit() -> None:
+    srv = ServerConfig.from_dict(
+        "svg", {"url": "http://example.com/mcp", "isolate": False}
+    )
+    assert srv.isolate is False
+
+
 class TestEnvCoercion:
     """Tests for env dict value coercion in ServerConfig.from_dict."""
 

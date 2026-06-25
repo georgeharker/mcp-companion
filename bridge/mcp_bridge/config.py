@@ -122,6 +122,29 @@ class ServerConfig(BaseModel):
     Examples: ``["gmail_*", "calendar_*"]`` to only include Gmail and Calendar tools.
     """
 
+    isolate: bool | None = None
+    """Tri-state: give each downstream chat its own upstream MCP session.
+
+    When isolated, the bridge opens a separate upstream session per downstream
+    chat (still one upstream *server instance*, shared transport), so the server
+    is handed a distinct, stable ``Mcp-Session-Id`` per chat and partitions its
+    per-session state automatically — no clash between concurrent chats. When
+    not isolated, all chats share one persistent upstream connection (one
+    ``Mcp-Session-Id``), so a *stateful* server (e.g. svg-mcp's "current
+    document") sees every chat as the same session and they clash.
+
+    - ``None`` (absent — default): off. All chats share one upstream session.
+    - ``True`` / ``False``: forced on / off.
+
+    Tri-state (rather than a plain bool) so "absent" stays distinct from an
+    explicit ``false`` for any layered override.
+
+    Only applies to HTTP/SSE servers. stdio has one session per process, so it
+    is never isolated (an explicit ``true`` is ignored with a warning) — per-chat
+    isolation there would require a subprocess per chat, which the bridge does
+    not do. See ``server._effective_isolate``.
+    """
+
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> ServerConfig:
         """Create ServerConfig from a config dict entry."""
@@ -157,6 +180,7 @@ class ServerConfig(BaseModel):
             auth=data.get("auth"),
             shared_server=shared_server,
             tool_filter=tool_filter,
+            isolate=(None if data.get("isolate") is None else bool(data["isolate"])),
         )
 
 
