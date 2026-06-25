@@ -89,6 +89,11 @@ class _ManagedConnection:
     srv: ServerConfig
     # Mutable client reference — the factory closure reads client_ref[0]
     client_ref: list[HttpClient | None] = field(default_factory=lambda: [None])
+    # The httpx.Auth for this upstream, built once and reused. Shared with any
+    # per-chat isolated proxy (server.py) so the OAuth flow runs once and the
+    # token + its refresh are shared rather than duplicated per chat.
+    auth: httpx.Auth | None = field(default=None, repr=False)
+    _auth_built: bool = field(default=False, repr=False)
     # Exit stack that owns the ``async with client:`` context
     stack: AsyncExitStack = field(default_factory=AsyncExitStack)
     # Background reconnection / health-check task
@@ -181,6 +186,48 @@ class ConnectionManager:
             )
 
         return _factory
+
+    def get_auth(self, name: str) -> httpx.Auth | None:
+        """Return the (cached) ``httpx.Auth`` for *name*, building it once.
+
+        Shared between the persistent "primer" connection and any per-chat
+        isolated proxy created in ``server.py``, so the OAuth flow runs exactly
+        once and the resulting token (and its background refresh) are shared
+        across the primer and every per-chat session — never duplicated.
+        """
+        conn = self._connections.get(name)
+        if conn is None:
+            return None
+        if not conn._auth_built:
+            conn.auth = build_auth(
+                name,
+                auth_config=conn.srv.auth,
+                server_url=conn.srv.url,
+                token_dir=conn.config.oauth.token_dir_path,
+                cache_tokens=conn.config.oauth.cache_tokens,
+            )
+            conn._auth_built = True
+        return conn.auth
+
+    async def wait_ready(self, name: str, timeout: float = _FACTORY_WAIT_TIMEOUT) -> None:
+        """Block until *name*'s first connect attempt has finished (or *timeout*).
+
+        Lets an isolated proxy's per-chat factory gate session creation on the
+        primer's eager OAuth completing, so concurrent first-use chats never
+        race into parallel auth flows.
+        """
+        conn = self._connections.get(name)
+        if conn is None:
+            return
+        try:
+            await asyncio.wait_for(conn._ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+
+    def auth_error(self, name: str) -> str:
+        """Return the recorded auth-failure message for *name* (empty if none)."""
+        conn = self._connections.get(name)
+        return conn._auth_error_msg if conn else ""
 
     def is_auth_failed(self, name: str) -> bool:
         """Return True if *name* is paused due to an authentication error."""
@@ -319,7 +366,11 @@ class ConnectionManager:
         transient port conflict would kill the entire bridge process.
         """
         try:
-            client = _make_disconnected_client(conn.config, conn.name, conn.srv)
+            # Use the cached auth so the primer and any per-chat isolated proxy
+            # share one auth object (one OAuth flow, one refreshed token).
+            client = _make_disconnected_client(
+                conn.config, conn.name, conn.srv, auth=self.get_auth(conn.name)
+            )
             # Enter the async-with context — this starts the session runner
             # and (for OAuth servers) triggers the auth flow.
             await conn.stack.enter_async_context(client)
@@ -509,6 +560,7 @@ def _make_disconnected_client(
     config: BridgeConfig,
     name: str,
     srv: ServerConfig,
+    auth: httpx.Auth | None = None,
 ) -> HttpClient:
     """Create a disconnected ``Client`` for the given HTTP/SSE server.
 
@@ -516,17 +568,21 @@ def _make_disconnected_client(
     the server config are applied.  The ``headers`` field is how servers like
     GitHub Copilot MCP receive their Bearer token when ``auth`` is not set.
 
+    *auth* is normally supplied by the caller (``_open`` passes the connection's
+    cached auth so it is shared); if ``None`` it is built here from the config.
+
     Only called from ``_open()``.  The factory closure returned by
     ``get_client_factory()`` never calls this — it either returns the
     already-connected client or raises.
     """
-    auth: httpx.Auth | None = build_auth(
-        name,
-        auth_config=srv.auth,
-        server_url=srv.url,
-        token_dir=config.oauth.token_dir_path,
-        cache_tokens=config.oauth.cache_tokens,
-    )
+    if auth is None:
+        auth = build_auth(
+            name,
+            auth_config=srv.auth,
+            server_url=srv.url,
+            token_dir=config.oauth.token_dir_path,
+            cache_tokens=config.oauth.cache_tokens,
+        )
 
     url: str = _interpolate_str(srv.url) if srv.url else ""
     headers: dict[str, str] = _interpolate_dict(srv.headers) if srv.headers else {}

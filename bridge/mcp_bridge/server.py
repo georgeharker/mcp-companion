@@ -750,6 +750,15 @@ def _create_isolated_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -
     clash between concurrent chats. The per-chat session is force-disconnected
     when the downstream session ends; an abandoned one is just an idle upstream
     HTTP session the server can expire — never a leaked process.
+
+    OAuth servers (``isolate: true`` + ``auth: oauth``): the per-chat sessions
+    share the auth object owned by the ``ConnectionManager`` "primer" connection
+    (see ``_lifespan``), so the OAuth flow runs *once* on the primer (one browser
+    window), the primer keeps the token refreshed, and per-chat sessions reuse it
+    — distinct ``Mcp-Session-Id`` per chat, single credential. The per-chat
+    factory gates on the primer's readiness so concurrent first-use chats never
+    race into parallel auth flows, and surfaces the primer's auth failure as a
+    retryable ``AuthenticationError``.
     """
     from fastmcp.client.transports.http import StreamableHttpTransport
     from fastmcp.client.transports.sse import SSETransport
@@ -764,9 +773,42 @@ def _create_isolated_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -
     else:
         transport = StreamableHttpTransport(url=url, headers=headers)
 
-    # Auth (if configured) is held on the shared base client, so the OAuth flow
-    # runs once and every per-chat session reuses the same token — forcing
-    # isolate on an auth'd server does not multiply browser windows.
+    # OAuth-isolated: borrow the primer connection's shared, refreshed auth and
+    # gate per-chat session creation on the primer's eager auth completing.
+    if _needs_oauth(srv) and _conn_manager is not None and _conn_manager.has_connection(name):
+        mgr = _conn_manager
+        shared_auth = mgr.get_auth(name)
+        oauth_stateful: StatefulProxyClient[Any] = (
+            StatefulProxyClient(transport, auth=shared_auth) if shared_auth is not None
+            else StatefulProxyClient(transport)
+        )
+
+        async def _gated_factory() -> Any:
+            if mgr.is_auth_failed(name):
+                raise AuthenticationError(
+                    f"Server '{name}' is disabled due to an authentication error: "
+                    f"{mgr.auth_error(name)}. Use bridge__enable_server to retry."
+                )
+            # Wait for the primer's first connect (and thus its OAuth flow) to
+            # finish before opening this chat's session, so the token already
+            # exists and concurrent first-use chats don't trigger parallel flows.
+            await mgr.wait_ready(name)
+            if mgr.is_auth_failed(name):
+                raise AuthenticationError(
+                    f"Server '{name}' is disabled due to an authentication error: "
+                    f"{mgr.auth_error(name)}. Use bridge__enable_server to retry."
+                )
+            return oauth_stateful.new_stateful()
+
+        logger.info(
+            "Server '%s': per-chat session isolation enabled "
+            "(isolate=true, OAuth shared via primer connection)",
+            name,
+        )
+        return FastMCPProxy(client_factory=_gated_factory, name=name)
+
+    # Non-OAuth (or static-header/bearer auth): self-contained. The auth, if any,
+    # is held on the shared base client so per-chat sessions reuse it.
     auth: httpx.Auth | None = build_auth(
         name,
         auth_config=srv.auth,
@@ -774,7 +816,6 @@ def _create_isolated_proxy(config: BridgeConfig, name: str, srv: ServerConfig) -
         token_dir=config.oauth.token_dir_path,
         cache_tokens=config.oauth.cache_tokens,
     )
-
     stateful: StatefulProxyClient[Any] = (
         StatefulProxyClient(transport, auth=auth) if auth is not None
         else StatefulProxyClient(transport)
@@ -909,10 +950,13 @@ def create_bridge(
                     name,
                 )
 
-            # Pre-register HTTP/SSE servers for persistent connections — except
-            # isolated servers, which manage their own per-chat sessions and must
-            # not hold a shared persistent connection.
-            if conn_manager.is_http_server(srv) and not _effective_isolate(srv):
+            # Pre-register HTTP/SSE servers for persistent connections. A
+            # non-OAuth isolated server manages its own per-chat sessions with no
+            # shared connection, so it is NOT registered. An OAuth isolated server
+            # IS registered: its persistent connection becomes the auth "primer"
+            # (eager flow + token refresh) whose auth the per-chat sessions share.
+            isolated_non_oauth = _effective_isolate(srv) and not _needs_oauth(srv)
+            if conn_manager.is_http_server(srv) and not isolated_non_oauth:
                 conn_manager.register(config, name, srv)
 
             try:

@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from mcp_bridge.config import (
     BridgeConfig,
     OAuthConfig,
@@ -145,6 +147,23 @@ def test_server_config_isolate_false_explicit() -> None:
         "svg", {"url": "http://example.com/mcp", "isolate": False}
     )
     assert srv.isolate is False
+
+
+def test_server_config_unknown_key_warns(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="mcp-bridge"):
+        ServerConfig.from_dict("svg", {"url": "http://x/mcp", "bogusKey": 1})
+    assert any("bogusKey" in r.message for r in caplog.records)
+
+
+def test_sharedserver_config_unknown_key_warns(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="mcp-bridge"):
+        # `isolate` belongs on the mcpServers entry, not the sharedServers block
+        SharedServerConfig.from_dict("gws", {"command": "x", "isolate": True})
+    assert any("isolate" in r.message for r in caplog.records)
 
 
 class TestEnvCoercion:

@@ -168,10 +168,18 @@ class SharedServerManager:
             return
 
         tasks = []
+        seen_ss: set[str] = set()
         for name, srv in self._config.get_enabled_servers().items():
             ss = self._config.resolve_shared_server(name)
             if ss is None:
                 continue
+            # Multiple server entries may reference the same sharedServer (e.g.
+            # several `gws` accounts pointing at one workspace-mcp process). Start
+            # that process once — sharedserver refcounts, but we avoid a duplicate
+            # `use` + health-poll per referring entry.
+            if ss.name in seen_ss:
+                continue
+            seen_ss.add(ss.name)
             tasks.append(self._start_one(name, ss, srv.url))
 
         # Run all sharedserver starts concurrently.
