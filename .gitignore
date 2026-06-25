@@ -6,3 +6,14 @@
 /.quarto/
 **/*.quarto_ipynb
 _quarto-deploy.yml
+
+# Python virtualenvs, caches, build output (bridge package)
+.venv/
+**/.venv/
+**/.venv.backup*/
+**/__pycache__/
+**/.mypy_cache/
+**/.pytest_cache/
+**/.ruff_cache/
+/bridge/dist/
+*.egg-info/
