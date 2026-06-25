@@ -3,7 +3,7 @@
 ---
 --- Per the MCP spec, prompts are user-controlled and designed to be invoked
 --- explicitly (e.g. as slash commands). The callback receives the CC Chat
---- object and calls prompts/get on the bridge, then injects the result
+--- object and calls prompts/get on the combiner, then injects the result
 --- messages into the chat.
 ---
 --- CC API (v19+):
@@ -20,11 +20,11 @@ local M = {}
 local log = require("mcp_companion.log")
 
 --- Register MCP prompts as CC / slash commands.
---- Called on bridge_ready and servers_updated events.
+--- Called on combiner_ready and servers_updated events.
 function M.register()
-    local bridge = require("mcp_companion.bridge")
+    local combiner = require("mcp_companion.combiner")
 
-    if not bridge.client or not bridge.client.connected then
+    if not combiner.client or not combiner.client.connected then
         return
     end
 
@@ -49,7 +49,7 @@ function M.register()
         end
     end
 
-    local prompts = bridge.client.prompts or {}
+    local prompts = combiner.client.prompts or {}
     local count = 0
 
     for _, prompt in ipairs(prompts) do
@@ -79,8 +79,8 @@ function M.register()
                     end
                 end
 
-                -- Fetch prompt from bridge
-                bridge.client:get_prompt(captured_prompt.name, args, function(err, result)
+                -- Fetch prompt from combiner
+                combiner.client:get_prompt(captured_prompt.name, args, function(err, result)
                     vim.schedule(function()
                         if err then
                             log.error("Prompt '%s' error: %s", captured_prompt.name, tostring(err))

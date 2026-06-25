@@ -1,6 +1,6 @@
 """Persistent HTTP/SSE connection manager for upstream MCP servers.
 
-Keeps ``fastmcp.Client`` sessions alive for the lifetime of the bridge so
+Keeps ``fastmcp.Client`` sessions alive for the lifetime of the combiner so
 that proxy tool-calls reuse the existing TCP+TLS+MCP handshake rather than
 paying that cost on every invocation.
 
@@ -23,7 +23,7 @@ Auth-failure semantics
   raises ``AuthenticationError`` for all subsequent calls — **no new
   ``OAuth`` instances are created**, no browser windows open.
 * The health-check monitor skips auth-failed connections.
-* The only recovery path is ``bridge__enable_server`` which calls
+* The only recovery path is ``combiner__enable_server`` which calls
   ``reset_auth_failure()`` and then ``connect()`` for a single fresh
   attempt.
 """
@@ -41,16 +41,16 @@ from fastmcp import Client
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.client.transports.sse import SSETransport
 
-from mcp_bridge.auth import build_auth
-from mcp_bridge.config import (
-    BridgeConfig,
+from mcp_combiner.auth import build_auth
+from mcp_combiner.config import (
+    CombinerConfig,
     ServerConfig,
     Transport,
     _interpolate_dict,
     _interpolate_str,
 )
 
-logger = logging.getLogger("mcp-bridge")
+logger = logging.getLogger("mcp-combiner")
 
 # The only transport types this module creates.
 HttpClient = Client[StreamableHttpTransport | SSETransport]
@@ -68,7 +68,7 @@ _FACTORY_WAIT_TIMEOUT = 60.0  # seconds
 
 
 # ---------------------------------------------------------------------------
-# Custom exception so the bridge can distinguish auth errors from transient
+# Custom exception so the combiner can distinguish auth errors from transient
 # connection failures.  RetryMiddleware should **not** retry these.
 # ---------------------------------------------------------------------------
 class AuthenticationError(Exception):
@@ -85,7 +85,7 @@ class _ManagedConnection:
     """Internal bookkeeping for one persistent upstream."""
 
     name: str
-    config: BridgeConfig
+    config: CombinerConfig
     srv: ServerConfig
     # Mutable client reference — the factory closure reads client_ref[0]
     client_ref: list[HttpClient | None] = field(default_factory=lambda: [None])
@@ -119,11 +119,11 @@ class ConnectionManager:
         mgr = ConnectionManager()
         mgr.register(config, name, srv)      # pre-register
         await mgr.connect_all(config)         # blocks until all resolved
-        # ... bridge runs ...
+        # ... combiner runs ...
         await mgr.close_all()                 # called in lifespan finally
 
     The optional *on_connected* callback is invoked (from a background task)
-    whenever a persistent connection transitions from down → up.  The bridge
+    whenever a persistent connection transitions from down → up.  The combiner
     uses this to invalidate the tool cache so the next ``tools/list`` picks
     up the newly-connected server's tools.
     """
@@ -166,7 +166,7 @@ class ConnectionManager:
                 raise AuthenticationError(
                     f"Server '{name}' is disabled due to an authentication error: "
                     f"{conn._auth_error_msg}. "
-                    "Use bridge__enable_server to retry."
+                    "Use combiner__enable_server to retry."
                 )
 
             client = conn.client_ref[0]
@@ -247,7 +247,7 @@ class ConnectionManager:
     # Connect / disconnect
     # ------------------------------------------------------------------
 
-    def register(self, config: BridgeConfig, name: str, srv: ServerConfig) -> None:
+    def register(self, config: CombinerConfig, name: str, srv: ServerConfig) -> None:
         """Pre-register an HTTP/SSE server without opening a connection.
 
         This creates the internal bookkeeping entry so that
@@ -259,7 +259,7 @@ class ConnectionManager:
             return
         self._connections[name] = _ManagedConnection(name=name, config=config, srv=srv)
 
-    async def connect(self, config: BridgeConfig, name: str, srv: ServerConfig) -> None:
+    async def connect(self, config: CombinerConfig, name: str, srv: ServerConfig) -> None:
         """Open a persistent connection to one HTTP/SSE upstream.
 
         If the server was already registered via ``register()``, this opens
@@ -286,11 +286,11 @@ class ConnectionManager:
                 self._monitor(conn), name=f"conn-monitor-{name}"
             )
 
-    async def connect_all(self, config: BridgeConfig) -> None:
+    async def connect_all(self, config: CombinerConfig) -> None:
         """Open persistent connections for every registered HTTP/SSE server.
 
         Connections are opened **concurrently** in background tasks.  This
-        method returns immediately so the bridge can start serving other
+        method returns immediately so the combiner can start serving other
         servers without waiting for OAuth flows that require user interaction.
 
         Each server's ``_ready`` event gates the factory — callers that
@@ -313,7 +313,7 @@ class ConnectionManager:
                 [n for n in self._connections],
             )
 
-    async def _connect_one(self, config: BridgeConfig, name: str, srv: ServerConfig) -> None:
+    async def _connect_one(self, config: CombinerConfig, name: str, srv: ServerConfig) -> None:
         """Background wrapper around ``connect`` — logs but never raises."""
         try:
             await self.connect(config, name, srv)
@@ -363,7 +363,7 @@ class ConnectionManager:
         ``SystemExit`` is caught explicitly because the vendored uvicorn
         callback server calls ``sys.exit(1)`` when it cannot bind the OAuth
         callback port (e.g. address already in use).  Without this guard a
-        transient port conflict would kill the entire bridge process.
+        transient port conflict would kill the entire combiner process.
         """
         try:
             # Use the cached auth so the primer and any per-chat isolated proxy
@@ -379,7 +379,7 @@ class ConnectionManager:
             conn._auth_failed = False
             conn._auth_error_msg = ""
             logger.info("Persistent connection opened: %s", conn.name)
-            # Notify the bridge so it can invalidate the tool cache
+            # Notify the combiner so it can invalidate the tool cache
             if self._on_connected:
                 try:
                     self._on_connected(conn.name)
@@ -557,7 +557,7 @@ def _is_auth_error(exc: BaseException) -> bool:
 
 
 def _make_disconnected_client(
-    config: BridgeConfig,
+    config: CombinerConfig,
     name: str,
     srv: ServerConfig,
     auth: httpx.Auth | None = None,

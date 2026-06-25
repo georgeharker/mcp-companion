@@ -1,4 +1,4 @@
-"""Tests for the bridge__reload_config meta-tool's diff/apply logic.
+"""Tests for the combiner__reload_config meta-tool's diff/apply logic.
 
 These use lightweight fakes for the FastMCP server and the connection /
 sharedserver managers so the diff behaviour can be exercised without standing
@@ -13,9 +13,9 @@ from typing import Any
 
 import pytest
 
-import mcp_bridge.server as server_mod
-from mcp_bridge.config import BridgeConfig, ServerConfig
-from mcp_bridge.meta_tools import register_meta_tools
+import mcp_combiner.server as server_mod
+from mcp_combiner.config import CombinerConfig, ServerConfig
+from mcp_combiner.meta_tools import register_meta_tools
 
 
 class _FakeProvider:
@@ -26,8 +26,8 @@ class _FakeProvider:
         return f"<FakeProvider namespace='{self._namespace}'>"
 
 
-class _FakeBridge:
-    """Captures @bridge.tool() functions and models mount/providers."""
+class _FakeCombiner:
+    """Captures @combiner.tool() functions and models mount/providers."""
 
     def __init__(self) -> None:
         self.providers: list[Any] = []
@@ -62,10 +62,10 @@ class _FakeConnManager:
     def reset_auth_failure(self, name: str) -> None:
         self.calls.append(("reset_auth", name))
 
-    def register(self, _config: BridgeConfig, name: str, _srv: ServerConfig) -> None:
+    def register(self, _config: CombinerConfig, name: str, _srv: ServerConfig) -> None:
         self.calls.append(("register", name))
 
-    async def connect(self, _config: BridgeConfig, name: str, _srv: ServerConfig) -> None:
+    async def connect(self, _config: CombinerConfig, name: str, _srv: ServerConfig) -> None:
         self.connected.add(name)
         self.calls.append(("connect", name))
 
@@ -103,9 +103,9 @@ def _http(url: str) -> dict[str, Any]:
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cfg_path = tmp_path / "servers.json"
     _write(cfg_path, {"alpha": _http("http://localhost:1111/mcp")})
-    config = BridgeConfig.load(str(cfg_path))
+    config = CombinerConfig.load(str(cfg_path))
 
-    bridge = _FakeBridge()
+    combiner = _FakeCombiner()
     conn = _FakeConnManager()
     # alpha is sharedserver-backed so restart() reports a real process bounce.
     ss = _FakeSSManager(sharedserver_backed={"alpha"})
@@ -120,18 +120,18 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         lambda: invalidated.__setitem__("count", invalidated["count"] + 1),
     )
 
-    register_meta_tools(bridge, config, conn, ss)
-    reload = bridge.tools["bridge__reload_config"]
-    restart = bridge.tools["bridge__restart_server"]
+    register_meta_tools(combiner, config, conn, ss)
+    reload = combiner.tools["combiner__reload_config"]
+    restart = combiner.tools["combiner__restart_server"]
 
     # Pretend alpha is already mounted+connected from startup.
-    bridge.providers.append(_FakeProvider("alpha"))
+    combiner.providers.append(_FakeProvider("alpha"))
     conn.connected.add("alpha")
 
     return {
         "cfg_path": cfg_path,
         "config": config,
-        "bridge": bridge,
+        "combiner": combiner,
         "conn": conn,
         "ss": ss,
         "reload": reload,
@@ -140,8 +140,8 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     }
 
 
-def _namespaces(bridge: _FakeBridge) -> set[str]:
-    return {p._namespace for p in bridge.providers}
+def _namespaces(combiner: _FakeCombiner) -> set[str]:
+    return {p._namespace for p in combiner.providers}
 
 
 async def test_no_changes(harness: dict[str, Any]) -> None:
@@ -158,7 +158,7 @@ async def test_add_server(harness: dict[str, Any]) -> None:
     result = await harness["reload"]()
 
     assert "mounted=['beta']" in result
-    assert _namespaces(harness["bridge"]) == {"alpha", "beta"}
+    assert _namespaces(harness["combiner"]) == {"alpha", "beta"}
     assert ("connect", "beta") in harness["conn"].calls
     # alpha was untouched.
     assert ("disconnect", "alpha") not in harness["conn"].calls
@@ -170,7 +170,7 @@ async def test_remove_server(harness: dict[str, Any]) -> None:
     result = await harness["reload"]()
 
     assert "removed=['alpha']" in result
-    assert _namespaces(harness["bridge"]) == set()
+    assert _namespaces(harness["combiner"]) == set()
     assert ("disconnect", "alpha") in harness["conn"].calls
     assert "alpha" not in harness["config"].servers
 
@@ -184,7 +184,7 @@ async def test_changed_server_remounts(harness: dict[str, Any]) -> None:
     # Unmounted then remounted exactly once each.
     assert harness["conn"].calls.count(("disconnect", "alpha")) == 1
     assert harness["conn"].calls.count(("connect", "alpha")) == 1
-    assert _namespaces(harness["bridge"]) == {"alpha"}
+    assert _namespaces(harness["combiner"]) == {"alpha"}
     assert harness["config"].servers["alpha"].url == "http://localhost:9999/mcp"
 
 
@@ -198,10 +198,10 @@ async def test_disabling_server_unmounts_without_remount(harness: dict[str, Any]
     assert "changed=['alpha']" in result
     assert "mounted=[]" in result
     assert ("disconnect", "alpha") in harness["conn"].calls
-    assert _namespaces(harness["bridge"]) == set()
+    assert _namespaces(harness["combiner"]) == set()
 
 
-# --- bridge__restart_server -------------------------------------------------
+# --- combiner__restart_server -------------------------------------------------
 
 
 async def test_restart_unknown_server(harness: dict[str, Any]) -> None:
@@ -235,7 +235,7 @@ async def test_restart_sharedserver_backed(harness: dict[str, Any]) -> None:
     # We never use the grace-period refcount path for a restart.
     assert ("stop", "alpha") not in ss_calls
     # Provider remounted exactly once.
-    assert _namespaces(harness["bridge"]) == {"alpha"}
+    assert _namespaces(harness["combiner"]) == {"alpha"}
     assert harness["invalidated"]["count"] == 1
 
 
@@ -255,4 +255,4 @@ async def test_restart_non_sharedserver_reopens_connection(harness: dict[str, An
     assert "connection re-opened" in result  # restart() returned False
     assert ("disconnect", "beta") in harness["conn"].calls
     assert ("connect", "beta") in harness["conn"].calls
-    assert "beta" in _namespaces(harness["bridge"])
+    assert "beta" in _namespaces(harness["combiner"])

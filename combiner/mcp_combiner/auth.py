@@ -1,4 +1,4 @@
-"""OAuth authentication support for MCP bridge.
+"""OAuth authentication support for MCP combiner.
 
 Provides:
 - Encrypted file-based key-value store for persistent OAuth token storage
@@ -6,10 +6,10 @@ Provides:
 - Uses FastMCP's OAuth client for the full Authorization Code + PKCE flow
 
 Token files are stored under ``token_dir/<server>/`` (default
-``~/.cache/mcp-companion/oauth-tokens``), encrypted with Fernet.
+``~/.cache/mcp-combiner/oauth-tokens``), encrypted with Fernet.
 Disk caching can be disabled by passing ``cache_tokens=False`` to
 :func:`build_auth`, in which case tokens are kept in memory only
-and lost when the bridge restarts.
+and lost when the combiner restarts.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ from mcp.client.auth.utils import (
 )
 from mcp.shared.auth import OAuthToken
 
-logger = logging.getLogger("mcp-bridge")
+logger = logging.getLogger("mcp-combiner")
 
 
 class _RefreshOutcome(enum.Enum):
@@ -117,31 +117,31 @@ _REFRESH_MARGIN_SECONDS = 120.0
 # saw activity, treat the next request as a wake-up: force a pre-flight
 # refresh regardless of what the local clock says about expiry.  Catches the
 # laptop-was-asleep case where wall-clock time advanced past expiry while
-# the bridge was suspended.
+# the combiner was suspended.
 _WAKE_GAP_SECONDS = 300.0  # 5 minutes
 
 
 # Default token storage directory (XDG cache convention)
-_DEFAULT_TOKEN_DIR = Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
+_DEFAULT_TOKEN_DIR = Path.home() / ".cache" / "mcp-combiner" / "oauth-tokens"
 
 # Environment variable for encryption key (optional - derived from machine ID if not set)
-_ENCRYPTION_KEY_ENV = "MCP_BRIDGE_TOKEN_KEY"
+_ENCRYPTION_KEY_ENV = "MCP_COMBINER_TOKEN_KEY"
 
 
 def _get_or_create_encryption_key(token_dir: Path) -> bytes:
     """Get or derive a Fernet encryption key for token storage.
 
     Key sources (in priority order):
-    1. MCP_BRIDGE_TOKEN_KEY environment variable - for explicit key management
+    1. MCP_COMBINER_TOKEN_KEY environment variable - for explicit key management
     2. Derived from machine ID + username - stable across restarts, unique per user
 
     **Security Note**: The derived key (option 2) provides obfuscation, not strong
     security. Anyone with read access to your home directory can derive the same
-    key. For stronger security, set MCP_BRIDGE_TOKEN_KEY to a securely stored secret.
+    key. For stronger security, set MCP_COMBINER_TOKEN_KEY to a securely stored secret.
 
     The derived key approach is a reasonable default that:
     - Prevents casual inspection of token files
-    - Is stable across bridge restarts (no key file to manage)
+    - Is stable across combiner restarts (no key file to manage)
     - Is unique per user on multi-user systems
     """
     # Check environment first - explicit key takes priority
@@ -149,18 +149,18 @@ def _get_or_create_encryption_key(token_dir: Path) -> bytes:
         logger.debug("Using encryption key from %s environment variable", _ENCRYPTION_KEY_ENV)
         return derive_jwt_key(
             low_entropy_material=env_key,
-            salt="mcp-bridge-token-encryption",
+            salt="mcp-combiner-token-encryption",
         )
 
     # Derive from machine ID + username (stable, unique per user)
     machine_id = platform.node()  # hostname
     username = getpass.getuser()
-    material = f"{machine_id}:{username}:mcp-companion-tokens"
+    material = f"{machine_id}:{username}:mcp-combiner-tokens"
 
     logger.debug("Deriving encryption key from machine ID + username")
     return derive_jwt_key(
         low_entropy_material=material,
-        salt="mcp-bridge-token-encryption",
+        salt="mcp-combiner-token-encryption",
     )
 
 
@@ -203,7 +203,7 @@ class _ExpiryAwareAdapter(TokenStorageAdapter):
 
     The MCP SDK stores ``OAuthToken.expires_in`` (a relative duration from
     issuance) and recalculates ``token_expiry_time`` as
-    ``time.time() + expires_in`` on every load.  After a bridge restart this
+    ``time.time() + expires_in`` on every load.  After a combiner restart this
     makes an old token appear freshly minted.
 
     We intercept ``set_tokens`` / ``get_tokens`` to maintain a separate
@@ -281,7 +281,7 @@ class _RefreshTokenOAuth(OAuth):
     """OAuth subclass that ensures a ``refresh_token`` is issued where possible.
 
     The standard MCP OAuth client never requests offline access, so providers
-    like Google do not issue a ``refresh_token``.  Without one the bridge must
+    like Google do not issue a ``refresh_token``.  Without one the combiner must
     open a browser every time the short-lived access token expires.
 
     Currently handles:
@@ -328,7 +328,7 @@ class _RefreshTokenOAuth(OAuth):
         ``redirect_port`` every time.  If a previous flow is still waiting
         for the user to complete the browser authorisation (e.g. the machine
         was idle), a second ``callback_handler`` call would try to bind the
-        same port and crash the bridge (``sys.exit(1)`` from uvicorn).
+        same port and crash the combiner (``sys.exit(1)`` from uvicorn).
 
         This override keeps a class-level registry of active flows keyed by
         port.  The first caller owns the server; any concurrent caller for
@@ -524,7 +524,7 @@ class _RefreshTokenOAuth(OAuth):
         the headroom away on a transient network failure.
 
         **The synthetic expiry is intentionally NOT persisted to disk.**  The
-        grace bridges a transient outage within one bridge-process lifetime;
+        grace combiners a transient outage within one combiner-process lifetime;
         persisting would propagate the bumped value across restarts and trick
         ``_initialize()`` into trusting an expiry the access token doesn't
         actually have at the OAuth provider.  ``_ExpiryAwareAdapter.set_tokens``
@@ -717,11 +717,11 @@ class _RefreshTokenOAuth(OAuth):
           case where the access token expired during suspend and the network
           may also be reassociating.
         * **First request** — the OAuth instance has never seen activity yet
-          (``_last_seen_at is None``).  This is the bridge-just-started case:
+          (``_last_seen_at is None``).  This is the combiner-just-started case:
           the on-disk expiry could be stale (e.g. by a synthetic grace value
           set in a previous session), and we have no live signal about how
           long the wall clock has advanced since the token was issued.  Cost
-          is one extra refresh on bridge startup; it's the only way to be
+          is one extra refresh on combiner startup; it's the only way to be
           sure the persisted expiry hasn't been doctored by an earlier grace
           window or pre-empted by external token revocation.
 
@@ -1079,10 +1079,10 @@ def build_auth(
 
     Token caching:
     - ``cache_tokens=True`` (default): tokens persisted to ``token_dir/<server>/``
-      (default ``~/.cache/mcp-companion/oauth-tokens``).  Tokens survive bridge
+      (default ``~/.cache/mcp-combiner/oauth-tokens``).  Tokens survive combiner
       restarts and are refreshed automatically.
     - ``cache_tokens=False``: tokens kept in memory only.  The OAuth browser flow
-      will be triggered on every bridge restart.
+      will be triggered on every combiner restart.
 
     The ``cache_tokens`` flag can also be set per-server inside the auth dict:
     ``auth: {oauth: {cache_tokens: false}}``.  Per-server setting overrides the
@@ -1161,7 +1161,7 @@ def _build_oauth(
 
     When *cache_tokens* is ``True`` (default) an encrypted file store is
     created at *base_dir* and passed as ``token_storage``.  Tokens are persisted
-    to disk with Fernet encryption and survive bridge restarts.
+    to disk with Fernet encryption and survive combiner restarts.
 
     When *cache_tokens* is ``False`` ``token_storage=None`` is passed, which
     tells FastMCP to use an in-memory store.  Tokens are lost on restart and the
@@ -1198,7 +1198,7 @@ def _build_oauth(
     return _RefreshTokenOAuth(
         mcp_url=server_url,
         scopes=scope_str,
-        client_name=f"mcp-companion ({server_name})",
+        client_name=f"mcp-combiner ({server_name})",
         token_storage=storage,
         _sidecar_store=storage,  # same store, separate collection
         client_id=client_id,

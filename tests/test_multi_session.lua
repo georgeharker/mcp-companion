@@ -1,5 +1,5 @@
 -- Multi-session: 5s delay between sessions
-local Client = require("mcp_companion.bridge.client")
+local Client = require("mcp_companion.combiner.client")
 
 local function test_session(label, on_done)
   print(("=== %s ==="):format(label))

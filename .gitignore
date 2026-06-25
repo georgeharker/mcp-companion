@@ -1,5 +1,5 @@
-/bridge/mcp_bridge/__pycache__
-/bridge/tests/__pycache__
+/combiner/mcp_combiner/__pycache__
+/combiner/tests/__pycache__
 
 # Quarto docs build artifacts
 /_site/
@@ -7,7 +7,7 @@
 **/*.quarto_ipynb
 _quarto-deploy.yml
 
-# Python virtualenvs, caches, build output (bridge package)
+# Python virtualenvs, caches, build output (combiner package)
 .venv/
 **/.venv/
 **/.venv.backup*/
@@ -15,5 +15,5 @@ _quarto-deploy.yml
 **/.mypy_cache/
 **/.pytest_cache/
 **/.ruff_cache/
-/bridge/dist/
+/combiner/dist/
 *.egg-info/

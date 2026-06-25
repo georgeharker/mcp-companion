@@ -1,7 +1,7 @@
 """Virtual `neovim` MCP server: advertise `neovim_*` tools and route calls back
 into live editors.
 
-Factored out of ``server.py`` for clarity. The bridge's core proxy/middleware
+Factored out of ``server.py`` for clarity. The combiner's core proxy/middleware
 calls a handful of entry points here:
 
 * ``record_session_token`` — from ToolProcessingMiddleware.on_request, builds the
@@ -9,7 +9,7 @@ calls a handful of entry points here:
 * ``append_nvim_tools`` — from on_list_tools, injects the neovim tool catalog.
 * ``is_nvim_tool`` / ``call_nvim_tool`` — from on_call_tool, intercepts and routes
   ``neovim_*`` calls over the channel instead of the upstream proxy.
-* ``register_routes`` — from create_bridge, mounts /neovim/instances and /neovim/bind.
+* ``register_routes`` — from create_combiner, mounts /neovim/instances and /neovim/bind.
 
 The actual back-channel (sockets, per-instance queues) lives in
 ``nvim_channel.NvimChannelManager``; this module is the MCP-facing glue +
@@ -32,9 +32,9 @@ from fastmcp.tools.tool import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mcp_bridge.nvim_channel import NoInstanceError, NvimChannelManager
+from mcp_combiner.nvim_channel import NoInstanceError, NvimChannelManager
 
-logger = logging.getLogger("mcp-bridge")
+logger = logging.getLogger("mcp-combiner")
 
 # The virtual native server name and its tool-name prefix (FastMCP-style).
 _NVIM_SERVER = "neovim"
@@ -50,7 +50,7 @@ _NVIM_INSTANCE_DESC = (
 
 # --- Routing tables ---
 # session_id -> token: keyed by context.fastmcp_context.session_id (the id the
-# tool middleware sees), recovered from the X-MCP-Bridge-Session header.
+# tool middleware sees), recovered from the X-MCP-Combiner-Session header.
 _session_tokens: dict[str, str] = {}
 # token -> instance_id: a chat (token) is bound to one editor via POST /neovim/bind.
 _token_instances: dict[str, str] = {}
@@ -76,7 +76,7 @@ def record_session_token(session_id: str | None) -> None:
 
     Keyed by context.fastmcp_context.session_id (the id the tool middleware
     sees), which differs from the transport's mcp-session-id header. The token
-    arrives via the X-MCP-Bridge-Session header — sent by the client directly,
+    arrives via the X-MCP-Combiner-Session header — sent by the client directly,
     or injected from the /mcp/<token> URL by TokenRewriteMiddleware.
     """
     if not session_id or session_id in _session_tokens:
@@ -84,7 +84,7 @@ def record_session_token(session_id: str | None) -> None:
     from fastmcp.server.dependencies import get_http_headers
 
     headers = get_http_headers()
-    token = headers.get("x-mcp-bridge-session")
+    token = headers.get("x-mcp-combiner-session")
     if token:
         _session_tokens[session_id] = token
 
@@ -178,7 +178,7 @@ async def append_nvim_tools(
     session_disabled: dict[str, set[str]],
 ) -> list[Tool]:
     """Append the virtual `neovim_*` tools whenever a Neovim instance has
-    connected — i.e. the `neovim` server is just another entry in the bridge
+    connected — i.e. the `neovim` server is just another entry in the combiner
     aggregate, advertised to every client (ACP-injected or directly configured).
     The catalog is the frozen manifest captured over the channel from the first
     instance to connect.
@@ -252,7 +252,7 @@ async def call_nvim_tool(
             if not channel.instance_ids():
                 raise ToolError(
                     f"Tool '{tool_name}' is unavailable — no Neovim instance is "
-                    "connected to the bridge."
+                    "connected to the combiner."
                 )
             raise ToolError(
                 f"Tool '{tool_name}': this connection is not associated with a "
@@ -262,7 +262,7 @@ async def call_nvim_tool(
             )
 
     ctx = {
-        "caller": "bridge",
+        "caller": "combiner",
         "session_id": sid,
         "token": _session_tokens.get(sid or ""),
     }
@@ -279,16 +279,16 @@ async def call_nvim_tool(
 
 
 def register_routes(
-    bridge: FastMCP,
+    combiner: FastMCP,
     notify_tool_list_changed: Callable[[], Awaitable[None]],
 ) -> None:
-    """Mount the back-channel REST API on the bridge.
+    """Mount the back-channel REST API on the combiner.
 
     The plugin opens a private msgpack-RPC socket and registers it here so the
-    bridge can route `neovim_*` tool calls back into the live editor.
+    combiner can route `neovim_*` tool calls back into the live editor.
     """
 
-    @bridge.custom_route("/neovim/instances", methods=["POST", "DELETE"])
+    @combiner.custom_route("/neovim/instances", methods=["POST", "DELETE"])
     async def manage_nvim_instances(request: Request) -> JSONResponse:
         """Register/deregister a Neovim instance by its private socket.
 
@@ -326,7 +326,7 @@ def register_routes(
         logger.info("REST: registered nvim instance %s at %s (meta=%s)", instance_id, socket, meta)
         return JSONResponse({"instance_id": instance_id, "action": "registered"})
 
-    @bridge.custom_route("/neovim/bind", methods=["POST", "DELETE"])
+    @combiner.custom_route("/neovim/bind", methods=["POST", "DELETE"])
     async def manage_nvim_bind(request: Request) -> JSONResponse:
         """Bind/unbind a chat token to a Neovim instance.
 

@@ -1,4 +1,4 @@
-"""Config loading and watching for mcp-bridge."""
+"""Config loading and watching for mcp-combiner."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-logger = logging.getLogger("mcp-bridge")
+logger = logging.getLogger("mcp-combiner")
 
 
 def _warn_unknown_keys(kind: str, name: str, data: dict[str, Any], known: set[str]) -> None:
@@ -91,7 +91,7 @@ class SharedServerConfig(BaseModel):
 
     health_timeout: int = 30
     """Seconds to wait for the HTTP server to become reachable after starting.
-    The bridge polls the server URL until it responds or this timeout expires.
+    The combiner polls the server URL until it responds or this timeout expires.
     """
 
     @classmethod
@@ -152,7 +152,7 @@ class ServerConfig(BaseModel):
     isolate: bool | None = None
     """Tri-state: give each downstream chat its own upstream MCP session.
 
-    When isolated, the bridge opens a separate upstream session per downstream
+    When isolated, the combiner opens a separate upstream session per downstream
     chat (still one upstream *server instance*, shared transport), so the server
     is handed a distinct, stable ``Mcp-Session-Id`` per chat and partitions its
     per-session state automatically — no clash between concurrent chats. When
@@ -168,7 +168,7 @@ class ServerConfig(BaseModel):
 
     Only applies to HTTP/SSE servers. stdio has one session per process, so it
     is never isolated (an explicit ``true`` is ignored with a warning) — per-chat
-    isolation there would require a subprocess per chat, which the bridge does
+    isolation there would require a subprocess per chat, which the combiner does
     not do. See ``server._effective_isolate``.
     """
 
@@ -260,7 +260,7 @@ class HealthResponse(BaseModel):
 
 
 class OAuthConfig(BaseModel):
-    """Top-level OAuth settings for the bridge.
+    """Top-level OAuth settings for the combiner.
 
     These are global defaults; individual servers can override ``cache_tokens``
     inside their ``auth: {oauth: {cache_tokens: false}}`` block.
@@ -269,14 +269,14 @@ class OAuthConfig(BaseModel):
 
         "oauth": {
             "cache_tokens": true,
-            "token_dir": "~/.cache/mcp-companion/oauth-tokens"
+            "token_dir": "~/.cache/mcp-combiner/oauth-tokens"
         }
     """
 
     cache_tokens: bool = True
     """Persist OAuth tokens to disk (default ``true``).
 
-    When ``true``, tokens are stored under *token_dir* and reused across bridge
+    When ``true``, tokens are stored under *token_dir* and reused across combiner
     restarts.  When ``false``, tokens live in memory only and the browser OAuth
     flow runs again on each restart.
     """
@@ -284,7 +284,7 @@ class OAuthConfig(BaseModel):
     token_dir: str | None = None
     """Directory for OAuth token files.
 
-    Defaults to ``~/.cache/mcp-companion/oauth-tokens`` when ``null``.
+    Defaults to ``~/.cache/mcp-combiner/oauth-tokens`` when ``null``.
     Supports ``~`` expansion.  Each server gets its own subdirectory.
     """
 
@@ -292,7 +292,7 @@ class OAuthConfig(BaseModel):
     def token_dir_path(self) -> Path:
         """Resolved :class:`~pathlib.Path` for *token_dir*, using default if not set."""
         if self.token_dir is None:
-            return Path.home() / ".cache" / "mcp-companion" / "oauth-tokens"
+            return Path.home() / ".cache" / "mcp-combiner" / "oauth-tokens"
         return Path(self.token_dir).expanduser()
 
     @classmethod
@@ -304,8 +304,8 @@ class OAuthConfig(BaseModel):
         )
 
 
-class BridgeConfig(BaseModel):
-    """Full bridge configuration."""
+class CombinerConfig(BaseModel):
+    """Full combiner configuration."""
 
     servers: dict[str, ServerConfig] = Field(default_factory=dict)
     shared_servers: dict[str, SharedServerConfig] = Field(default_factory=dict)
@@ -313,7 +313,7 @@ class BridgeConfig(BaseModel):
     config_path: str = ""
 
     @classmethod
-    def load(cls, config_path: str) -> BridgeConfig:
+    def load(cls, config_path: str) -> CombinerConfig:
         """Load config from a ``servers.json`` file."""
         path = Path(config_path).expanduser().resolve()
         if not path.exists():

@@ -1,9 +1,9 @@
 --- mcp-companion.nvim — Neovim back-channel registration
 ---
---- The bridge is a separate process; to let it call `neovim_*` tools back into
+--- The combiner is a separate process; to let it call `neovim_*` tools back into
 --- this editor it needs a connection to a private msgpack-RPC socket. This
---- module opens that socket (`serverstart`), registers it with the bridge, and
---- binds per-chat tokens to this instance so the bridge can route a chat's tool
+--- module opens that socket (`serverstart`), registers it with the combiner, and
+--- binds per-chat tokens to this instance so the combiner can route a chat's tool
 --- calls to the right editor. See docs/designs/native-neovim-server.md (unit 2).
 --- @module mcp_companion.native.channel
 
@@ -15,7 +15,7 @@ local M = {}
 local _instance_id = nil
 --- @type string|nil  Private socket path once started.
 local _socket = nil
---- @type "idle"|"pending"|"done"  Registration state with the bridge.
+--- @type "idle"|"pending"|"done"  Registration state with the combiner.
 local _reg_state = "idle"
 --- @type boolean  Whether serverstart() has opened the socket this session.
 local _socket_started = false
@@ -24,21 +24,21 @@ local _reg_attempts = 0
 --- @type string[]  Tokens awaiting registration before they can be bound.
 local _pending_binds = {}
 --- @type table<string, boolean>  Tokens currently bound to this instance,
---- re-asserted after a bridge restart.
+--- re-asserted after a combiner restart.
 local _bound_tokens = {}
---- @type string|nil  Last-seen bridge boot id; a change means the bridge
+--- @type string|nil  Last-seen combiner boot id; a change means the combiner
 --- restarted and we must re-register + re-bind.
-local _bridge_boot_id = nil
+local _combiner_boot_id = nil
 
--- Registration may race the bridge becoming healthy (or hit a transient
+-- Registration may race the combiner becoming healthy (or hit a transient
 -- failure). Retry with backoff before giving up.
 local _MAX_REG_ATTEMPTS = 10
 local _REG_BACKOFF_MS = 1000
 
---- @return string base URL of the bridge, e.g. http://127.0.0.1:9741
-local function bridge_base()
+--- @return string base URL of the combiner, e.g. http://127.0.0.1:9741
+local function combiner_base()
   local cfg = require("mcp_companion.config").get()
-  return string.format("http://%s:%d", cfg.bridge.host or "127.0.0.1", cfg.bridge.port or 9741)
+  return string.format("http://%s:%d", cfg.combiner.host or "127.0.0.1", cfg.combiner.port or 9741)
 end
 
 --- @return boolean whether the native neovim server is enabled
@@ -75,7 +75,7 @@ end
 --- @param token string
 local function post_bind(token)
   require("mcp_companion.http").request({
-    url = bridge_base() .. "/neovim/bind",
+    url = combiner_base() .. "/neovim/bind",
     method = "post",
     headers = { ["Content-Type"] = "application/json" },
     body = vim.json.encode({ token = token, instance_id = M.instance_id() }),
@@ -90,8 +90,8 @@ local function post_bind(token)
   })
 end
 
---- Open the socket and register this instance with the bridge (idempotent).
---- Retries with backoff if the bridge isn't reachable yet, and flushes any
+--- Open the socket and register this instance with the combiner (idempotent).
+--- Retries with backoff if the combiner isn't reachable yet, and flushes any
 --- tokens queued by bind() once registration completes.
 function M.start()
   if not M.enabled() then return end
@@ -110,7 +110,7 @@ function M.start()
   _reg_state = "pending"
   _reg_attempts = _reg_attempts + 1
   require("mcp_companion.http").request({
-    url = bridge_base() .. "/neovim/instances",
+    url = combiner_base() .. "/neovim/instances",
     method = "post",
     headers = { ["Content-Type"] = "application/json" },
     body = vim.json.encode({
@@ -134,7 +134,7 @@ function M.start()
         for _, token in ipairs(queued) do
           post_bind(token)
         end
-        -- Re-assert every known binding (recovers them after a bridge restart).
+        -- Re-assert every known binding (recovers them after a combiner restart).
         for token in pairs(_bound_tokens) do
           post_bind(token)
         end
@@ -153,7 +153,7 @@ function M.start()
   })
 end
 
---- Force a fresh registration (the bridge process may be new and have lost our
+--- Force a fresh registration (the combiner process may be new and have lost our
 --- instance + token bindings). Re-binds all known tokens on success.
 function M.reassert()
   if not M.enabled() then return end
@@ -162,13 +162,13 @@ function M.reassert()
   M.start()
 end
 
---- Reconcile with the bridge: read its boot id from /health and, if it changed
+--- Reconcile with the combiner: read its boot id from /health and, if it changed
 --- (a restart) or we've never registered, re-register + re-bind. Cheap to call
 --- often (e.g. on every SSE reconnect) — it only acts on an actual restart.
 function M.sync()
   if not M.enabled() then return end
   require("mcp_companion.http").request({
-    url = bridge_base() .. "/health",
+    url = combiner_base() .. "/health",
     method = "get",
     timeout = 5000,
     callback = function(r)
@@ -176,19 +176,19 @@ function M.sync()
       local ok, data = pcall(vim.json.decode, r.body)
       if not ok or type(data) ~= "table" then return end
       local boot = data.boot_id
-      if boot and boot ~= _bridge_boot_id then
-        _bridge_boot_id = boot
-        log.info("channel: bridge boot id changed -> re-registering")
+      if boot and boot ~= _combiner_boot_id then
+        _combiner_boot_id = boot
+        log.info("channel: combiner boot id changed -> re-registering")
         M.reassert()
       elseif _reg_state ~= "done" then
-        -- Same bridge but we're not registered (e.g. first sync) — register.
+        -- Same combiner but we're not registered (e.g. first sync) — register.
         M.start()
       end
     end,
   })
 end
 
---- Bind a chat token to this instance so the bridge routes its `neovim_*`
+--- Bind a chat token to this instance so the combiner routes its `neovim_*`
 --- calls here. Safe to call before registration — the token is queued and
 --- bound once registration completes.
 --- @param token string|nil
@@ -215,7 +215,7 @@ function M.unbind(token)
   end
   if _reg_state ~= "done" then return end
   require("mcp_companion.http").request({
-    url = bridge_base() .. "/neovim/bind",
+    url = combiner_base() .. "/neovim/bind",
     method = "delete",
     headers = { ["Content-Type"] = "application/json" },
     body = vim.json.encode({ token = token }),
@@ -235,7 +235,7 @@ function M.deregister()
   -- Best-effort synchronous-ish notify; on VimLeave the event loop is winding
   -- down, so we fire the request and don't depend on its callback.
   require("mcp_companion.http").request({
-    url = bridge_base() .. "/neovim/instances",
+    url = combiner_base() .. "/neovim/instances",
     method = "delete",
     headers = { ["Content-Type"] = "application/json" },
     body = vim.json.encode({ instance_id = M.instance_id() }),

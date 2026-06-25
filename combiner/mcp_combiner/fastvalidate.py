@@ -6,7 +6,7 @@ The MCP SDK's low-level tool handler validates every tool call with
 structured output against ``outputSchema``).  ``jsonschema.validate`` is a
 convenience wrapper that, on **every call**, re-runs ``cls.check_schema(schema)``
 (validating the schema against its own meta-schema) and constructs a brand-new
-validator before checking the instance.  For the large schemas the bridge
+validator before checking the instance.  For the large schemas the combiner
 proxies (github, todoist, gws, …) that rebuild dominates — measured at
 ~3.3 ms/call on a moderate schema, ~1.6 ms of which is ``check_schema`` pure
 waste — and it repeats on every single tool call.  The actual pydantic
@@ -36,7 +36,7 @@ from typing import Any
 import jsonschema as _jsonschema
 from jsonschema.validators import validator_for
 
-logger = logging.getLogger("mcp-bridge")
+logger = logging.getLogger("mcp-combiner")
 
 # id(schema) -> (schema_obj, validator). The schema_obj reference both pins the
 # dict (so its id is not reused while cached) and lets us detect the rare case
@@ -134,7 +134,7 @@ _installed = False
 def install() -> None:
     """Patch the MCP SDK's tool handler to use the cached validator.
 
-    Idempotent — safe to call from every ``create_bridge``.
+    Idempotent — safe to call from every ``create_combiner``.
     """
     global _installed
     if _installed:

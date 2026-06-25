@@ -1,10 +1,10 @@
 --- mcp-companion.nvim — CC Tool Registration
---- Registers MCP tools from the bridge into CodeCompanion's MCP tool registry.
+--- Registers MCP tools from the combiner into CodeCompanion's MCP tool registry.
 ---
 --- Uses CC's `codecompanion.mcp.register_tools()` API which persists across
 --- config reloads. Tools are then merged via CC's filter.lua `pre_filter`.
 ---
---- Each bridge server becomes a registry entry with its tools and a group.
+--- Each combiner server becomes a registry entry with its tools and a group.
 --- @module mcp_companion.cc.tools
 
 local M = {}
@@ -30,16 +30,16 @@ local function _fingerprint(servers)
     return tostring(#names) .. ":" .. table.concat(names, ",")
 end
 
---- Build the cmds handler for a bridge tool.
+--- Build the cmds handler for a combiner tool.
 --- CC calls cmds[i](self, action, cmd_opts) where self is the CodeCompanion.Tools
 --- object (self.chat is the active CC chat). action is the parsed tool input from
 --- the LLM and cmd_opts.output_cb is the result callback.
 --- @param singleton_client table MCPCompanion.Client  Fallback client (singleton)
---- @param namespaced_name string Full bridge tool name (e.g. "everything_echo")
+--- @param namespaced_name string Full combiner tool name (e.g. "everything_echo")
 --- @param display_name string Short name for logging
 --- @param server_name string Server that owns this tool (for approval checks)
 --- @return function
-local function _make_bridge_cmd(singleton_client, namespaced_name, display_name, server_name)
+local function _make_combiner_cmd(singleton_client, namespaced_name, display_name, server_name)
     return function(self, action, cmd_opts) -- luacheck: ignore 212/self
         -- action is the raw tool input table from the LLM
         local params = type(action) == "table" and action or {}
@@ -102,8 +102,8 @@ local function _result_to_text(result)
 end
 
 --- Build the cmds handler for a native (in-process) tool.
---- Unlike bridge tools, native tools dispatch directly into Lua — no HTTP,
---- no bridge client. Approval still flows through cc/approval.lua.
+--- Unlike combiner tools, native tools dispatch directly into Lua — no HTTP,
+--- no combiner client. Approval still flows through cc/approval.lua.
 --- @param server_name string Native server name (e.g. "neovim")
 --- @param tool_name string Plain tool name (e.g. "read_buffer")
 --- @return function
@@ -166,7 +166,7 @@ local function _make_output(display_name)
     }
 end
 
---- Register all MCP tools from the bridge into CodeCompanion's MCP registry.
+--- Register all MCP tools from the combiner into CodeCompanion's MCP registry.
 --- Uses CC's `mcp.register_tools()` API which persists across config reloads.
 function M.register()
     local cc_mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
@@ -176,11 +176,11 @@ function M.register()
     end
 
     local state = require("mcp_companion.state")
-    local bridge = require("mcp_companion.bridge")
-    local client = bridge.client
+    local combiner = require("mcp_companion.combiner")
+    local client = combiner.client
 
     if not client then
-        log.debug("No bridge client, skipping tool registration")
+        log.debug("No combiner client, skipping tool registration")
         return
     end
 
@@ -205,8 +205,8 @@ function M.register()
     )
 
     for _, server in ipairs(servers) do
-        -- Skip the internal _bridge pseudo-server
-        if server.name == "_bridge" then
+        -- Skip the internal _combiner pseudo-server
+        if server.name == "_combiner" then
             goto continue
         end
 
@@ -215,10 +215,10 @@ function M.register()
 
         for _, tool in ipairs(server.tools or {}) do
             -- tool._display = short name (e.g. "echo")
-            -- tool._namespaced = full bridge name (e.g. "everything_echo")
+            -- tool._namespaced = full combiner name (e.g. "everything_echo")
             local display = tool._display or tool.name
             local namespaced = tool._namespaced or tool.name
-            -- Use the namespaced name as the key (already unique and matches bridge)
+            -- Use the namespaced name as the key (already unique and matches combiner)
             local key = namespaced
 
             -- Capture loop variables for the closure
@@ -233,7 +233,7 @@ function M.register()
                     return {
                         name = key,
                         cmds = {
-                            _make_bridge_cmd(client, captured_namespaced, captured_display, server.name),
+                            _make_combiner_cmd(client, captured_namespaced, captured_display, server.name),
                         },
                         system_prompt = sysp_enabled and function(_group_config, _ctx)
                             return string.format(
@@ -284,14 +284,14 @@ function M.register()
 
     log.info("CC tools registered: %d tools across %d servers", registered_tools, registered_servers)
 
-    -- Register an aggregate "bridge" group containing every tool key from every
-    -- server.  This lets users type @mcp-bridge in a chat to enable all MCP
-    -- tools at once, mirroring the single-bridge philosophy used on the ACP side.
+    -- Register an aggregate "combiner" group containing every tool key from every
+    -- server.  This lets users type @mcp-combiner in a chat to enable all MCP
+    -- tools at once, mirroring the single-combiner philosophy used on the ACP side.
     -- Per-server groups (mcp__github, mcp__filesystem, etc.) remain registered
     -- for fine-grained @-mention addressing.
     local all_tool_keys = {}
     for _, server in ipairs(servers) do
-        if server.name ~= "_bridge" then
+        if server.name ~= "_combiner" then
             for _, tool in ipairs(server.tools or {}) do
                 table.insert(all_tool_keys, tool._namespaced or tool.name)
             end
@@ -299,20 +299,20 @@ function M.register()
     end
 
     if #all_tool_keys > 0 then
-        local bridge_group = {
-            description = "All tools from all MCP servers via the bridge",
+        local combiner_group = {
+            description = "All tools from all MCP servers via the combiner",
             tools = all_tool_keys,
             system_prompt = sysp_enabled and function(_group_config, _ctx)
                 return string.format(
-                    "You have access to %d MCP tool(s) across %d server(s) via the MCP bridge.\n",
+                    "You have access to %d MCP tool(s) across %d server(s) via the MCP combiner.\n",
                     #all_tool_keys,
                     registered_servers
                 )
             end or nil,
             opts = { collapse_tools = true },
         }
-        cc_mcp.register_tools("bridge", {}, bridge_group)
-        log.debug("CC tools: registered aggregate bridge group (%d tools)", #all_tool_keys)
+        cc_mcp.register_tools("combiner", {}, combiner_group)
+        log.debug("CC tools: registered aggregate combiner group (%d tools)", #all_tool_keys)
     end
 
     _last_fingerprint = fp
@@ -326,7 +326,7 @@ function M.clear_fingerprint()
 end
 
 --- Register the in-process native servers (e.g. `neovim`) into CC's MCP registry.
---- Independent of the bridge connection — native tools dispatch directly in Lua.
+--- Independent of the combiner connection — native tools dispatch directly in Lua.
 function M.register_native()
     local cc_mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
     if not cc_mcp_ok then
@@ -411,7 +411,7 @@ function M.unregister()
     local servers = state.field("servers") or {}
 
     for _, server in ipairs(servers) do
-        if server.name ~= "_bridge" then
+        if server.name ~= "_combiner" then
             cc_mcp.unregister_tools(server.name)
         end
     end

@@ -4,7 +4,7 @@
 ---   nvim --headless --noplugin -u NONE \
 ---     -c "set rtp+=$PWD" -c "luafile tests/test_native.lua"
 ---
---- No bridge and no CodeCompanion required — this exercises M.dispatch directly.
+--- No combiner and no CodeCompanion required — this exercises M.dispatch directly.
 
 local pass, fail, results = 0, 0, {}
 

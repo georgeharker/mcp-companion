@@ -1,4 +1,4 @@
-"""Meta-tools for the bridge — status, enable/disable servers."""
+"""Meta-tools for the combiner — status, enable/disable servers."""
 
 from __future__ import annotations
 
@@ -6,32 +6,32 @@ import logging
 
 from fastmcp import Context, FastMCP
 
-from mcp_bridge.config import BridgeConfig, ServerConfig, ServerStatusInfo
-from mcp_bridge.connections import ConnectionManager
-from mcp_bridge.sharedserver import SharedServerManager
+from mcp_combiner.config import CombinerConfig, ServerConfig, ServerStatusInfo
+from mcp_combiner.connections import ConnectionManager
+from mcp_combiner.sharedserver import SharedServerManager
 
-logger = logging.getLogger("mcp-bridge")
+logger = logging.getLogger("mcp-combiner")
 
 
 def register_meta_tools(
-    bridge: FastMCP,
-    config: BridgeConfig,
+    combiner: FastMCP,
+    config: CombinerConfig,
     conn_manager: ConnectionManager,
     ss_manager: SharedServerManager,
 ) -> None:
-    """Register bridge management tools on the FastMCP server."""
+    """Register combiner management tools on the FastMCP server."""
 
-    @bridge.tool()
-    def bridge__status() -> dict[str, ServerStatusInfo]:
+    @combiner.tool()
+    def combiner__status() -> dict[str, ServerStatusInfo]:
         """Get status of all configured MCP servers.
 
         Returns a dict of server names to their configuration and status.
         """
         return {name: config.get_server_status(name) for name in config.servers}
 
-    @bridge.tool()
-    async def bridge__enable_server(server_name: str) -> str:
-        """Enable a disabled MCP server and mount it on the bridge.
+    @combiner.tool()
+    async def combiner__enable_server(server_name: str) -> str:
+        """Enable a disabled MCP server and mount it on the combiner.
 
         This is also the manual retry path for servers that failed
         authentication at startup.  It resets any auth-failure flag
@@ -55,7 +55,7 @@ def register_meta_tools(
             conn_manager.reset_auth_failure(server_name)
 
         try:
-            from mcp_bridge.server import (
+            from mcp_combiner.server import (
                 _create_server_proxy,
                 invalidate_tool_cache,
             )
@@ -75,7 +75,7 @@ def register_meta_tools(
                     await conn_manager.connect(config, server_name, srv)
 
             proxy = _create_server_proxy(config, server_name, srv)
-            bridge.mount(proxy, namespace=server_name)
+            combiner.mount(proxy, namespace=server_name)
             invalidate_tool_cache()
             logger.info("Dynamically mounted server: %s", server_name)
             return f"Server '{server_name}' enabled and mounted"
@@ -83,9 +83,9 @@ def register_meta_tools(
             logger.exception("Failed to mount server '%s' on enable", server_name)
             return f"Server '{server_name}' enabled but failed to mount: {e}"
 
-    @bridge.tool()
-    async def bridge__disable_server(server_name: str) -> str:
-        """Disable an MCP server and unmount it from the bridge.
+    @combiner.tool()
+    async def combiner__disable_server(server_name: str) -> str:
+        """Disable an MCP server and unmount it from the combiner.
 
         Args:
             server_name: Name of the server to disable.
@@ -116,9 +116,9 @@ def register_meta_tools(
         # We also match by checking the provider's _namespace attribute if it exists
         # (set by some FastMCP wrapper types).
         try:
-            from mcp_bridge.server import invalidate_tool_cache
+            from mcp_combiner.server import invalidate_tool_cache
 
-            before = len(bridge.providers)
+            before = len(combiner.providers)
 
             def _provider_matches(p: object) -> bool:
                 """Return True if provider belongs to server_name's namespace."""
@@ -132,8 +132,8 @@ def register_meta_tools(
                     return True
                 return False
 
-            bridge.providers = [p for p in bridge.providers if not _provider_matches(p)]
-            removed = before - len(bridge.providers)
+            combiner.providers = [p for p in combiner.providers if not _provider_matches(p)]
+            removed = before - len(combiner.providers)
 
             invalidate_tool_cache()
             logger.info("Removed %d provider(s) for server '%s'", removed, server_name)
@@ -154,7 +154,7 @@ def register_meta_tools(
     async def _unmount_server(server_name: str) -> None:
         """Tear down a server's connection, backing process, and providers.
 
-        Mirrors bridge__disable_server's teardown but does not touch the
+        Mirrors combiner__disable_server's teardown but does not touch the
         ``disabled`` flag — the caller decides whether the server stays gone
         (removed) or is re-mounted with a fresh definition (changed).
         """
@@ -168,11 +168,11 @@ def register_meta_tools(
                 return True
             return getattr(p, "_namespace", None) == server_name
 
-        bridge.providers = [p for p in bridge.providers if not _provider_matches(p)]
+        combiner.providers = [p for p in combiner.providers if not _provider_matches(p)]
 
     async def _mount_server(server_name: str, srv: ServerConfig) -> None:
-        """Start, connect, and mount a server. Mirrors bridge__enable_server."""
-        from mcp_bridge.server import _create_server_proxy
+        """Start, connect, and mount a server. Mirrors combiner__enable_server."""
+        from mcp_combiner.server import _create_server_proxy
 
         await ss_manager.ensure_started(server_name)
         if conn_manager.is_http_server(srv):
@@ -182,14 +182,14 @@ def register_meta_tools(
                 conn_manager.register(config, server_name, srv)
             await conn_manager.connect(config, server_name, srv)
         proxy = _create_server_proxy(config, server_name, srv)
-        bridge.mount(proxy, namespace=server_name)
+        combiner.mount(proxy, namespace=server_name)
 
     def _drop_providers(server_name: str) -> int:
         """Remove all mounted providers for *server_name*'s namespace.
 
         Returns the number removed. Does not touch connections or processes.
         """
-        before = len(bridge.providers)
+        before = len(combiner.providers)
 
         def _matches(p: object) -> bool:
             r = repr(p)
@@ -197,11 +197,11 @@ def register_meta_tools(
                 return True
             return getattr(p, "_namespace", None) == server_name
 
-        bridge.providers = [p for p in bridge.providers if not _matches(p)]
-        return before - len(bridge.providers)
+        combiner.providers = [p for p in combiner.providers if not _matches(p)]
+        return before - len(combiner.providers)
 
-    @bridge.tool()
-    async def bridge__restart_server(server_name: str) -> str:
+    @combiner.tool()
+    async def combiner__restart_server(server_name: str) -> str:
         """Restart a single MCP server in place — ditch it and bring it back fresh.
 
         This is a true restart, not a refcount bounce: for sharedserver-backed
@@ -213,7 +213,7 @@ def register_meta_tools(
         and recreated. Other servers are left untouched.
 
         Use this when one server is wedged (hung, stale auth, crashed subprocess)
-        and you want to kick just that one without restarting the whole bridge.
+        and you want to kick just that one without restarting the whole combiner.
 
         Note: stopping a sharedserver-backed process clears its shared state, so
         any *other* clients attached to the same shared server will also see it
@@ -230,13 +230,13 @@ def register_meta_tools(
         srv = config.servers[server_name]
         if srv.disabled:
             return (
-                f"Server '{server_name}' is disabled — use bridge__enable_server "
+                f"Server '{server_name}' is disabled — use combiner__enable_server "
                 "to bring it up instead of restarting"
             )
 
-        from mcp_bridge.server import invalidate_tool_cache
+        from mcp_combiner.server import invalidate_tool_cache
 
-        # 1. Tear down the bridge-side connection + mounted providers. We do NOT
+        # 1. Tear down the combiner-side connection + mounted providers. We do NOT
         #    call ss_manager.ensure_stopped here — that decrements the refcount
         #    (grace-period reattach). The hard process stop happens in step 2.
         if conn_manager.is_http_server(srv) and conn_manager.has_connection(server_name):
@@ -271,8 +271,8 @@ def register_meta_tools(
         logger.info(summary)
         return summary
 
-    @bridge.tool()
-    async def bridge__reload_config() -> str:
+    @combiner.tool()
+    async def combiner__reload_config() -> str:
         """Re-read the config file and apply server changes without a restart.
 
         Diffs the on-disk config against the running config and applies the
@@ -288,10 +288,10 @@ def register_meta_tools(
         Returns:
             A summary of what changed.
         """
-        from mcp_bridge.server import invalidate_tool_cache
+        from mcp_combiner.server import invalidate_tool_cache
 
         try:
-            new_cfg = BridgeConfig.load(config.config_path)
+            new_cfg = CombinerConfig.load(config.config_path)
         except Exception as e:
             logger.exception("reload_config: failed to read %s", config.config_path)
             return f"Error: failed to read config '{config.config_path}': {e}"
@@ -320,7 +320,7 @@ def register_meta_tools(
 
         # 2) Swap in the new config in place (same object — preserves all the
         #    references handed to meta-tools, the lifespan, /health, and the
-        #    _bridge_config global used for tool filtering).
+        #    _combiner_config global used for tool filtering).
         config.servers = new_cfg.servers
         config.shared_servers = new_cfg.shared_servers
         config.oauth = new_cfg.oauth
@@ -354,13 +354,13 @@ def register_meta_tools(
         logger.info(summary)
         return summary
 
-    @bridge.tool()
-    async def bridge__session_disable_server(
+    @combiner.tool()
+    async def combiner__session_disable_server(
         server_name: str, ctx: Context, chat_id: str | None = None
     ) -> str:
         """Disable an MCP server for the current session only.
 
-        Unlike bridge__disable_server (which affects all sessions globally),
+        Unlike combiner__disable_server (which affects all sessions globally),
         this only hides the server's tools from the calling MCP client session.
         Other sessions are unaffected.  The change is automatically reverted
         when the session ends.
@@ -376,7 +376,7 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
 
-        from mcp_bridge.server import _session_disabled
+        from mcp_combiner.server import _session_disabled
 
         # Use chat_id if provided, otherwise fall back to MCP session_id
         sid = chat_id if chat_id else ctx.session_id
@@ -402,13 +402,13 @@ def register_meta_tools(
             "disabled_servers": sorted(_session_disabled.get(sid, set())),
         })
 
-    @bridge.tool()
-    async def bridge__session_enable_server(
+    @combiner.tool()
+    async def combiner__session_enable_server(
         server_name: str, ctx: Context, chat_id: str | None = None
     ) -> str:
         """Re-enable an MCP server that was disabled for the current session.
 
-        Reverses the effect of bridge__session_disable_server for the
+        Reverses the effect of combiner__session_disable_server for the
         calling session.  Has no effect if the server was not session-disabled.
 
         Args:
@@ -422,7 +422,7 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
 
-        from mcp_bridge.server import _session_disabled
+        from mcp_combiner.server import _session_disabled
 
         # Use chat_id if provided, otherwise fall back to MCP session_id
         sid = chat_id if chat_id else ctx.session_id
@@ -459,8 +459,8 @@ def register_meta_tools(
             "disabled_servers": sorted(_session_disabled.get(sid, set())),
         })
 
-    @bridge.tool()
-    async def bridge__session_status(ctx: Context, chat_id: str | None = None) -> str:
+    @combiner.tool()
+    async def combiner__session_status(ctx: Context, chat_id: str | None = None) -> str:
         """Get the session-disabled server list for the current MCP session.
 
         Args:
@@ -474,7 +474,7 @@ def register_meta_tools(
         Returns:
             JSON string with session status.
         """
-        from mcp_bridge.server import _session_disabled
+        from mcp_combiner.server import _session_disabled
 
         sid = chat_id if chat_id else ctx.session_id
         blocked = list(_session_disabled.get(sid, set()))

@@ -227,16 +227,16 @@ end
 ---   3. ``auto_value`` — the (already adapter-resolved) global cc setting.
 ---
 --- Returns one of:
----   * ``nil``       — no filter, expose all servers (the bridge's default).
+---   * ``nil``       — no filter, expose all servers (the combiner's default).
 ---   * ``string[]``  — allow-list; only the named servers are visible.
 ---
 --- The ``disabled_servers`` form in the project file is converted to an
 --- allow-list against the supplied ``known_servers``.  Unknown names in either
 --- form are dropped with a warning so a stale project file doesn't 400 the
---- bridge filter endpoint.
+--- combiner filter endpoint.
 ---
 --- @param auto_value boolean|string[]|nil The cc.auto_*_tools config value (already adapter-resolved by caller).
---- @param known_servers? string[] All server names known to the bridge.
+--- @param known_servers? string[] All server names known to the combiner.
 --- @param start_dir? string Defaults to vim.fn.getcwd().
 --- @param adapter_name? string Adapter name to check for per-adapter project overrides.
 --- @return string[]|nil allowed
@@ -299,7 +299,7 @@ function M._apply_project_to_allowed(project_cfg, known_servers)
             -- Without a known-server list we can't invert disabled→allowed.
             -- Bail out and let the global default take effect.
             log.warn(
-                "project config: disabled_servers requires the bridge to be ready; falling back to global default"
+                "project config: disabled_servers requires the combiner to be ready; falling back to global default"
             )
             return nil
         end
@@ -343,7 +343,7 @@ end
 
 --- Choose the payload shape to write.
 --- @param disabled string[]|table<string,boolean> Currently-disabled servers.
---- @param known_servers string[] All servers known to the bridge (excluding _bridge).
+--- @param known_servers string[] All servers known to the combiner (excluding _combiner).
 --- @param format "shortest"|"allowed"|"disabled" Defaults to "shortest".
 --- @return table payload Ready for JSON encoding.
 function M.format_payload(disabled, known_servers, format)
@@ -484,7 +484,7 @@ end
 --- new file is rendered in the shortest form via ``format = "shortest"``.
 ---
 --- @param server_name string
---- @param known_servers string[] All servers known to the bridge (without _bridge).
+--- @param known_servers string[] All servers known to the combiner (without _combiner).
 --- @param start_dir? string Defaults to vim.fn.getcwd().
 --- @return table result {
 ---   action = "wrote"|"unchanged",
