@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from enum import Enum
@@ -10,6 +11,25 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("mcp-bridge")
+
+
+def _warn_unknown_keys(kind: str, name: str, data: dict[str, Any], known: set[str]) -> None:
+    """Log a warning for config keys we don't recognise.
+
+    ``from_dict`` extracts known fields explicitly, so a misplaced or
+    mistyped key (e.g. ``isolate`` on a ``sharedServers`` entry, where it
+    does nothing) is otherwise silently ignored.  This surfaces it.
+    """
+    unknown = set(data) - known
+    if unknown:
+        logger.warning(
+            "%s '%s': ignoring unknown config key(s): %s",
+            kind,
+            name,
+            ", ".join(sorted(unknown)),
+        )
 
 
 class Transport(str, Enum):
@@ -77,6 +97,13 @@ class SharedServerConfig(BaseModel):
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> SharedServerConfig:
         """Parse a ``sharedServers`` entry dict, keyed by *name*."""
+        _warn_unknown_keys(
+            "sharedServer",
+            name,
+            data,
+            {"command", "args", "env", "grace_period", "gracePeriod",
+             "health_timeout", "healthTimeout"},
+        )
         raw_env = data.get("env", {})
         env = {k: str(v) for k, v in raw_env.items()} if raw_env else {}
         return cls(
@@ -148,6 +175,14 @@ class ServerConfig(BaseModel):
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> ServerConfig:
         """Create ServerConfig from a config dict entry."""
+        _warn_unknown_keys(
+            "server",
+            name,
+            data,
+            {"command", "args", "env", "transport", "url", "headers", "disabled",
+             "autoApprove", "auth", "sharedServer", "shared_server",
+             "toolFilter", "tool_filter", "isolate"},
+        )
         transport_str = data.get("transport")
         if transport_str is None:
             transport_str = "http" if "url" in data else "stdio"
