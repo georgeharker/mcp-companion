@@ -210,6 +210,11 @@ def invalidate_tool_cache() -> None:
     global _tool_cache, _tool_cache_time
     _tool_cache = None
     _tool_cache_time = 0
+    # Drop cached JSON-schema validators so a reload or newly-connected server
+    # never validates a tool call against a stale schema.
+    from mcp_bridge import fastvalidate
+
+    fastvalidate.clear_cache()
     logger.info("Tool cache invalidated")
 
     # Fire-and-forget notification to all connected sessions.
@@ -727,6 +732,8 @@ def create_bridge(
     oauth_cache_tokens: bool | None = ...,
     oauth_token_dir: str | None = ...,
     normalize_schemas: bool = ...,
+    skip_input_validation: bool = ...,
+    skip_output_validation: bool = ...,
     return_ss_manager: Literal[True],
 ) -> tuple[FastMCP, SharedServerManager]: ...
 
@@ -738,6 +745,8 @@ def create_bridge(
     oauth_cache_tokens: bool | None = ...,
     oauth_token_dir: str | None = ...,
     normalize_schemas: bool = ...,
+    skip_input_validation: bool = ...,
+    skip_output_validation: bool = ...,
     return_ss_manager: Literal[False] = ...,
 ) -> FastMCP: ...
 
@@ -748,6 +757,8 @@ def create_bridge(
     oauth_cache_tokens: bool | None = None,
     oauth_token_dir: str | None = None,
     normalize_schemas: bool = False,
+    skip_input_validation: bool = False,
+    skip_output_validation: bool = False,
     return_ss_manager: bool = False,
 ) -> FastMCP | tuple[FastMCP, SharedServerManager]:
     """Create the bridge FastMCP server from a config file.
@@ -780,6 +791,18 @@ def create_bridge(
     global _bridge_config
     global _conn_manager
     global _normalize_schemas_global
+
+    # Replace the MCP SDK's per-call jsonschema.validate (which rebuilds the
+    # validator + re-checks the meta-schema on every tool call) with a cached
+    # validator. Idempotent; cache is cleared on reload via invalidate_tool_cache.
+    from mcp_bridge import fastvalidate
+
+    fastvalidate.install()
+    # Optionally skip schema validation entirely — the upstream server already
+    # validates both input and output, so re-checking at the proxy is redundant.
+    # Both off by default.
+    fastvalidate.set_skip_input_validation(skip_input_validation)
+    fastvalidate.set_skip_output_validation(skip_output_validation)
 
     config = BridgeConfig.load(config_path)
     _bridge_config = config  # Store for tool filtering

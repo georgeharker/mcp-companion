@@ -57,5 +57,6 @@ module = [
     "mcp.*",
     "starlette.*",
     "pynvim.*",
+    "jsonschema.*",
 ]
 ignore_missing_imports = true
