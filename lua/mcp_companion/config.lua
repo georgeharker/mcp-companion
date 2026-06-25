@@ -12,6 +12,15 @@ local M = {}
 --- @field startup_timeout number Seconds to wait for bridge health. Default 30.
 --- @field request_timeout number Default timeout for MCP requests in seconds. Default 60.
 --- @field token_key? string Encryption key for OAuth token storage (or set MCP_BRIDGE_TOKEN_KEY env var)
+--- @field input_validation? boolean Tri-state JSON-schema validation of tool *input* arguments at the
+---   bridge proxy. nil (default): leave the bridge default (off — inputs are coerced, not strictly
+---   validated). true: force strict input validation on. false: force it off. Passed as
+---   ``--input-validation`` / ``--no-input-validation``; omitted when nil.
+--- @field output_validation? boolean Tri-state JSON-schema validation of tool *output* at the bridge proxy.
+---   nil (default): leave the bridge default (on for tools that declare an outputSchema). false: force it
+---   off — the upstream server already validated its structured output, so re-validating here is redundant
+---   per-call work (measurably slow for large responses). true: force it on. Passed as
+---   ``--output-validation`` / ``--no-output-validation``; omitted when nil.
 --- @field log? MCPCompanion.BridgeLogConfig Bridge logging — same shape as the
 ---   top-level ``log`` table.  ``{ level = "info", file = true }`` by default.
 ---   ``file = true`` resolves to ``stdpath("log")/mcp-bridge-py.log``;
@@ -106,6 +115,14 @@ M.defaults = {
     -- false = header-only (cleaner; the default); true = belt-and-braces (robust).
     -- The stdio/mcp-remote fallback always uses the URL regardless of this flag.
     token_in_url = false,
+    -- Tri-state control of the bridge's JSON-schema (re)validation of proxied
+    -- tool calls. nil (default) leaves the bridge default; false forces off;
+    -- true forces on. The upstream server already validates, so the meaningful
+    -- win is output_validation = false, which removes per-call output validation
+    -- (measurably slow for large structured responses). Listed here as nil for
+    -- documentation — a nil entry is absent from the table, so no flag is passed.
+    input_validation = nil,
+    output_validation = nil,
   },
 
   native_servers = {

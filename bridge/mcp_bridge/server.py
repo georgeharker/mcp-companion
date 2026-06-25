@@ -732,8 +732,8 @@ def create_bridge(
     oauth_cache_tokens: bool | None = ...,
     oauth_token_dir: str | None = ...,
     normalize_schemas: bool = ...,
-    skip_input_validation: bool = ...,
-    skip_output_validation: bool = ...,
+    input_validation: bool | None = ...,
+    output_validation: bool | None = ...,
     return_ss_manager: Literal[True],
 ) -> tuple[FastMCP, SharedServerManager]: ...
 
@@ -745,8 +745,8 @@ def create_bridge(
     oauth_cache_tokens: bool | None = ...,
     oauth_token_dir: str | None = ...,
     normalize_schemas: bool = ...,
-    skip_input_validation: bool = ...,
-    skip_output_validation: bool = ...,
+    input_validation: bool | None = ...,
+    output_validation: bool | None = ...,
     return_ss_manager: Literal[False] = ...,
 ) -> FastMCP: ...
 
@@ -757,8 +757,8 @@ def create_bridge(
     oauth_cache_tokens: bool | None = None,
     oauth_token_dir: str | None = None,
     normalize_schemas: bool = False,
-    skip_input_validation: bool = False,
-    skip_output_validation: bool = False,
+    input_validation: bool | None = None,
+    output_validation: bool | None = None,
     return_ss_manager: bool = False,
 ) -> FastMCP | tuple[FastMCP, SharedServerManager]:
     """Create the bridge FastMCP server from a config file.
@@ -798,11 +798,11 @@ def create_bridge(
     from mcp_bridge import fastvalidate
 
     fastvalidate.install()
-    # Optionally skip schema validation entirely — the upstream server already
-    # validates both input and output, so re-checking at the proxy is redundant.
-    # Both off by default.
-    fastvalidate.set_skip_input_validation(skip_input_validation)
-    fastvalidate.set_skip_output_validation(skip_output_validation)
+    # Tri-state output-schema validation (None = SDK default, True = force on,
+    # False = force off). The upstream server already validated its structured
+    # output, so forcing it off removes redundant per-call work at the proxy.
+    # Input validation is driven natively via strict_input_validation below.
+    fastvalidate.set_output_validation(output_validation)
 
     config = BridgeConfig.load(config_path)
     _bridge_config = config  # Store for tool filtering
@@ -861,6 +861,11 @@ def create_bridge(
     bridge = FastMCP(
         name="mcp-bridge",
         instructions="MCP Bridge — proxies multiple MCP servers through a single endpoint.",
+        # Tri-state input-schema validation. None → fastmcp's own default
+        # (off — inputs are coerced, not strictly validated); True → force
+        # strict validation on; False → force it off. This is the only switch
+        # that actually gates the SDK's per-call input jsonschema.validate.
+        strict_input_validation=input_validation,
         dereference_schemas=False,  # Disabled: circular $ref causes infinite recursion
         middleware=[
             # Outermost: catch-all safety net for any unhandled exception

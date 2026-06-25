@@ -106,6 +106,15 @@ local function _bridge_cmd()
   if _config.cc and _config.cc.normalize_schema then
     table.insert(cmd, "--normalize-schema")
   end
+  -- Tri-state validation flags: nil → omit, true → --x-validation, false → --no-x-validation.
+  local iv = _config.bridge.input_validation
+  if iv ~= nil then
+    table.insert(cmd, iv and "--input-validation" or "--no-input-validation")
+  end
+  local ov = _config.bridge.output_validation
+  if ov ~= nil then
+    table.insert(cmd, ov and "--output-validation" or "--no-output-validation")
+  end
   return cmd
 end
 

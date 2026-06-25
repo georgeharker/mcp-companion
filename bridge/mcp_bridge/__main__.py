@@ -210,16 +210,22 @@ def create_app() -> Starlette:
         oauth_cache_tokens = False
     oauth_token_dir = os.environ.get("MCP_BRIDGE_OAUTH_TOKEN_DIR")
     normalize_schemas = os.environ.get("MCP_BRIDGE_NORMALIZE_SCHEMA") == "1"
-    skip_input_validation = os.environ.get("MCP_BRIDGE_SKIP_INPUT_VALIDATION") == "1"
-    skip_output_validation = os.environ.get("MCP_BRIDGE_SKIP_OUTPUT_VALIDATION") == "1"
+
+    def _tristate(name: str) -> bool | None:
+        """Read a tri-state flag from env: '1' → True, '0' → False, unset → None."""
+        v = os.environ.get(name)
+        return None if v is None else v == "1"
+
+    input_validation = _tristate("MCP_BRIDGE_INPUT_VALIDATION")
+    output_validation = _tristate("MCP_BRIDGE_OUTPUT_VALIDATION")
 
     bridge, ss_manager = create_bridge(
         config_path,
         oauth_cache_tokens=oauth_cache_tokens,
         oauth_token_dir=oauth_token_dir,
         normalize_schemas=normalize_schemas,
-        skip_input_validation=skip_input_validation,
-        skip_output_validation=skip_output_validation,
+        input_validation=input_validation,
+        output_validation=output_validation,
         return_ss_manager=True,
     )
 
@@ -301,27 +307,29 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--skip-input-validation",
-        dest="skip_input_validation",
-        action="store_true",
-        default=False,
+        "--input-validation",
+        dest="input_validation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "Skip JSON-schema validation of tool *input* arguments at the proxy. "
-            "Input validation is already disabled by default in the bridge; this "
-            "flag is a hard override that keeps it off even if strict input "
-            "validation is otherwise enabled. Off by default."
+            "Tri-state JSON-schema validation of tool *input* arguments. "
+            "--input-validation forces it on; --no-input-validation forces it "
+            "off; omit to leave the bridge default (off — inputs are coerced, "
+            "not strictly validated)."
         ),
     )
     parser.add_argument(
-        "--skip-output-validation",
-        dest="skip_output_validation",
-        action="store_true",
-        default=False,
+        "--output-validation",
+        dest="output_validation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "Skip JSON-schema validation of tool *output* at the proxy. The "
-            "upstream server already validated its own structured output, so "
-            "re-validating it here is redundant work on every tool call. "
-            "Off by default."
+            "Tri-state JSON-schema validation of tool *output*. "
+            "--no-output-validation forces it off (the upstream server already "
+            "validated its structured output, so re-validating here is redundant "
+            "per-call work — measurably slow for large responses); "
+            "--output-validation forces it on; omit to leave the default (on for "
+            "tools that declare an outputSchema)."
         ),
     )
     parser.add_argument(
@@ -351,10 +359,10 @@ def main() -> None:
         os.environ["MCP_BRIDGE_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
     if args.normalize_schema:
         os.environ["MCP_BRIDGE_NORMALIZE_SCHEMA"] = "1"
-    if args.skip_input_validation:
-        os.environ["MCP_BRIDGE_SKIP_INPUT_VALIDATION"] = "1"
-    if args.skip_output_validation:
-        os.environ["MCP_BRIDGE_SKIP_OUTPUT_VALIDATION"] = "1"
+    if args.input_validation is not None:
+        os.environ["MCP_BRIDGE_INPUT_VALIDATION"] = "1" if args.input_validation else "0"
+    if args.output_validation is not None:
+        os.environ["MCP_BRIDGE_OUTPUT_VALIDATION"] = "1" if args.output_validation else "0"
 
     # Resolve --log-level to a stdlib logging numeric level.
     # "trace" is treated as DEBUG since stdlib has no TRACE.
