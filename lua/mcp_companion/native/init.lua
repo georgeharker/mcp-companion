@@ -29,6 +29,31 @@ local _tool_index = {}
 --- @type table<string, { server: string, resource: table }>
 local _resource_index = {}
 
+--- Normalize tool input schemas so empty Lua tables are always represented
+--- as JSON object schemas, never ambiguous empty arrays.
+---
+--- @param schema any
+--- @return table
+local function _normalize_input_schema(schema)
+  if type(schema) ~= "table" then
+    return { type = "object", properties = {} }
+  end
+
+  if next(schema) == nil then
+    return { type = "object", properties = {} }
+  end
+
+  local normalized = vim.deepcopy(schema)
+
+  if normalized.type == nil then
+    normalized.type = "object"
+  end
+  if normalized.type == "object" and normalized.properties == nil then
+    normalized.properties = {}
+  end
+  return normalized
+end
+
 --- Install a server definition into the registry (internal).
 --- @param def MCPCompanion.NativeServer
 local function _install(def)
@@ -68,7 +93,7 @@ local function _publish()
       table.insert(tools, {
         name = t.name,
         description = t.description,
-        inputSchema = t.inputSchema,
+        inputSchema = _normalize_input_schema(t.inputSchema),
         tier = t.tier,
         _display = t.name,
         _namespaced = def.name .. "_" .. t.name,
@@ -187,7 +212,7 @@ function M.manifest()
       table.insert(tools, {
         name = t.name,
         description = t.description,
-        inputSchema = t.inputSchema or { type = "object", properties = {} },
+        inputSchema = _normalize_input_schema(t.inputSchema),
         tier = t.tier,
       })
     end
