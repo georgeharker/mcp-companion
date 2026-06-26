@@ -984,12 +984,11 @@ require("mcp_companion").setup({
         -- false: saves tokens (descriptions duplicate the schema's `description` fields).
         -- Overridden per-project by .mcp-companion.json.
         tool_system_prompts = true,
-        -- Normalize tool JSON schemas to fix strict providers (e.g. Copilot, moonshot-ai/kimi)
-        -- that reject schemas such as `type` + `anyOf` at the same level or object subschemas
-        -- inside unions that omit `additionalProperties = false`.
+        -- Normalize tool JSON schemas to fix providers (e.g. moonshot-ai/kimi) that reject
+        -- schemas where `type` and `anyOf` coexist at the same level with a 400 error.
         -- The transformation is semantically equivalent and accepted by lenient validators.
-        -- Passed to the combiner as --normalize-schema; applies at cache-fill time. Default true.
-        normalize_schema = true,
+        -- Passed to the combiner as --normalize-schema; applies at cache-fill time. Default false.
+        normalize_schema = false,
         -- Per-adapter overrides for auto_http_tools / auto_acp_tools / auto_cli_tools.
         -- Keys are adapter names (chat.adapter.name, e.g. "moonshot-ai", "claude", "copilot_acp")
         -- or CLI agent names (e.g. "claude_code", "gemini_cli").

@@ -61,25 +61,12 @@ local function _normalize_parameters_schema(schema)
     return normalized
 end
 
-local _TYPE_SIBLING_KEYWORDS = {
-    "items", "prefixItems", "minItems", "maxItems", "uniqueItems", "contains",
-    "minLength", "maxLength", "pattern", "format",
-    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
-    "properties", "required", "additionalProperties", "patternProperties",
-}
-
---- Make JSON-schema tables safe for vim.json.encode and normalize object nodes
---- for strict providers such as Copilot.
+--- Make JSON-schema tables safe for vim.json.encode by preserving object-typed
+--- maps as JSON objects instead of ambiguous empty Lua arrays.
 ---
 --- Empty Lua tables become `[]` when encoded unless they carry dict semantics.
---- That is fine for JSON arrays but breaks strict function-schema validators.
----
---- In addition to preserving object semantics, this recursively:
----   * forces empty schema maps to JSON objects
----   * infers `type = "object"` for object-like nodes
----   * fills missing `properties = {}`
----   * sets `additionalProperties = false` when a closed object schema omits it
----   * hoists parent `type`/sibling keywords into `anyOf` items that omit `type`
+--- That is fine for JSON arrays but breaks strict function-schema validators
+--- (e.g. Copilot) when `properties` is encoded as `[]` instead of `{}`.
 ---
 --- @param schema any
 --- @return any
@@ -105,51 +92,6 @@ local function _preserve_schema_objects(schema)
     for key, value in pairs(schema) do
         out[key] = _preserve_schema_objects(value)
     end
-
-    if out.type == nil and (out.properties ~= nil or out.patternProperties ~= nil or out.required ~= nil) then
-        out.type = "object"
-    end
-
-    if out.type ~= nil and out.anyOf ~= nil and vim.islist(out.anyOf) then
-        local parent_type = out.type
-        out.type = nil
-
-        local hoisted = vim.empty_dict()
-        hoisted.type = parent_type
-        for _, kw in ipairs(_TYPE_SIBLING_KEYWORDS) do
-            if out[kw] ~= nil then
-                hoisted[kw] = out[kw]
-                out[kw] = nil
-            end
-        end
-
-        local any_of = {}
-        for i, item in ipairs(out.anyOf) do
-            if type(item) == "table" and not vim.islist(item) and item.type == nil then
-                local merged = vim.empty_dict()
-                for key, value in pairs(hoisted) do
-                    merged[key] = value
-                end
-                for key, value in pairs(item) do
-                    merged[key] = value
-                end
-                any_of[i] = merged
-            else
-                any_of[i] = item
-            end
-        end
-        out.anyOf = any_of
-    end
-
-    if out.type == "object" or out.properties ~= nil or out.patternProperties ~= nil then
-        if out.properties == nil then
-            out.properties = vim.empty_dict()
-        end
-        if out.additionalProperties == nil and out.patternProperties == nil then
-            out.additionalProperties = false
-        end
-    end
-
     return out
 end
 

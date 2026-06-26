@@ -268,42 +268,21 @@ def _normalize_schema(schema: object) -> object:
     # Recurse into all values first so nested schemas are also clean.
     result: dict[str, Any] = {k: _normalize_schema(v) for k, v in schema.items()}
 
-    # Some providers require object-like subschemas to declare an explicit type.
-    if (
-        "type" not in result
-        and (
-            "properties" in result
-            or "patternProperties" in result
-            or "required" in result
-        )
-    ):
-        result["type"] = "object"
+    if "type" not in result or "anyOf" not in result:
+        return result
 
-    if "type" in result and "anyOf" in result and isinstance(result["anyOf"], list):
-        # Pull the parent type and any keywords that travel with it.
-        parent_type = result.pop("type")
-        hoisted: dict[str, Any] = {"type": parent_type}
-        for kw in _TYPE_SIBLING_KEYWORDS:
-            if kw in result:
-                hoisted[kw] = result.pop(kw)
+    # Pull the parent type and any keywords that travel with it.
+    parent_type = result.pop("type")
+    hoisted: dict[str, Any] = {"type": parent_type}
+    for kw in _TYPE_SIBLING_KEYWORDS:
+        if kw in result:
+            hoisted[kw] = result.pop(kw)
 
-        # Distribute into anyOf items that don't already declare a type.
-        result["anyOf"] = [
-            ({**hoisted, **item} if isinstance(item, dict) and "type" not in item else item)
-            for item in result["anyOf"]
-        ]
-
-    # Copilot's validator also requires closed object subschemas inside unions
-    # to spell out ``additionalProperties: false`` explicitly.
-    if (
-        result.get("type") == "object"
-        or "properties" in result
-        or "patternProperties" in result
-    ):
-        result.setdefault("properties", {})
-        if "additionalProperties" not in result and "patternProperties" not in result:
-            result["additionalProperties"] = False
-
+    # Distribute into anyOf items that don't already declare a type.
+    result["anyOf"] = [
+        ({**hoisted, **item} if "type" not in item else item)
+        for item in result["anyOf"]
+    ]
     return result
 
 

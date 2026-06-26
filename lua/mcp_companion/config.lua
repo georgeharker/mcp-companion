@@ -63,12 +63,11 @@ local M = {}
 ---   tokens (descriptions duplicate the schema's `description` fields, ~one extra system message per tool).
 ---   Overridden per-project by .mcp-companion.json (see mcp_companion.project).
 --- @field normalize_schema boolean Whether the combiner normalizes tool JSON schemas globally.
----   Fixes strict-provider issues such as ``type`` + ``anyOf`` at the same level and
----   object subschemas inside unions that omit ``additionalProperties = false``.
----   The transformation is
+---   Fixes schemas where ``type`` and ``anyOf`` coexist at the same level, which strict
+---   providers (e.g. moonshot-ai/kimi) reject with a 400 error.  The transformation is
 ---   semantically equivalent and accepted by lenient validators too.  Passed to the
 ---   combiner as ``--normalize-schema`` so every ``tools/list`` response is normalized at
----   cache-fill time.  Default true.
+---   cache-fill time.  Default false.
 --- @field adapters? table<string, MCPCompanion.CCAdapterConfig> Per-adapter overrides for auto_http_tools
 ---   and auto_acp_tools.  Keys are adapter names as returned by chat.adapter.name (e.g. "moonshot-ai",
 ---   "claude", "openai").  Values override the corresponding top-level setting for sessions using that
@@ -165,7 +164,7 @@ M.defaults = {
     auto_acp_tools = true,
     auto_cli_tools = true,
     tool_system_prompts = true,
-    normalize_schema = true,
+    normalize_schema = false,
     adapters = {},
   },
 
