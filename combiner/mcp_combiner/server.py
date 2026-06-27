@@ -201,11 +201,15 @@ def _filter_tools(tools: list[Tool]) -> list[Tool]:
     return filtered
 
 
-def invalidate_tool_cache() -> None:
-    """Invalidate the tool cache, forcing a refresh on next tools/list.
+def clear_tool_cache() -> None:
+    """Clear the cached tool list + schema validators WITHOUT notifying clients.
 
-    Also sends ``notifications/tools/list_changed`` to all connected MCP
-    clients so they re-fetch the tool list immediately.
+    Use this when the tool set may have changed but the new upstream is not yet
+    ready to serve calls. Clearing locally stops us serving stale entries, while
+    *not* sending ``tools/list_changed`` keeps clients from re-fetching and then
+    calling into a proxy whose connection is still down (which would surface as
+    retries/"hanging"). The reconnect monitor fires the notification via
+    ``on_connected`` once the upstream is actually live.
     """
     global _tool_cache, _tool_cache_time
     _tool_cache = None
@@ -215,7 +219,18 @@ def invalidate_tool_cache() -> None:
     from mcp_combiner import fastvalidate
 
     fastvalidate.clear_cache()
-    logger.info("Tool cache invalidated")
+    logger.info("Tool cache cleared")
+
+
+def invalidate_tool_cache() -> None:
+    """Invalidate the tool cache, forcing a refresh on next tools/list.
+
+    Also sends ``notifications/tools/list_changed`` to all connected MCP
+    clients so they re-fetch the tool list immediately. Only call this once the
+    affected upstream is actually reachable — see ``clear_tool_cache`` for the
+    silent variant to use while a connection is still coming up.
+    """
+    clear_tool_cache()
 
     # Fire-and-forget notification to all connected sessions.
     # We schedule this as a task because invalidate_tool_cache() is called
