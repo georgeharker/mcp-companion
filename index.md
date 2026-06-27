@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="mcp-companion logo" width="440" height="252">
+</p>
+
 # mcp-companion
 
 An MCP aggregator (combiner) and editor integration: aggregate multiple
