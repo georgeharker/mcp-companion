@@ -17,6 +17,7 @@ project:
   # $schema URLs; ship it with the site so the relative link resolves.
   resources:
     - docs/schemas/project.schema.json
+    - docs/assets/logo.svg
 
 # gfm_auto_identifiers makes heading anchors match GitHub's slugs, which the
 # docs' cross-links use. Keep pandoc's full markdown reader otherwise —
@@ -25,9 +26,12 @@ from: markdown+gfm_auto_identifiers
 
 website:
   title: "mcp-companion"
+  favicon: docs/assets/logo.svg
+  image: docs/assets/logo.svg
   search: true
   sidebar:
     style: docked
+    logo: docs/assets/logo.svg
     tools:
       - icon: github
         href: https://github.com/georgeharker/mcp-companion
