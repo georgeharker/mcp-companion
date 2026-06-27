@@ -234,7 +234,7 @@ def register_meta_tools(
                 "to bring it up instead of restarting"
             )
 
-        from mcp_combiner.server import invalidate_tool_cache
+        from mcp_combiner.server import clear_tool_cache, invalidate_tool_cache
 
         # 1. Tear down the combiner-side connection + mounted providers. We do NOT
         #    call ss_manager.ensure_stopped here — that decrements the refcount
@@ -258,15 +258,35 @@ def register_meta_tools(
         try:
             await _mount_server(server_name, srv)
         except Exception as e:
+            # The remount itself blew up — make sure no half-mounted, dead proxy
+            # is left advertising tools, then notify clients to drop them.
+            _drop_providers(server_name)
             invalidate_tool_cache()
             logger.exception("restart: failed to remount '%s'", server_name)
             return f"Server '{server_name}': backing process restarted but remount failed: {e}"
 
-        invalidate_tool_cache()
+        # 4. Announce the refreshed tool list — but only once the upstream is
+        #    actually reachable. For an HTTP server whose connection has not come
+        #    back up yet, _mount_server still succeeds with a *disconnected*
+        #    client (ConnectionManager.connect swallows the open failure). Telling
+        #    clients the tools are ready in that state sends them calling into a
+        #    dead proxy: ConnectionError → RetryMiddleware retries → "hanging".
+        #    So we clear our local cache but defer the tools/list_changed
+        #    notification to the reconnect monitor, which fires it via
+        #    on_connected once the upstream is genuinely live.
+        http = conn_manager.is_http_server(srv)
+        connected = (not http) or conn_manager.is_connected(server_name)
+        if connected:
+            invalidate_tool_cache()
+            ready_note = ""
+        else:
+            clear_tool_cache()
+            ready_note = "; upstream still reconnecting — tools appear once it is live"
+
         proc_note = "process restarted" if restarted_proc else "connection re-opened"
         summary = (
             f"Server '{server_name}' restarted ({proc_note}; "
-            f"{removed} provider(s) replaced)"
+            f"{removed} provider(s) replaced){ready_note}"
         )
         logger.info(summary)
         return summary

@@ -145,6 +145,20 @@ class ConnectionManager:
     def has_connection(self, name: str) -> bool:
         return name in self._connections
 
+    def is_connected(self, name: str) -> bool:
+        """True if the persistent upstream client for *name* is currently live.
+
+        Distinct from :meth:`has_connection`, which only checks that a
+        connection is *registered*: this verifies the client object exists and
+        reports itself connected, so callers can tell a ready upstream apart
+        from one whose connect attempt has not (yet) succeeded.
+        """
+        conn = self._connections.get(name)
+        if conn is None:
+            return False
+        client = conn.client_ref[0]
+        return client is not None and client.is_connected()
+
     def get_client_factory(self, name: str) -> Callable[[], HttpClient]:
         """Return a zero-arg callable that yields the current connected Client.
 

@@ -56,6 +56,9 @@ class _FakeConnManager:
     def has_connection(self, name: str) -> bool:
         return name in self.connected
 
+    def is_connected(self, name: str) -> bool:
+        return name in self.connected
+
     def is_auth_failed(self, name: str) -> bool:
         return False
 
@@ -119,6 +122,12 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "invalidate_tool_cache",
         lambda: invalidated.__setitem__("count", invalidated["count"] + 1),
     )
+    cleared = {"count": 0}
+    monkeypatch.setattr(
+        server_mod,
+        "clear_tool_cache",
+        lambda: cleared.__setitem__("count", cleared["count"] + 1),
+    )
 
     register_meta_tools(combiner, config, conn, ss)
     reload = combiner.tools["combiner__reload_config"]
@@ -137,6 +146,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "reload": reload,
         "restart": restart,
         "invalidated": invalidated,
+        "cleared": cleared,
     }
 
 
@@ -256,3 +266,33 @@ async def test_restart_non_sharedserver_reopens_connection(harness: dict[str, An
     assert ("disconnect", "beta") in harness["conn"].calls
     assert ("connect", "beta") in harness["conn"].calls
     assert "beta" in _namespaces(harness["combiner"])
+    # Connection came back up → clients are told the tools are ready.
+    assert harness["invalidated"]["count"] == 1
+    assert harness["cleared"]["count"] == 0
+
+
+async def test_restart_http_down_defers_notification(
+    harness: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Simulate the upstream NOT coming back up synchronously: connect() runs but
+    # the client never reports connected (is_connected stays False).
+    conn = harness["conn"]
+
+    async def _connect_but_down(_config: CombinerConfig, name: str, _srv: ServerConfig) -> None:
+        conn.calls.append(("connect", name))
+        # Deliberately do not add to conn.connected → is_connected() is False.
+
+    monkeypatch.setattr(conn, "connect", _connect_but_down)
+    harness["invalidated"]["count"] = 0
+    harness["cleared"]["count"] = 0
+
+    result = await harness["restart"]("alpha")
+
+    # The proxy is still (re)mounted so the reconnect monitor can recover it…
+    assert _namespaces(harness["combiner"]) == {"alpha"}
+    # …but clients are NOT told the tools are ready while the upstream is down —
+    # otherwise they'd call into a dead proxy and hang on retries. The cache is
+    # cleared silently; the reconnect monitor fires list_changed once live.
+    assert harness["invalidated"]["count"] == 0
+    assert harness["cleared"]["count"] == 1
+    assert "reconnecting" in result
