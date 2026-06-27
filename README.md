@@ -26,18 +26,9 @@ UI.
 
 ## Overview
 
-```
-┌─────────────────────────────────────────────────────┐
-│  MCP Combiner (Python, standalone)                    │
-│  Aggregates N MCP servers → single HTTP endpoint    │
-│  Auth, env interpolation, meta-tools, health API    │
-└────────────────────┬────────────────────────────────┘
-                     │ HTTP :9741
-        ┌────────────┼────────────────┐
-        ▼            ▼                ▼
-   Neovim plugin   OpenCode     Any HTTP client
-   (CodeCompanion) (ACP agent)  (curl, scripts)
-```
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="MCP Combiner aggregates N MCP servers behind one HTTP endpoint (:9741), serving the Neovim plugin (CodeCompanion), OpenCode (ACP agent), and any HTTP client (curl, scripts)" width="760">
+</p>
 
 ---
 
