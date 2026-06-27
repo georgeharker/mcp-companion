@@ -391,19 +391,24 @@ function M.restart(opts)
     end
   end
 
-  if opts.force and ss_ok then
-    -- Force kill via sharedserver admin kill — ignores refcount
-    local client = M.client
-    if client then
-      client:disconnect()
-      M.client = nil
-    end
-    pcall(ss.stop, "mcp-combiner")
-    -- Also kill the underlying process to ensure a fresh start
+  -- Both force and non-force (once past the refcount guard above) restart the
+  -- combiner the same way; the only difference is that guard. M.stop() drops our
+  -- ref (and SIGTERMs a direct, non-sharedserver job), then for a sharedserver-
+  -- managed combiner we `admin stop --force` (SIGTERM, 5s grace, SIGKILL
+  -- fallback) to actually stop it. This is deliberate over a soft decref:
+  --   * A plain decref on the sole client just drops the refcount to 0 and the
+  --     watcher enters its grace window — the process keeps running, so the
+  --     M.start() below re-increfs the SAME process and nothing restarts.
+  --   * `admin stop --force` actually stops it while still giving the combiner
+  --     its graceful-shutdown window. The combiner is itself a sharedserver
+  --     host: on SIGTERM it runs its lifespan stop_all() and decrefs its OWN
+  --     downstreams (svg-mcp, gws, …) before exiting. `admin kill` (immediate
+  --     SIGKILL) would skip that and orphan them; the watcher self-deregisters
+  --     on child death, so kill's extra watcher-reap buys nothing.
+  M.stop()
+  if ss_ok then
     local sharedserver_mod = require("sharedserver")
-    pcall(sharedserver_mod._call_sharedserver, { "admin", "kill", "mcp-combiner" })
-  else
-    M.stop()
+    pcall(sharedserver_mod._call_sharedserver, { "admin", "stop", "--force", "mcp-combiner" })
   end
 
   -- Small delay to allow port release

@@ -190,7 +190,16 @@ class MCPRequestLogMiddleware(BaseHTTPMiddleware):
 
 
 def _signal_handler(signum: int, frame: types.FrameType | None) -> None:
-    """Handle termination signals."""
+    """Handle termination signals.
+
+    This stays installed even though uvicorn replaces it while serving: uvicorn's
+    ``capture_signals()`` *saves* our handler, installs its own ``handle_exit``
+    for the duration of ``serve()``, and on exit restores ours and re-raises the
+    captured signal back to it (uvicorn server.py). So when sharedserver SIGTERMs
+    us, uvicorn drives the graceful shutdown (whose lifespan ``finally`` already
+    runs ss_manager.stop_all() / decref), then hands the signal back here for a
+    clean ``sys.exit(0)``. cleanup is idempotent, so the double call is a no-op.
+    """
     logger.info("Received signal %d, cleaning up...", signum)
     cleanup_sharedservers()
     sys.exit(0)
@@ -415,7 +424,10 @@ def main() -> None:
         for name in ("httpx", "httpcore", "mcp.client.auth", "fastmcp.client.auth"):
             logging.getLogger(name).setLevel(logging.DEBUG)
 
-    # Register cleanup handlers
+    # Register cleanup handlers. uvicorn temporarily swaps these out while it
+    # serves, but restores them and re-raises the captured signal back to us on
+    # shutdown (see _signal_handler), so they DO run. atexit is the backstop for
+    # the normal-return path; all three call the same idempotent cleanup.
     atexit.register(cleanup_sharedservers)
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
@@ -427,6 +439,17 @@ def main() -> None:
         host=args.host,
         port=args.port,
         log_level="info",
+        # Bound the graceful-shutdown drain. The combiner holds long-lived MCP
+        # streamable-http / SSE connections that never close on their own, so the
+        # uvicorn default (None = wait forever) makes SIGTERM hang — and our
+        # supervisor (sharedserver) only waits 5s before escalating to SIGKILL.
+        # On SIGKILL the ASGI lifespan shutdown never runs, so we never `unuse`
+        # (decref) our downstream sharedservers and they orphan. A short drain
+        # lets any genuinely in-flight tool call finish, then force-closes the
+        # persistent connections so the lifespan shutdown (stop_all) runs well
+        # inside the 5s window. (FastMCP's own run_http_async sets 0 here; we run
+        # uvicorn ourselves via http_app(), so we must set it ourselves.)
+        timeout_graceful_shutdown=2,
     )
 
 
