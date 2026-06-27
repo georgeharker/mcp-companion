@@ -342,7 +342,15 @@ class SharedServerManager:
             logger.warning("sharedserver admin stop '%s' failed: %s", name, exc)
 
     async def stop_all(self) -> None:
-        """Call ``sharedserver unuse`` for every server we started."""
+        """Call ``sharedserver unuse`` (decref) for every server we started.
+
+        Runs all decrefs **concurrently**. This is invoked from the ASGI lifespan
+        shutdown when the combiner is itself being stopped by sharedserver, which
+        sends SIGTERM and escalates to SIGKILL after only ~5s. A sequential loop
+        (N servers × the per-call timeout) can overrun that window and get
+        SIGKILLed mid-cleanup, leaving the remaining downstreams orphaned — so we
+        fan out and bound each call short (see ``_stop_one``).
+        """
         if not self._active:
             return
         try:
@@ -350,8 +358,10 @@ class SharedServerManager:
         except FileNotFoundError:
             return
 
-        for name in list(self._active):
-            await self._stop_one(binary, name)
+        await asyncio.gather(
+            *(self._stop_one(binary, name) for name in list(self._active)),
+            return_exceptions=True,
+        )
         self._active.clear()
 
     async def _stop_one(self, binary: str, name: str) -> None:
@@ -363,7 +373,10 @@ class SharedServerManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=10)
+            # Short: `unuse` is just a refcount decrement and should return fast.
+            # Bounded so a concurrent stop_all() completes well inside the ~5s
+            # SIGTERM→SIGKILL window sharedserver gives us on shutdown.
+            await asyncio.wait_for(proc.communicate(), timeout=2)
         except (asyncio.TimeoutError, OSError) as exc:
             logger.warning("sharedserver unuse '%s' failed: %s", name, exc)
 
