@@ -87,13 +87,20 @@ end
 --- Build the combiner command + args
 --- @return string[] cmd
 local function _combiner_cmd()
-  local cmd = {
-    _config.combiner.python_cmd,
-    "-m", "mcp_combiner",
+  -- Base argv: a directly-runnable combiner command (combiner.command, e.g. a
+  -- Nix-built `mcp-combiner` console script) takes priority; otherwise fall back
+  -- to `<python_cmd> -m mcp_combiner`. Both resolve to the same main() and flags.
+  local cmd
+  if type(_config.combiner.command) == "string" and _config.combiner.command ~= "" then
+    cmd = { _config.combiner.command }
+  else
+    cmd = { _config.combiner.python_cmd, "-m", "mcp_combiner" }
+  end
+  vim.list_extend(cmd, {
     "--config", _config.combiner.config,
     "--port", tostring(_config.combiner.port),
     "--host", _config.combiner.host or "127.0.0.1",
-  }
+  })
   local blog = _config.combiner.log or {}
   if type(blog.file) == "string" then  -- false to opt out; string = path
     table.insert(cmd, "--log-file")

@@ -601,6 +601,7 @@ require("mcp_companion").setup({
     combiner = {
         -- venv = "~/.venv",               -- opt in to a shared venv (default: plugin-local)
         -- python_cmd = "/path/to/python", -- pin a python and skip auto-install entirely
+        -- command = "/path/to/mcp-combiner", -- run a prebuilt combiner binary directly (see Nix below)
     },
 })
 ```
@@ -613,6 +614,38 @@ reinstall; `:MCPInstall /path/to/venv` targets a specific venv).
 `mcp-combiner`), and the [`claude-mcp-combiner`](https://github.com/georgeharker/claude-mcp-combiner)
 plugin will find `mcp-combiner` directly — Neovim and standalone Claude then share one combiner
 process.
+
+### Nix
+
+A `flake.nix` is provided for Nix users. Because the Nix store is read-only, the runtime
+`uv venv` / `uv pip install` flow can't work — instead the flake builds the combiner ahead of
+time and you point the plugin at the prebuilt executable, which **skips the auto-install
+entirely**. The flake exposes three packages:
+
+- `mcp-combiner` — a Python venv with the combiner and its deps (`bin/python`, `bin/mcp-combiner`).
+- `mcp-combiner-bin` — the `mcp-combiner` console script as a standalone app (this is `default`,
+  i.e. what `nix run` executes).
+- `mcp-companion-nvim` — the Lua/Neovim plugin (no Python).
+
+Wire it up with `combiner.command`, pointing at the console script (the natural front door —
+same `main()` and CLI flags as `python -m mcp_combiner`):
+
+```nix
+# e.g. with nixvim
+extraConfigLua = ''
+  require("mcp_companion").setup({
+    combiner = {
+      command = "${lib.getExe pkgs.mcp-combiner-bin}",  -- prebuilt binary, no uv install
+      port = 9741,
+      config = vim.fn.expand("~/.config/mcp/servers.json"),
+    },
+  })
+'';
+```
+
+Alternatively, set `combiner.python_cmd = "${lib.getExe' pkgs.mcp-combiner "python"}"` — the venv
+interpreter also runs `-m mcp_combiner` and likewise skips the auto-install. Both work;
+`command` is the cleaner wiring because it consumes the package's advertised binary directly.
 
 ### Features
 

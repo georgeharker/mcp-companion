@@ -9,6 +9,12 @@ local M = {}
 --- @field host string Default "127.0.0.1"
 --- @field idle_timeout string Default "30m" (sharedserver grace period)
 --- @field python_cmd string Default "python3"
+--- @field command? string Run this executable directly instead of ``<python_cmd> -m mcp_combiner``.
+---   The combiner exposes a console script (``mcp-combiner``) whose ``main()`` and CLI flags are
+---   identical to ``python -m mcp_combiner``, so pointing ``command`` at it is equivalent. Intended
+---   for installs where the combiner is provided as a self-contained binary on a read-only filesystem
+---   (e.g. Nix: ``command = "${pkgs.mcp-combiner-bin}/bin/mcp-combiner"``). When set, it takes priority
+---   over ``python_cmd``/``venv`` and the ``uv`` auto-install is skipped (nothing to install).
 --- @field startup_timeout number Seconds to wait for combiner health. Default 30.
 --- @field request_timeout number Default timeout for MCP requests in seconds. Default 60.
 --- @field token_key? string Encryption key for OAuth token storage (or set MCP_COMBINER_TOKEN_KEY env var)
@@ -94,6 +100,12 @@ M.defaults = {
     host = "127.0.0.1",
     idle_timeout = "30m",
     python_cmd = "python3",
+    -- Run a self-contained combiner executable directly instead of
+    -- `<python_cmd> -m mcp_combiner`. Unset (default): use python_cmd. When set
+    -- (e.g. a Nix-built `mcp-combiner` console script), it takes priority over
+    -- python_cmd/venv and the uv auto-install is skipped — same main(), same flags:
+    --   command = "/nix/store/…/bin/mcp-combiner"
+    command = nil,
     -- Optional venv to install/run the combiner from. Unset (default): a
     -- plugin-local venv (<plugin>/combiner/.venv) is created and used —
     -- self-contained. Set a shared venv to let other clients reuse the install
