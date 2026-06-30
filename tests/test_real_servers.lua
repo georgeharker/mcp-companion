@@ -127,10 +127,15 @@ local function start_combiner(plugin_root, config_path)
     end
 
     local cmd = {
-        python, "-m", "mcp_combiner",
-        "--config", config_path,
-        "--port", tostring(PROD_PORT),
-        "--host", PROD_HOST,
+        python,
+        "-m",
+        "mcp_combiner",
+        "--config",
+        config_path,
+        "--port",
+        tostring(PROD_PORT),
+        "--host",
+        PROD_HOST,
     }
 
     _combiner_job = vim.fn.jobstart(cmd, {
@@ -147,7 +152,9 @@ local function start_combiner(plugin_root, config_path)
     -- Poll up to 30 seconds (real servers take longer to connect)
     local deadline = vim.loop.now() + 30000
     while vim.loop.now() < deadline do
-        vim.wait(500, function() return false end, 100)
+        vim.wait(500, function()
+            return false
+        end, 100)
         if combiner_healthy() then
             return true, nil
         end
@@ -169,19 +176,39 @@ end
 section("Module loads")
 
 local ok_log, _log = pcall(require, "mcp_companion.log")
-if ok_log then ok("mcp_companion.log") else err("mcp_companion.log", _log) end
+if ok_log then
+    ok("mcp_companion.log")
+else
+    err("mcp_companion.log", _log)
+end
 
 local ok_cfg, _cfg = pcall(require, "mcp_companion.config")
-if ok_cfg then ok("mcp_companion.config") else err("mcp_companion.config", _cfg) end
+if ok_cfg then
+    ok("mcp_companion.config")
+else
+    err("mcp_companion.config", _cfg)
+end
 
 local ok_state, state = pcall(require, "mcp_companion.state")
-if ok_state then ok("mcp_companion.state") else err("mcp_companion.state", state) end
+if ok_state then
+    ok("mcp_companion.state")
+else
+    err("mcp_companion.state", state)
+end
 
 local ok_tools, tools = pcall(require, "mcp_companion.cc.tools")
-if ok_tools then ok("mcp_companion.cc.tools") else err("mcp_companion.cc.tools", tools) end
+if ok_tools then
+    ok("mcp_companion.cc.tools")
+else
+    err("mcp_companion.cc.tools", tools)
+end
 
 local ok_cc, cc_config = pcall(require, "codecompanion.config")
-if ok_cc then ok("codecompanion.config") else err("codecompanion.config", cc_config) end
+if ok_cc then
+    ok("codecompanion.config")
+else
+    err("codecompanion.config", cc_config)
+end
 
 -- ── 2. Locate config + start combiner ─────────────────────────────────────────
 section("Combiner startup")
@@ -236,7 +263,9 @@ if combiner_ready then
     end)
 
     -- Real servers may need up to 10s to enumerate all tools
-    vim.wait(10000, function() return done end, 100)
+    vim.wait(10000, function()
+        return done
+    end, 100)
 
     if not done then
         err("client:connect", "timed out after 10s")
@@ -301,8 +330,7 @@ if connected then
         if found then
             ok("server with keyword '" .. keyword .. "' found")
         else
-            err("server missing keyword", keyword ..
-                " — actual servers: " .. table.concat(server_name_list, ", "))
+            err("server missing keyword", keyword .. " — actual servers: " .. table.concat(server_name_list, ", "))
         end
     end
 
@@ -324,7 +352,9 @@ end
 
 --- Helper: synchronous tool call with 8s timeout
 local function call_tool(namespaced, params)
-    if not connected or not client then return nil, "not connected" end
+    if not connected or not client then
+        return nil, "not connected"
+    end
     local result, call_err
     local done = false
     client:call_tool(namespaced, params or vim.empty_dict(), function(e, r)
@@ -332,14 +362,20 @@ local function call_tool(namespaced, params)
         result = r
         done = true
     end)
-    vim.wait(8000, function() return done end, 100)
-    if not done then return nil, "timeout" end
+    vim.wait(8000, function()
+        return done
+    end, 100)
+    if not done then
+        return nil, "timeout"
+    end
     return result, call_err
 end
 
 --- Extract text from MCP content array
 local function content_text(result)
-    if not result or not result.content then return nil end
+    if not result or not result.content then
+        return nil
+    end
     local parts = {}
     for _, item in ipairs(result.content) do
         if item.type == "text" and item.text then
@@ -425,7 +461,9 @@ if connected then
                     break
                 end
             end
-            if ns then break end
+            if ns then
+                break
+            end
         end
     end
     if not ns then
@@ -482,20 +520,16 @@ if connected and ok_tools and ok_cc then
         err("tools.register()", reg_err)
     end
 
-    tools_tbl = cc_config.interactions
-        and cc_config.interactions.chat
-        and cc_config.interactions.chat.tools
+    tools_tbl = cc_config.interactions and cc_config.interactions.chat and cc_config.interactions.chat.tools
 
     if tools_tbl then
         for _, v in pairs(tools_tbl) do
-            if type(v) == "table" and type(v.id) == "string"
-                and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
+            if type(v) == "table" and type(v.id) == "string" and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
                 registered_count = registered_count + 1
             end
         end
         for _, v in pairs(tools_tbl.groups or {}) do
-            if type(v) == "table" and type(v.id) == "string"
-                and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
+            if type(v) == "table" and type(v.id) == "string" and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
                 group_count = group_count + 1
             end
         end
@@ -517,8 +551,7 @@ if connected and ok_tools and ok_cc then
     if registered_count >= total_tools - 5 then
         ok(string.format("registered_count (%d) matches total_tools (%d)", registered_count, total_tools))
     else
-        err("registered_count mismatch",
-            string.format("CC has %d, combiner has %d", registered_count, total_tools))
+        err("registered_count mismatch", string.format("CC has %d, combiner has %d", registered_count, total_tools))
     end
 end
 
@@ -529,9 +562,12 @@ if tools_tbl and registered_count > 0 then
     -- Find the github get_me entry
     local test_key = nil
     for k, v in pairs(tools_tbl) do
-        if type(v) == "table" and type(v.id) == "string"
+        if
+            type(v) == "table"
+            and type(v.id) == "string"
             and v.id:sub(1, #"mcp_companion:") == "mcp_companion:"
-            and k:match("get_me") then
+            and k:match("get_me")
+        then
             test_key = k
             break
         end
@@ -539,8 +575,7 @@ if tools_tbl and registered_count > 0 then
     -- Fall back to any tool
     if not test_key then
         for k, v in pairs(tools_tbl) do
-            if type(v) == "table" and type(v.id) == "string"
-                and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
+            if type(v) == "table" and type(v.id) == "string" and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
                 test_key = k
                 break
             end
@@ -564,10 +599,14 @@ if tools_tbl and registered_count > 0 then
             -- Actually invoke the cmd function
             local cb_result = nil
             spec.cmds[1]({}, {}, {
-                output_cb = function(r) cb_result = r end,
+                output_cb = function(r)
+                    cb_result = r
+                end,
             })
 
-            vim.wait(8000, function() return cb_result ~= nil end, 100)
+            vim.wait(8000, function()
+                return cb_result ~= nil
+            end, 100)
 
             if cb_result then
                 ok(string.format("cmd function returned (status=%s)", tostring(cb_result.status)))
