@@ -1,0 +1,33 @@
+name: stylua
+
+# Enforces Lua formatting (stylua, per .stylua.toml) on PRs and pushes that
+# touch Lua. Lightweight and independent of the Nix flake — the flake's treefmt
+# check also covers this, but this gives fast feedback without a Nix build.
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "lua/**"
+      - "plugin/**"
+      - "ftdetect/**"
+      - ".stylua.toml"
+      - ".github/workflows/stylua.yml"
+  pull_request:
+    paths:
+      - "lua/**"
+      - "plugin/**"
+      - "ftdetect/**"
+      - ".stylua.toml"
+      - ".github/workflows/stylua.yml"
+
+jobs:
+  stylua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: stylua --check
+        uses: JohnnyMorganz/stylua-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: latest
+          args: --check lua
