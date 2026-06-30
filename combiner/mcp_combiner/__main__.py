@@ -16,6 +16,7 @@ from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response
 
 from mcp_combiner.server import (
+    SCHEMA_FIXES,
     _pending_token_filters,
     _token_sessions,
     create_combiner,
@@ -219,6 +220,10 @@ def create_app() -> Starlette:
         oauth_cache_tokens = False
     oauth_token_dir = os.environ.get("MCP_COMBINER_OAUTH_TOKEN_DIR")
     normalize_schemas = os.environ.get("MCP_COMBINER_NORMALIZE_SCHEMA") == "1"
+    schema_fixes_env = os.environ.get("MCP_COMBINER_SCHEMA_FIXES")
+    schema_fixes = (
+        frozenset(f for f in schema_fixes_env.split(",") if f) if schema_fixes_env else None
+    )
 
     def _tristate(name: str) -> bool | None:
         """Read a tri-state flag from env: '1' → True, '0' → False, unset → None."""
@@ -233,6 +238,7 @@ def create_app() -> Starlette:
         oauth_cache_tokens=oauth_cache_tokens,
         oauth_token_dir=oauth_token_dir,
         normalize_schemas=normalize_schemas,
+        schema_fixes=schema_fixes,
         input_validation=input_validation,
         output_validation=output_validation,
         return_ss_manager=True,
@@ -312,7 +318,24 @@ def main() -> None:
         help=(
             "Normalize tool JSON schemas to fix providers (e.g. moonshot-ai/kimi) "
             "that reject schemas where 'type' and 'anyOf' coexist at the same level. "
-            "Applied to every tools/list response at cache-fill time."
+            "Applied to every tools/list response at cache-fill time. "
+            "Back-compat alias for `--schema-fix anyof_type_hoist`."
+        ),
+    )
+    parser.add_argument(
+        "--schema-fix",
+        dest="schema_fix",
+        action="append",
+        choices=SCHEMA_FIXES,
+        default=None,
+        metavar="FIX",
+        help=(
+            "Enable a named schema fix on every tools/list response (repeatable). "
+            "Choices: " + ", ".join(SCHEMA_FIXES) + ". "
+            "anyof_type_hoist fixes type+anyOf coexistence (moonshot-ai/kimi); "
+            "empty_object fills a missing type/properties so an object schema never "
+            "serializes to [] (Copilot/Joplin); drop_invalid_required drops a "
+            "non-list 'required'. Off by default."
         ),
     )
     parser.add_argument(
@@ -368,6 +391,8 @@ def main() -> None:
         os.environ["MCP_COMBINER_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
     if args.normalize_schema:
         os.environ["MCP_COMBINER_NORMALIZE_SCHEMA"] = "1"
+    if args.schema_fix:
+        os.environ["MCP_COMBINER_SCHEMA_FIXES"] = ",".join(args.schema_fix)
     if args.input_validation is not None:
         os.environ["MCP_COMBINER_INPUT_VALIDATION"] = "1" if args.input_validation else "0"
     if args.output_validation is not None:

@@ -97,11 +97,20 @@ _pending_token_filters: dict[str, set[str]] = {}
 _COMBINER_BOOT_ID = uuid.uuid4().hex
 
 
-# Global schema normalization flag, set at server creation from
-# ``--normalize-schema`` / ``MCP_COMBINER_NORMALIZE_SCHEMA``.  When True, every
-# tool emitted from ``tools/list`` is normalized at cache-fill time so strict
-# providers (e.g. moonshot-ai/kimi) accept the resulting schemas.
-_normalize_schemas_global: bool = False
+# Named, individually-selectable schema fixes applied to every tool emitted from
+# ``tools/list`` (at cache-fill time). Selected via ``--schema-fix`` /
+# ``MCP_COMBINER_SCHEMA_FIXES`` (and ``--normalize-schema`` is a back-compat alias
+# for ``anyof_type_hoist``). Empty by default — no behavior change unless opted in.
+#   * anyof_type_hoist    — hoist a sibling ``type`` into ``anyOf`` items
+#                           (moonshot-ai/kimi reject ``type``+``anyOf`` coexistence)
+#   * empty_object        — missing ``type`` -> ``object``; an ``object`` without
+#                           ``properties`` gets ``properties: {}`` (Copilot/Joplin
+#                           reject ``[]`` where an object schema is required)
+#   * drop_invalid_required — drop ``required`` when it isn't a list
+SCHEMA_FIXES: tuple[str, ...] = ("anyof_type_hoist", "empty_object", "drop_invalid_required")
+
+# Global set of enabled schema fixes, populated at server creation.
+_schema_fixes_global: frozenset[str] = frozenset()
 
 # Strong references to in-flight notification tasks so they aren't GC'd
 # before completion.
@@ -317,16 +326,53 @@ def _normalize_schema(schema: object) -> object:
     return result
 
 
-def _normalize_tool_schema(tool: Tool) -> Tool:
-    """Return a copy of *tool* with schema-normalized parameters.
+def _apply_object_fixes(params: dict[str, Any], fixes: frozenset[str]) -> dict[str, Any]:
+    """Apply top-level (non-recursive) object-shape fixes to a parameter schema.
+
+    * ``empty_object`` — a missing/None ``type`` becomes ``"object"``, and an
+      ``object`` schema without ``properties`` gets ``properties: {}``, so it
+      never serializes to ``[]`` where strict adapters (e.g. Copilot) require an
+      object.
+    * ``drop_invalid_required`` — a ``required`` that isn't a list is dropped.
+    """
+    if "empty_object" in fixes:
+        if params.get("type") is None:
+            params["type"] = "object"
+        # Fill a missing OR mis-encoded ``properties`` (an empty dict can arrive
+        # as ``[]``, e.g. from Lua/JSON encoding — issue #7's neovim_get_cursor).
+        if params.get("type") == "object" and not isinstance(params.get("properties"), dict):
+            params["properties"] = {}
+    if (
+        "drop_invalid_required" in fixes
+        and "required" in params
+        and not isinstance(params["required"], list)
+    ):
+        params.pop("required")
+    return params
+
+
+def _apply_schema_fixes(params: object, fixes: frozenset[str]) -> object:
+    """Apply the enabled schema fixes to a tool's parameter schema.
+
+    ``anyof_type_hoist`` is recursive (nested ``Optional[...]`` schemas); the
+    object-shape fixes apply to the top-level parameter object.
+    """
+    if "anyof_type_hoist" in fixes:
+        params = _normalize_schema(params)
+    if isinstance(params, dict):
+        params = _apply_object_fixes(params, fixes)
+    return params
+
+
+def _normalize_tool_schema(tool: Tool, fixes: frozenset[str]) -> Tool:
+    """Return a copy of *tool* with the enabled schema *fixes* applied to params.
 
     Assumes the tool parameters are already serializable (no circular refs).
-    Only fixes schema compatibility issues (e.g. ``type`` + ``anyOf`` siblings).
     """
     from fastmcp.tools.function_tool import FunctionTool
 
     try:
-        params = _normalize_schema(_safe_json_clone(tool.parameters))
+        params = _apply_schema_fixes(_safe_json_clone(tool.parameters), fixes)
         if not isinstance(params, dict):
             params = {"type": "object", "properties": {}}
     except (ValueError, RecursionError, TypeError):
@@ -488,9 +534,13 @@ class ToolProcessingMiddleware(Middleware):
                 logger.warning("Replacing circular tool: %s", tool.name)
                 sanitized.append(self._to_clean_tool(tool))
 
-        if _normalize_schemas_global:
-            sanitized = [_normalize_tool_schema(t) for t in sanitized]
-            logger.debug("tools/list: normalized %d tool schema(s)", len(sanitized))
+        if _schema_fixes_global:
+            sanitized = [_normalize_tool_schema(t, _schema_fixes_global) for t in sanitized]
+            logger.debug(
+                "tools/list: applied schema fixes %s to %d tool(s)",
+                sorted(_schema_fixes_global),
+                len(sanitized),
+            )
 
         filtered = _filter_tools(sanitized)
         if len(filtered) < len(sanitized):
@@ -872,6 +922,7 @@ def create_combiner(
     oauth_cache_tokens: bool | None = ...,
     oauth_token_dir: str | None = ...,
     normalize_schemas: bool = ...,
+    schema_fixes: frozenset[str] | None = ...,
     input_validation: bool | None = ...,
     output_validation: bool | None = ...,
     return_ss_manager: Literal[True],
@@ -885,6 +936,7 @@ def create_combiner(
     oauth_cache_tokens: bool | None = ...,
     oauth_token_dir: str | None = ...,
     normalize_schemas: bool = ...,
+    schema_fixes: frozenset[str] | None = ...,
     input_validation: bool | None = ...,
     output_validation: bool | None = ...,
     return_ss_manager: Literal[False] = ...,
@@ -897,6 +949,7 @@ def create_combiner(
     oauth_cache_tokens: bool | None = None,
     oauth_token_dir: str | None = None,
     normalize_schemas: bool = False,
+    schema_fixes: frozenset[str] | None = None,
     input_validation: bool | None = None,
     output_validation: bool | None = None,
     return_ss_manager: bool = False,
@@ -944,7 +997,7 @@ def create_combiner(
     """
     global _combiner_config
     global _conn_manager
-    global _normalize_schemas_global
+    global _schema_fixes_global
 
     # Replace the MCP SDK's per-call jsonschema.validate (which rebuilds the
     # validator + re-checks the meta-schema on every tool call) with a cached
@@ -960,9 +1013,12 @@ def create_combiner(
 
     config = CombinerConfig.load(config_path)
     _combiner_config = config  # Store for tool filtering
-    _normalize_schemas_global = normalize_schemas
-    if normalize_schemas:
-        logger.info("Schema normalization enabled globally for tools/list")
+    # ``--normalize-schema`` is a back-compat alias for the anyof_type_hoist fix.
+    _schema_fixes_global = frozenset(schema_fixes or ()) | (
+        frozenset({"anyof_type_hoist"}) if normalize_schemas else frozenset()
+    )
+    if _schema_fixes_global:
+        logger.info("Schema fixes enabled for tools/list: %s", sorted(_schema_fixes_global))
 
     # Apply CLI overrides on top of config-file oauth settings
     if oauth_cache_tokens is not None:

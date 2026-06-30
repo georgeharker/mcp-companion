@@ -116,6 +116,31 @@ local function _combiner_cmd()
     if _config.cc and _config.cc.normalize_schema then
         table.insert(cmd, "--normalize-schema")
     end
+    -- Schema fixes: the union of cc.schema_fixes and every cc.adapters[*].schema_fixes,
+    -- passed as repeatable --schema-fix flags. Fixes are process-global at the combiner;
+    -- the per-adapter table just organizes which fixes the user's providers need.
+    if _config.cc then
+        local seen = {}
+        local function collect(list)
+            if type(list) == "table" then
+                for _, fix in ipairs(list) do
+                    seen[fix] = true
+                end
+            end
+        end
+        collect(_config.cc.schema_fixes)
+        if type(_config.cc.adapters) == "table" then
+            for _, adapter in pairs(_config.cc.adapters) do
+                collect(adapter.schema_fixes)
+            end
+        end
+        local fixes = vim.tbl_keys(seen)
+        table.sort(fixes) -- deterministic flag order
+        for _, fix in ipairs(fixes) do
+            table.insert(cmd, "--schema-fix")
+            table.insert(cmd, fix)
+        end
+    end
     -- Tri-state validation flags: nil → omit, true → --x-validation, false → --no-x-validation.
     local iv = _config.combiner.input_validation
     if iv ~= nil then
