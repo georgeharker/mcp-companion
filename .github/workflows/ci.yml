@@ -2,7 +2,7 @@ name: CI (mcp-combiner)
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths: ["combiner/**", ".github/workflows/ci.yml"]
   pull_request:
     paths: ["combiner/**", ".github/workflows/ci.yml"]
@@ -27,6 +27,9 @@ jobs:
 
       - name: Lint (ruff)
         run: uv run ruff check .
+
+      - name: Format (ruff)
+        run: uv run ruff format --check .
 
       - name: Types (mypy)
         run: uv run mypy mcp_combiner
