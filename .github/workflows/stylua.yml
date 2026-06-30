@@ -8,6 +8,7 @@ on:
     branches: [main, dev]
     paths:
       - "lua/**"
+      - "tests/**"
       - "plugin/**"
       - "ftdetect/**"
       - ".stylua.toml"
@@ -15,6 +16,7 @@ on:
   pull_request:
     paths:
       - "lua/**"
+      - "tests/**"
       - "plugin/**"
       - "ftdetect/**"
       - ".stylua.toml"
@@ -30,4 +32,4 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           version: latest
-          args: --check lua
+          args: --check lua tests
