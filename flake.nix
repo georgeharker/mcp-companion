@@ -127,8 +127,11 @@
               src = ./combiner;
               nativeBuildInputs = [ virtualenv-test ];
               buildPhase = ''
-                pytest -v tests/
-                mypy --strict mcp_combiner/ tests/
+                pytest -q
+                # Mirror the project's mypy policy (ci.yml): strict is already
+                # enabled in pyproject [tool.mypy] and scoped to the package;
+                # the test suite is intentionally not strict-typed.
+                mypy mcp_combiner
               '';
               installPhase = ''
                 touch $out
