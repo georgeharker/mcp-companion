@@ -34,6 +34,11 @@ jobs:
   build:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # id-token: write lets flakehub-cache-action authenticate to FlakeHub via
+    # GitHub OIDC (no secrets needed).
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -58,9 +63,9 @@ jobs:
         if: steps.flake.outputs.present == 'true'
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Enable Magic Nix Cache
+      - name: Enable FlakeHub Cache
         if: steps.flake.outputs.present == 'true'
-        uses: DeterminateSystems/magic-nix-cache-action@main
+        uses: DeterminateSystems/flakehub-cache-action@main
 
       - name: flake check
         if: steps.flake.outputs.present == 'true'
