@@ -135,16 +135,12 @@ def test_server_config_isolate_absent_is_none() -> None:
 
 
 def test_server_config_isolate_true() -> None:
-    srv = ServerConfig.from_dict(
-        "svg", {"url": "http://example.com/mcp", "isolate": True}
-    )
+    srv = ServerConfig.from_dict("svg", {"url": "http://example.com/mcp", "isolate": True})
     assert srv.isolate is True
 
 
 def test_server_config_isolate_false_explicit() -> None:
-    srv = ServerConfig.from_dict(
-        "svg", {"url": "http://example.com/mcp", "isolate": False}
-    )
+    srv = ServerConfig.from_dict("svg", {"url": "http://example.com/mcp", "isolate": False})
     assert srv.isolate is False
 
 

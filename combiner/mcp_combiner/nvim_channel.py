@@ -98,9 +98,7 @@ class NvimChannelManager:
 
     # -- registration -------------------------------------------------------
 
-    def register(
-        self, instance_id: str, socket: str, meta: dict[str, Any] | None = None
-    ) -> None:
+    def register(self, instance_id: str, socket: str, meta: dict[str, Any] | None = None) -> None:
         """Register (or update) an instance and start its queue worker."""
         existing = self._instances.get(instance_id)
         if existing is not None:
@@ -140,10 +138,7 @@ class NvimChannelManager:
 
     def instances(self) -> list[dict[str, Any]]:
         """List registered instances with their metadata, for agent selection."""
-        return [
-            {"instance_id": inst.instance_id, **inst.meta}
-            for inst in self._instances.values()
-        ]
+        return [{"instance_id": inst.instance_id, **inst.meta} for inst in self._instances.values()]
 
     # -- calling ------------------------------------------------------------
 
@@ -216,9 +211,7 @@ class NvimChannelManager:
             raise NoInstanceError(f"no Neovim instance registered for {instance_id}")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
-        await inst.queue.put(
-            _Job(label, lua, lua_args, timeout or self._default_timeout, future)
-        )
+        await inst.queue.put(_Job(label, lua, lua_args, timeout or self._default_timeout, future))
         return await future
 
     async def _run(self, inst: _Instance) -> None:
@@ -257,9 +250,7 @@ class NvimChannelManager:
         """Ensure a connection, then run the job's Lua over the channel."""
         nvim = inst.nvim
         if nvim is None:
-            nvim = await asyncio.to_thread(
-                pynvim.attach, "socket", path=inst.socket, decode=True
-            )
+            nvim = await asyncio.to_thread(pynvim.attach, "socket", path=inst.socket, decode=True)
             inst.nvim = nvim
         assert nvim is not None  # narrow for the type checker; reconnect guarantees it
         return await asyncio.to_thread(nvim.exec_lua, job.lua, *job.lua_args)

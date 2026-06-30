@@ -36,7 +36,8 @@
 local M = {}
 
 -- Feature detection for future vim.net adoption.
-local has_vim_net = vim.net and type(vim.net.request) == "function"
+local has_vim_net = vim.net
+    and type(vim.net.request) == "function"
     -- vim.net.request currently lacks status-code support;
     -- flip this flag when it does.
     and false

@@ -415,12 +415,15 @@ def register_meta_tools(
         logger.info("Session %s: disabled server '%s'", sid, server_name)
 
         import json
-        return json.dumps({
-            "session_id": sid,
-            "action": "disabled",
-            "server": server_name,
-            "disabled_servers": sorted(_session_disabled.get(sid, set())),
-        })
+
+        return json.dumps(
+            {
+                "session_id": sid,
+                "action": "disabled",
+                "server": server_name,
+                "disabled_servers": sorted(_session_disabled.get(sid, set())),
+            }
+        )
 
     @combiner.tool()
     async def combiner__session_enable_server(
@@ -449,13 +452,16 @@ def register_meta_tools(
         blocked = _session_disabled.get(sid)
         if not blocked or server_name not in blocked:
             import json
-            return json.dumps({
-                "session_id": sid,
-                "action": "no_change",
-                "server": server_name,
-                "message": f"Server '{server_name}' is not session-disabled",
-                "disabled_servers": sorted(_session_disabled.get(sid, set())),
-            })
+
+            return json.dumps(
+                {
+                    "session_id": sid,
+                    "action": "no_change",
+                    "server": server_name,
+                    "message": f"Server '{server_name}' is not session-disabled",
+                    "disabled_servers": sorted(_session_disabled.get(sid, set())),
+                }
+            )
 
         blocked.discard(server_name)
         # Clean up empty sets
@@ -472,12 +478,15 @@ def register_meta_tools(
         logger.info("Session %s: re-enabled server '%s'", sid, server_name)
 
         import json
-        return json.dumps({
-            "session_id": sid,
-            "action": "enabled",
-            "server": server_name,
-            "disabled_servers": sorted(_session_disabled.get(sid, set())),
-        })
+
+        return json.dumps(
+            {
+                "session_id": sid,
+                "action": "enabled",
+                "server": server_name,
+                "disabled_servers": sorted(_session_disabled.get(sid, set())),
+            }
+        )
 
     @combiner.tool()
     async def combiner__session_status(ctx: Context, chat_id: str | None = None) -> str:
@@ -501,7 +510,10 @@ def register_meta_tools(
         blocked.sort()
 
         import json
-        return json.dumps({
-            "session_id": sid,
-            "disabled_servers": blocked,
-        })
+
+        return json.dumps(
+            {
+                "session_id": sid,
+                "disabled_servers": blocked,
+            }
+        )

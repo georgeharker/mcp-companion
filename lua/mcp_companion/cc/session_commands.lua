@@ -35,7 +35,9 @@ end
 --- @param is_disabling boolean true if disabling, false if re-enabling
 local function _sync_cc_tool_group(chat, server_name, is_disabling)
     local cc_mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
-    if not cc_mcp_ok then return end
+    if not cc_mcp_ok then
+        return
+    end
 
     local group_name = cc_mcp.tool_prefix() .. server_name
     local combiner_group_name = cc_mcp.tool_prefix() .. "combiner"
@@ -148,10 +150,7 @@ local function _call_session_tool(chat, tool_name, server_name, callback)
                 callback(tostring(err))
                 return
             end
-            local text = result
-                and result.content
-                and result.content[1]
-                and result.content[1].text
+            local text = result and result.content and result.content[1] and result.content[1].text
             if text then
                 local ok, data = pcall(vim.json.decode, text)
                 if ok and data and data.disabled_servers and chat and chat.bufnr then
@@ -187,13 +186,10 @@ function M.toggle_server_for_session(chat, server_name, done)
 
     local disabled = _get_disabled(chat.bufnr)
     local currently_disabled = disabled[server_name] == true
-    local tool = currently_disabled
-        and "combiner__session_enable_server"
-        or "combiner__session_disable_server"
-    local new_state = not currently_disabled  -- true = will be disabled
+    local tool = currently_disabled and "combiner__session_enable_server" or "combiner__session_disable_server"
+    local new_state = not currently_disabled -- true = will be disabled
 
-    log.debug("Session toggle: %s %s",
-        currently_disabled and "enabling" or "disabling", server_name)
+    log.debug("Session toggle: %s %s", currently_disabled and "enabling" or "disabling", server_name)
 
     _call_session_tool(chat, tool, server_name, function(err, msg)
         if err then
@@ -276,20 +272,20 @@ function M.register()
 
             vim.ui.select(items, {
                 prompt = "Toggle MCP server for this session:",
-                format_item = function(item) return item.label end,
+                format_item = function(item)
+                    return item.label
+                end,
             }, function(choice)
-                if not choice then return end
+                if not choice then
+                    return
+                end
                 M.toggle_server_for_session(chat, choice.name, function(err, info)
                     if err then
-                        vim.notify(
-                            string.format("mcp-companion: session toggle failed: %s", err),
-                            vim.log.levels.ERROR
-                        )
+                        vim.notify(string.format("mcp-companion: session toggle failed: %s", err), vim.log.levels.ERROR)
                         return
                     end
                     vim.notify(
-                        string.format("mcp-companion: %s %s for this session",
-                            info.action, info.server),
+                        string.format("mcp-companion: %s %s for this session", info.action, info.server),
                         vim.log.levels.INFO
                     )
                 end)
@@ -308,7 +304,9 @@ function M.register()
             vim.ui.select({ "shortest", "allowed", "disabled" }, {
                 prompt = "Project file format:",
             }, function(choice)
-                if not choice then return end
+                if not choice then
+                    return
+                end
                 local cc_init = require("mcp_companion.cc")
                 cc_init._save_project_config_interactive(chat, choice)
             end)
@@ -344,8 +342,11 @@ function M.fetch_session_status(chat, callback)
         local host = (cfg.combiner and cfg.combiner.host) or "127.0.0.1"
         local port = (cfg.combiner and cfg.combiner.port) or 9741
         local http = require("mcp_companion.http")
-        log.debug("MCPStatus: fetching session filter via token (bufnr=%s token=%s)",
-            tostring(chat and chat.bufnr), token)
+        log.debug(
+            "MCPStatus: fetching session filter via token (bufnr=%s token=%s)",
+            tostring(chat and chat.bufnr),
+            token
+        )
 
         http.request({
             url = string.format("http://%s:%d/sessions/token/%s/filter", host, port, token),
@@ -387,16 +388,27 @@ function M.fetch_session_status(chat, callback)
     local chat_id = chat and chat.bufnr and tostring(chat.bufnr) or nil
     combiner.client:call_tool("combiner__session_status", { chat_id = chat_id }, function(err, result)
         vim.schedule(function()
-            if err then callback(tostring(err), nil); return end
+            if err then
+                callback(tostring(err), nil)
+                return
+            end
             local text = result and result.content and result.content[1] and result.content[1].text
-            if not text then callback("Empty response", nil); return end
+            if not text then
+                callback("Empty response", nil)
+                return
+            end
             local ok, data = pcall(vim.json.decode, text)
-            if not ok or not data then callback("JSON parse error", nil); return end
+            if not ok or not data then
+                callback("JSON parse error", nil)
+                return
+            end
             local disabled = {}
             for _, name in ipairs(data.disabled_servers or {}) do
                 disabled[name] = true
             end
-            if chat and chat.bufnr then _session_state[chat.bufnr] = disabled end
+            if chat and chat.bufnr then
+                _session_state[chat.bufnr] = disabled
+            end
             callback(nil, disabled)
         end)
     end)

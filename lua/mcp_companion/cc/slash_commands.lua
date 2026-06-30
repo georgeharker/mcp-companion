@@ -64,16 +64,15 @@ function M.register()
                 local args = {}
                 if captured_prompt.arguments and #captured_prompt.arguments > 0 then
                     for _, arg in ipairs(captured_prompt.arguments) do
-                        local value = vim.fn.input(string.format(
-                            "%s (%s): ",
-                            arg.name,
-                            arg.description or ""
-                        ))
+                        local value = vim.fn.input(string.format("%s (%s): ", arg.name, arg.description or ""))
                         if value ~= "" then
                             args[arg.name] = value
                         elseif arg.required then
-                            log.warn("Required argument '%s' not provided for prompt '%s'",
-                                arg.name, captured_prompt.name)
+                            log.warn(
+                                "Required argument '%s' not provided for prompt '%s'",
+                                arg.name,
+                                captured_prompt.name
+                            )
                             return
                         end
                     end

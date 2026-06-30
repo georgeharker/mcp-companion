@@ -1,0 +1,9 @@
+# Lua formatting rules (stylua). Picked up by the flake's treefmt check and by
+# `stylua`/`nix fmt` locally. Defaults are kept except indentation: 4-space,
+# spaces (never tabs).
+column_width = 120
+line_endings = "Unix"
+indent_type = "Spaces"
+indent_width = 4
+quote_style = "AutoPreferDouble"
+call_parentheses = "Always"

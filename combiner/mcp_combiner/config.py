@@ -101,8 +101,15 @@ class SharedServerConfig(BaseModel):
             "sharedServer",
             name,
             data,
-            {"command", "args", "env", "grace_period", "gracePeriod",
-             "health_timeout", "healthTimeout"},
+            {
+                "command",
+                "args",
+                "env",
+                "grace_period",
+                "gracePeriod",
+                "health_timeout",
+                "healthTimeout",
+            },
         )
         raw_env = data.get("env", {})
         env = {k: str(v) for k, v in raw_env.items()} if raw_env else {}
@@ -179,9 +186,22 @@ class ServerConfig(BaseModel):
             "server",
             name,
             data,
-            {"command", "args", "env", "transport", "url", "headers", "disabled",
-             "autoApprove", "auth", "sharedServer", "shared_server",
-             "toolFilter", "tool_filter", "isolate"},
+            {
+                "command",
+                "args",
+                "env",
+                "transport",
+                "url",
+                "headers",
+                "disabled",
+                "autoApprove",
+                "auth",
+                "sharedServer",
+                "shared_server",
+                "toolFilter",
+                "tool_filter",
+                "isolate",
+            },
         )
         transport_str = data.get("transport")
         if transport_str is None:
