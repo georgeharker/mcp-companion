@@ -14,7 +14,7 @@
 local pass = 0
 local fail = 0
 local results = {}
-local _combiner_job = nil   -- track the test combiner process for cleanup
+local _combiner_job = nil -- track the test combiner process for cleanup
 
 local function ok(name)
     pass = pass + 1
@@ -51,7 +51,7 @@ end
 --- Locate the combiner directory relative to this file
 local function find_combiner_dir()
     -- Try relative to this file's location
-    local this_file = debug.getinfo(1, "S").source:sub(2)  -- strip leading '@'
+    local this_file = debug.getinfo(1, "S").source:sub(2) -- strip leading '@'
     -- this_file is e.g. .../mcp-companion.nvim/lua/mcp_companion/test_cc_tools.lua
     local plugin_root = this_file:match("^(.*)/lua/")
     if plugin_root then
@@ -82,9 +82,13 @@ local function start_test_combiner(combiner_dir, fixture_path)
     end
 
     local cmd = {
-        python, "-m", "mcp_combiner",
-        "--config", fixture_path,
-        "--port", tostring(TEST_PORT),
+        python,
+        "-m",
+        "mcp_combiner",
+        "--config",
+        fixture_path,
+        "--port",
+        tostring(TEST_PORT),
     }
 
     _combiner_job = vim.fn.jobstart(cmd, {
@@ -102,10 +106,10 @@ local function start_test_combiner(combiner_dir, fixture_path)
     local deadline = vim.loop.now() + 12000
     local ready = false
     while vim.loop.now() < deadline do
-        vim.wait(200, function() return false end, 50)
-        local out = vim.fn.system(
-            string.format("curl -sf http://127.0.0.1:%d/health 2>/dev/null", TEST_PORT)
-        )
+        vim.wait(200, function()
+            return false
+        end, 50)
+        local out = vim.fn.system(string.format("curl -sf http://127.0.0.1:%d/health 2>/dev/null", TEST_PORT))
         if out and out:match('"status":"ok"') then
             ready = true
             break
@@ -133,27 +137,45 @@ end
 section("Module loads")
 
 local ok_log, log = pcall(require, "mcp_companion.log")
-if ok_log then ok("mcp_companion.log loads") else err("mcp_companion.log", log) end
+if ok_log then
+    ok("mcp_companion.log loads")
+else
+    err("mcp_companion.log", log)
+end
 
 local ok_cfg, cfg = pcall(require, "mcp_companion.config")
-if ok_cfg then ok("mcp_companion.config loads") else err("mcp_companion.config", cfg) end
+if ok_cfg then
+    ok("mcp_companion.config loads")
+else
+    err("mcp_companion.config", cfg)
+end
 
 local ok_state, state = pcall(require, "mcp_companion.state")
-if ok_state then ok("mcp_companion.state loads") else err("mcp_companion.state", state) end
+if ok_state then
+    ok("mcp_companion.state loads")
+else
+    err("mcp_companion.state", state)
+end
 
 local ok_tools, tools = pcall(require, "mcp_companion.cc.tools")
-if ok_tools then ok("mcp_companion.cc.tools loads") else err("mcp_companion.cc.tools", tools) end
+if ok_tools then
+    ok("mcp_companion.cc.tools loads")
+else
+    err("mcp_companion.cc.tools", tools)
+end
 
 local ok_cc, cc_config = pcall(require, "codecompanion.config")
-if ok_cc then ok("codecompanion.config loads") else err("codecompanion.config", cc_config) end
+if ok_cc then
+    ok("codecompanion.config loads")
+else
+    err("codecompanion.config", cc_config)
+end
 
 -- ── 2. CC config structure ───────────────────────────────────────────────────
 section("CC config structure")
 
 if ok_cc then
-    local tools_tbl = cc_config.interactions
-        and cc_config.interactions.chat
-        and cc_config.interactions.chat.tools
+    local tools_tbl = cc_config.interactions and cc_config.interactions.chat and cc_config.interactions.chat.tools
     if tools_tbl then
         ok("config.interactions.chat.tools exists")
     else
@@ -217,7 +239,9 @@ if combiner_started then
         connect_done = true
     end)
 
-    vim.wait(5100, function() return connect_done end, 50)
+    vim.wait(5100, function()
+        return connect_done
+    end, 50)
 
     if not connect_done then
         err("client:connect", "timed out after 5s")
@@ -260,10 +284,7 @@ if connected and #servers > 0 and ok_tools then
         err("tools.register()", reg_err)
     end
 
-    tools_tbl = ok_cc
-        and cc_config.interactions
-        and cc_config.interactions.chat
-        and cc_config.interactions.chat.tools
+    tools_tbl = ok_cc and cc_config.interactions and cc_config.interactions.chat and cc_config.interactions.chat.tools
 
     local registered_count = 0
     local group_count = 0
@@ -309,14 +330,30 @@ if sample_key and tools_tbl then
     local entry = tools_tbl[sample_key]
     ok("sample tool key: " .. sample_key)
 
-    if type(entry.id) == "string" then ok("entry.id is string") else err("entry.id", type(entry.id)) end
-    if type(entry.description) == "string" then ok("entry.description is string") else err("entry.description", type(entry.description)) end
-    if type(entry.callback) == "function" then ok("entry.callback is function") else err("entry.callback", type(entry.callback)) end
+    if type(entry.id) == "string" then
+        ok("entry.id is string")
+    else
+        err("entry.id", type(entry.id))
+    end
+    if type(entry.description) == "string" then
+        ok("entry.description is string")
+    else
+        err("entry.description", type(entry.description))
+    end
+    if type(entry.callback) == "function" then
+        ok("entry.callback is function")
+    else
+        err("entry.callback", type(entry.callback))
+    end
 
     local spec_ok, spec = pcall(entry.callback)
     if spec_ok then
         ok("callback() returns without error")
-        if type(spec.name) == "string" then ok("spec.name: " .. spec.name) else err("spec.name", type(spec.name)) end
+        if type(spec.name) == "string" then
+            ok("spec.name: " .. spec.name)
+        else
+            err("spec.name", type(spec.name))
+        end
         if type(spec.cmds) == "table" and #spec.cmds > 0 and type(spec.cmds[1]) == "function" then
             ok("spec.cmds[1] is function")
         else
@@ -366,12 +403,18 @@ if #registered_names > 0 and tools_tbl then
 
     local call_result = nil
     cmd_fn(
-        {},         -- self
+        {}, -- self
         test_input, -- action (tool input from LLM)
-        { output_cb = function(res) call_result = res end }
+        {
+            output_cb = function(res)
+                call_result = res
+            end,
+        }
     )
 
-    vim.wait(5000, function() return call_result ~= nil end, 50)
+    vim.wait(5000, function()
+        return call_result ~= nil
+    end, 50)
 
     if call_result then
         ok(string.format("tool call returned (status=%s)", tostring(call_result.status)))
@@ -390,7 +433,11 @@ section("Cleanup")
 
 if ok_tools and tools_tbl then
     local unr_ok, unr_err = pcall(tools.unregister)
-    if unr_ok then ok("tools.unregister() ok") else err("tools.unregister()", unr_err) end
+    if unr_ok then
+        ok("tools.unregister() ok")
+    else
+        err("tools.unregister()", unr_err)
+    end
 
     local remaining = 0
     for _, value in pairs(tools_tbl) do

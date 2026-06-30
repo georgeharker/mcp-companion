@@ -18,8 +18,10 @@ package.path = repo_root .. "/lua/?.lua;" .. repo_root .. "/lua/?/init.lua;" .. 
 
 -- Stub modules that cc/init.lua pulls in eagerly.
 package.loaded["mcp_companion.log"] = {
-    debug = function() end, info = function() end,
-    warn = function() end, error = function() end,
+    debug = function() end,
+    info = function() end,
+    warn = function() end,
+    error = function() end,
 }
 
 -- Mutable stub fixtures the tests poke at.
@@ -27,11 +29,15 @@ local _stub_cc_config = {}
 local _stub_servers = {}
 
 package.loaded["mcp_companion.config"] = {
-    get = function() return { cc = _stub_cc_config } end,
+    get = function()
+        return { cc = _stub_cc_config }
+    end,
 }
 package.loaded["mcp_companion.state"] = {
     field = function(key)
-        if key == "servers" then return _stub_servers end
+        if key == "servers" then
+            return _stub_servers
+        end
         return nil
     end,
 }
@@ -61,14 +67,15 @@ end
 
 local function assert_eq(a, b, msg)
     if a ~= b then
-        error(string.format("%s\n  expected: %s\n  got:      %s",
-            msg or "values differ", tostring(b), tostring(a)))
+        error(string.format("%s\n  expected: %s\n  got:      %s", msg or "values differ", tostring(b), tostring(a)))
     end
 end
 
 local function assert_list_eq(a, b, msg)
-    a = a or {}; b = b or {}
-    table.sort(a); table.sort(b)
+    a = a or {}
+    b = b or {}
+    table.sort(a)
+    table.sort(b)
     assert_eq(table.concat(a, ","), table.concat(b, ","), msg)
 end
 
@@ -84,7 +91,9 @@ local function in_clean_cwd(fn)
     local ok, err = pcall(fn, tmp)
     vim.cmd("cd " .. vim.fn.fnameescape(_saved_cwd))
     vim.fn.delete(tmp, "rf")
-    if not ok then error(err) end
+    if not ok then
+        error(err)
+    end
 end
 
 print("=== cc._resolve_session_allowed (no project file) ===")
@@ -105,7 +114,7 @@ test("auto_http_tools=false → empty list", function()
     end)
 end)
 
-test("auto_http_tools={\"gws\"} → that list", function()
+test('auto_http_tools={"gws"} → that list', function()
     in_clean_cwd(function()
         _stub_cc_config = { auto_http_tools = { "gws" } }
         local out = cc._resolve_session_allowed("http")
@@ -169,8 +178,7 @@ end
 
 test("project allowed_servers wins over auto_http_tools=true", function()
     in_clean_cwd(function(tmp)
-        write_file(tmp .. "/.mcp-companion.json",
-            '{"allowed_servers": ["gws"]}')
+        write_file(tmp .. "/.mcp-companion.json", '{"allowed_servers": ["gws"]}')
         _stub_cc_config = { auto_http_tools = true }
         _stub_servers = { { name = "gws" }, { name = "github" } }
         local out = cc._resolve_session_allowed("http")
@@ -181,11 +189,12 @@ end)
 test("project file enables servers that auto_http_tools=false would suppress", function()
     -- The "default off, enable per project" workflow.
     in_clean_cwd(function(tmp)
-        write_file(tmp .. "/.mcp-companion.json",
-            '{"allowed_servers": ["gws", "github"]}')
+        write_file(tmp .. "/.mcp-companion.json", '{"allowed_servers": ["gws", "github"]}')
         _stub_cc_config = { auto_http_tools = false }
         _stub_servers = {
-            { name = "gws" }, { name = "github" }, { name = "clickup" },
+            { name = "gws" },
+            { name = "github" },
+            { name = "clickup" },
         }
         local out = cc._resolve_session_allowed("http")
         assert_list_eq(out, { "gws", "github" })
@@ -194,11 +203,12 @@ end)
 
 test("project disabled_servers inverts against state.servers", function()
     in_clean_cwd(function(tmp)
-        write_file(tmp .. "/.mcp-companion.json",
-            '{"disabled_servers": ["clickup"]}')
+        write_file(tmp .. "/.mcp-companion.json", '{"disabled_servers": ["clickup"]}')
         _stub_cc_config = { auto_http_tools = true }
         _stub_servers = {
-            { name = "gws" }, { name = "github" }, { name = "clickup" },
+            { name = "gws" },
+            { name = "github" },
+            { name = "clickup" },
         }
         local out = cc._resolve_session_allowed("http")
         assert_list_eq(out, { "gws", "github" })
@@ -207,10 +217,13 @@ end)
 
 test("project adapters.<name> beats top-level for HTTP", function()
     in_clean_cwd(function(tmp)
-        write_file(tmp .. "/.mcp-companion.json", [[{
+        write_file(
+            tmp .. "/.mcp-companion.json",
+            [[{
             "allowed_servers": ["gws", "github"],
             "adapters": { "moonshot-ai": { "allowed_servers": ["github"] } }
-        }]])
+        }]]
+        )
         _stub_cc_config = { auto_http_tools = true }
         _stub_servers = { { name = "gws" }, { name = "github" } }
         assert_list_eq(cc._resolve_session_allowed("http", "moonshot-ai"), { "github" })
@@ -221,9 +234,12 @@ end)
 
 test("project adapters.<name> applies to ACP kind", function()
     in_clean_cwd(function(tmp)
-        write_file(tmp .. "/.mcp-companion.json", [[{
+        write_file(
+            tmp .. "/.mcp-companion.json",
+            [[{
             "adapters": { "copilot_acp": { "allowed_servers": ["github"] } }
-        }]])
+        }]]
+        )
         _stub_cc_config = { auto_acp_tools = true }
         _stub_servers = { { name = "gws" }, { name = "github" } }
         assert_list_eq(cc._resolve_session_allowed("acp", "copilot_acp"), { "github" })
@@ -234,9 +250,12 @@ end)
 
 test("project adapters.<name> applies to CLI kind keyed by agent name", function()
     in_clean_cwd(function(tmp)
-        write_file(tmp .. "/.mcp-companion.json", [[{
+        write_file(
+            tmp .. "/.mcp-companion.json",
+            [[{
             "adapters": { "claude_code": { "disabled_servers": ["gws"] } }
-        }]])
+        }]]
+        )
         _stub_cc_config = { auto_cli_tools = true }
         _stub_servers = { { name = "gws" }, { name = "github" } }
         assert_list_eq(cc._resolve_session_allowed("cli", "claude_code"), { "github" })
@@ -246,4 +265,6 @@ test("project adapters.<name> applies to CLI kind keyed by agent name", function
 end)
 
 print(string.format("\n=== %d passed, %d failed ===", passed, failed))
-if failed > 0 then os.exit(1) end
+if failed > 0 then
+    os.exit(1)
+end
