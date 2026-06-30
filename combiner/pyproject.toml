@@ -1,6 +1,6 @@
 [project]
 name = "mcp-combiner"
-version = "0.6.0"
+version = "0.6.2"
 description = "An MCP aggregator — fronts multiple MCP servers behind a single Streamable HTTP endpoint, shareable across clients."
 requires-python = ">=3.12"
 license = "MIT"
