@@ -40,7 +40,9 @@ function M.setup(opts)
   -- the plugin-local combiner/.venv), unless the user pinned a custom python_cmd.
   -- Async + idempotent (no-op if the current version is already installed); on
   -- success we re-resolve python_cmd so the (later) combiner start prefers it.
-  if not config.get().combiner._custom_python then
+  -- combiner.command supplies a ready-to-run executable (e.g. a Nix-built binary),
+  -- so there is nothing for uv to install — skip the ensure step entirely.
+  if not config.get().combiner._custom_python and not config.get().combiner.command then
     require("mcp_companion.install").ensure(nil, function(ok, err, installed)
       if ok then
         config.refresh_python_cmd()
