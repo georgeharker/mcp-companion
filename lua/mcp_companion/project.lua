@@ -104,11 +104,15 @@ local function validate(raw)
 
     if allowed ~= nil then
         local err = check_string_list(allowed, "allowed_servers")
-        if err then return nil, err end
+        if err then
+            return nil, err
+        end
     end
     if disabled ~= nil then
         local err = check_string_list(disabled, "disabled_servers")
-        if err then return nil, err end
+        if err then
+            return nil, err
+        end
     end
 
     local tool_system_prompts = raw.tool_system_prompts
@@ -128,7 +132,9 @@ local function validate(raw)
             end
             if type(spec) ~= "boolean" then
                 local err = check_string_list(spec, "auto_approve." .. server_name)
-                if err then return nil, err end
+                if err then
+                    return nil, err
+                end
             end
         end
     end
@@ -150,15 +156,20 @@ local function validate(raw)
             local a_allowed = acfg.allowed_servers
             local a_disabled = acfg.disabled_servers
             if a_allowed ~= nil and a_disabled ~= nil then
-                return nil, "adapters." .. adapter_name .. ": allowed_servers and disabled_servers are mutually exclusive"
+                return nil,
+                    "adapters." .. adapter_name .. ": allowed_servers and disabled_servers are mutually exclusive"
             end
             if a_allowed ~= nil then
                 local err = check_string_list(a_allowed, "adapters." .. adapter_name .. ".allowed_servers")
-                if err then return nil, err end
+                if err then
+                    return nil, err
+                end
             end
             if a_disabled ~= nil then
                 local err = check_string_list(a_disabled, "adapters." .. adapter_name .. ".disabled_servers")
-                if err then return nil, err end
+                if err then
+                    return nil, err
+                end
             end
             validated_adapters[adapter_name] = {
                 allowed_servers = a_allowed,
@@ -173,7 +184,8 @@ local function validate(raw)
         tool_system_prompts = tool_system_prompts,
         auto_approve = auto_approve,
         adapters = validated_adapters,
-    }, nil
+    },
+        nil
 end
 
 --- Resolve the per-project auto-approve override for a server, if any.
@@ -331,10 +343,14 @@ local SCHEMA_URL = "https://geohar.github.io/mcp-companion/project.schema.json"
 local function as_sorted_list(disabled)
     local out = {}
     if disabled[1] ~= nil then
-        for _, v in ipairs(disabled) do table.insert(out, v) end
+        for _, v in ipairs(disabled) do
+            table.insert(out, v)
+        end
     else
         for k, v in pairs(disabled) do
-            if v then table.insert(out, k) end
+            if v then
+                table.insert(out, k)
+            end
         end
     end
     table.sort(out)
@@ -350,11 +366,15 @@ function M.format_payload(disabled, known_servers, format)
     format = format or "shortest"
     local disabled_list = as_sorted_list(disabled)
     local disabled_set = {}
-    for _, name in ipairs(disabled_list) do disabled_set[name] = true end
+    for _, name in ipairs(disabled_list) do
+        disabled_set[name] = true
+    end
 
     local allowed_list = {}
     for _, name in ipairs(known_servers or {}) do
-        if not disabled_set[name] then table.insert(allowed_list, name) end
+        if not disabled_set[name] then
+            table.insert(allowed_list, name)
+        end
     end
     table.sort(allowed_list)
 
@@ -419,7 +439,9 @@ end
 function M.save_target_path(start_dir)
     start_dir = start_dir or vim.fn.getcwd()
     local _, file = M.find_root(start_dir)
-    if file then return file end
+    if file then
+        return file
+    end
     return start_dir .. "/" .. PROJECT_FILE
 end
 
@@ -457,7 +479,9 @@ end
 --- @return table<string, boolean>
 function M.project_disabled_set(project_cfg, known_servers)
     local out = {}
-    if not project_cfg then return out end
+    if not project_cfg then
+        return out
+    end
     if project_cfg.disabled_servers then
         for _, name in ipairs(project_cfg.disabled_servers) do
             out[name] = true
@@ -470,7 +494,9 @@ function M.project_disabled_set(project_cfg, known_servers)
             allowed[name] = true
         end
         for _, name in ipairs(known_servers or {}) do
-            if not allowed[name] then out[name] = true end
+            if not allowed[name] then
+                out[name] = true
+            end
         end
     end
     return out
@@ -494,8 +520,7 @@ end
 ---   now_visible = boolean,    -- visibility AFTER the toggle
 --- }
 function M.toggle_in_project_file(server_name, known_servers, start_dir)
-    assert(type(server_name) == "string" and server_name ~= "",
-        "project.toggle_in_project_file: server_name required")
+    assert(type(server_name) == "string" and server_name ~= "", "project.toggle_in_project_file: server_name required")
 
     local project_cfg, _root = M.resolve(start_dir)
     local disabled = M.project_disabled_set(project_cfg, known_servers)
@@ -588,8 +613,7 @@ function M.save(opts)
         vim.fn.mkdir(parent, "p")
     end
 
-    local out = assert(io.open(path, "w"),
-        "project.save: could not open " .. path .. " for writing")
+    local out = assert(io.open(path, "w"), "project.save: could not open " .. path .. " for writing")
     out:write(contents)
     out:close()
 

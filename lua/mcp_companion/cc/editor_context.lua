@@ -49,7 +49,9 @@ local function fetch_resource_sync(client, uri)
     end)
 
     -- Block until callback fires (max 10s)
-    vim.wait(10000, function() return done end, 50)
+    vim.wait(10000, function()
+        return done
+    end, 50)
 
     return result
 end
@@ -97,13 +99,11 @@ function M.register()
                 local captured_name = resource.name or resource.uri
 
                 editor_ctx[var_name] = {
-                    description = resource.description
-                        or string.format("MCP resource: %s", captured_name),
+                    description = resource.description or string.format("MCP resource: %s", captured_name),
                     ---@param args {Chat?: table, is_slash_command?: boolean}
                     callback = function(args)
                         local content = fetch_resource_sync(combiner.client, captured_uri)
-                        local text = content
-                            or string.format("[Error reading resource: %s]", captured_name)
+                        local text = content or string.format("[Error reading resource: %s]", captured_name)
 
                         -- For chat interaction: add as a hidden message
                         if args and args.Chat then
@@ -160,8 +160,10 @@ function M._setup_system_prompt_injection()
                     include = true
                 elseif type(spr) == "table" then
                     for _, pattern in ipairs(spr) do
-                        if (resource.name and resource.name:match(pattern))
-                            or (resource.uri and resource.uri:match(pattern)) then
+                        if
+                            (resource.name and resource.name:match(pattern))
+                            or (resource.uri and resource.uri:match(pattern))
+                        then
                             include = true
                             break
                         end

@@ -217,21 +217,27 @@ async def call_nvim_tool(
 
     if sid and _NVIM_SERVER in session_disabled.get(sid, set()):
         raise NotFoundError(
-            f"Tool '{tool_name}' is unavailable — the 'neovim' server is disabled "
-            "for this session."
+            f"Tool '{tool_name}' is unavailable — the 'neovim' server is disabled for this session."
         )
 
     channel = get_nvim_channel()
-    local_name = tool_name[len(_NVIM_PREFIX):]
+    local_name = tool_name[len(_NVIM_PREFIX) :]
     args = dict(context.message.arguments or {}) if context.message else {}
 
     # Discovery tool: enumerate connected editors (no routing needed).
     if local_name == "list_instances":
         return ToolResult(
-            content=[mt.TextContent(type="text", text=json.dumps({
-                "instances": channel.instances(),
-                "bound": _instance_for_session(sid),
-            }))]
+            content=[
+                mt.TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "instances": channel.instances(),
+                            "bound": _instance_for_session(sid),
+                        }
+                    ),
+                )
+            ]
         )
 
     # Resolve the target editor. The default comes from how THIS connection was
@@ -312,16 +318,15 @@ def register_routes(
             stale = [t for t, iid in _token_instances.items() if iid == instance_id]
             for t in stale:
                 _token_instances.pop(t, None)
-            logger.info("REST: deregistered nvim instance %s (unbound %d token[s])",
-                        instance_id, len(stale))
+            logger.info(
+                "REST: deregistered nvim instance %s (unbound %d token[s])", instance_id, len(stale)
+            )
             return JSONResponse({"instance_id": instance_id, "action": "deregistered"})
 
         socket = body.get("socket")
         if not socket:
             return JSONResponse({"error": "socket required"}, status_code=400)
-        meta = {
-            k: body[k] for k in ("cwd", "name", "pid", "servername") if body.get(k) is not None
-        }
+        meta = {k: body[k] for k in ("cwd", "name", "pid", "servername") if body.get(k) is not None}
         channel.register(instance_id, socket, meta)
         logger.info("REST: registered nvim instance %s at %s (meta=%s)", instance_id, socket, meta)
         return JSONResponse({"instance_id": instance_id, "action": "registered"})
@@ -350,9 +355,7 @@ def register_routes(
         if not instance_id:
             return JSONResponse({"error": "instance_id required"}, status_code=400)
         if not get_nvim_channel().has_instance(instance_id):
-            return JSONResponse(
-                {"error": f"unknown instance: {instance_id}"}, status_code=400
-            )
+            return JSONResponse({"error": f"unknown instance: {instance_id}"}, status_code=400)
         _token_instances[token] = instance_id
         logger.info("REST: bound token %s -> nvim instance %s", token, instance_id)
         # If the agent already connected and listed tools before this bind, it

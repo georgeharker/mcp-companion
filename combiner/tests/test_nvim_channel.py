@@ -44,8 +44,7 @@ async def nvim_instance() -> AsyncIterator[str]:
     socket = os.path.join(tmpdir, "nvim.sock")
 
     setup_lua = (
-        "lua require('mcp_companion.native').setup("
-        "{native_servers={neovim={enabled=true}}})"
+        "lua require('mcp_companion.native').setup({native_servers={neovim={enabled=true}}})"
     )
     seed_buf = "lua vim.api.nvim_buf_set_lines(0,0,-1,false,{'alpha','beta','gamma'})"
 

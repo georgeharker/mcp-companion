@@ -253,12 +253,29 @@ def _safe_json_clone(obj: object) -> Any:
 
 # Keywords that semantically belong with a specific "type" declaration.
 # When we hoist a parent-level "type" into anyOf items, these travel with it.
-_TYPE_SIBLING_KEYWORDS = frozenset((
-    "items", "prefixItems", "minItems", "maxItems", "uniqueItems", "contains",
-    "minLength", "maxLength", "pattern", "format",
-    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
-    "properties", "required", "additionalProperties", "patternProperties",
-))
+_TYPE_SIBLING_KEYWORDS = frozenset(
+    (
+        "items",
+        "prefixItems",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "contains",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "format",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "properties",
+        "required",
+        "additionalProperties",
+        "patternProperties",
+    )
+)
 
 
 def _normalize_schema(schema: object) -> object:
@@ -295,8 +312,7 @@ def _normalize_schema(schema: object) -> object:
 
     # Distribute into anyOf items that don't already declare a type.
     result["anyOf"] = [
-        ({**hoisted, **item} if "type" not in item else item)
-        for item in result["anyOf"]
+        ({**hoisted, **item} if "type" not in item else item) for item in result["anyOf"]
     ]
     return result
 
@@ -518,7 +534,6 @@ class ToolProcessingMiddleware(Middleware):
                 blocked,
             )
         return out
-
 
     async def on_call_tool(
         self,
@@ -794,7 +809,8 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
         mgr = _conn_manager
         shared_auth = mgr.get_auth(name)
         oauth_stateful: StatefulProxyClient[Any] = (
-            StatefulProxyClient(transport, auth=shared_auth) if shared_auth is not None
+            StatefulProxyClient(transport, auth=shared_auth)
+            if shared_auth is not None
             else StatefulProxyClient(transport)
         )
 
@@ -832,7 +848,8 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
         cache_tokens=config.oauth.cache_tokens,
     )
     stateful: StatefulProxyClient[Any] = (
-        StatefulProxyClient(transport, auth=auth) if auth is not None
+        StatefulProxyClient(transport, auth=auth)
+        if auth is not None
         else StatefulProxyClient(transport)
     )
     logger.info("Server '%s': per-chat session isolation enabled (isolate=true)", name)
@@ -1266,20 +1283,32 @@ def create_combiner(
         if request.method == "GET":
             if session_id:
                 disabled = _session_disabled.get(session_id, set())
-                return JSONResponse({"token": token, "session_id": session_id,
-                                     "disabled_servers": sorted(disabled)})
+                return JSONResponse(
+                    {"token": token, "session_id": session_id, "disabled_servers": sorted(disabled)}
+                )
             pending = _pending_token_filters.get(token, set())
-            return JSONResponse({"token": token, "session_id": None,
-                                 "pending": True, "disabled_servers": sorted(pending)})
+            return JSONResponse(
+                {
+                    "token": token,
+                    "session_id": None,
+                    "pending": True,
+                    "disabled_servers": sorted(pending),
+                }
+            )
 
         if request.method == "DELETE":
             _pending_token_filters.pop(token, None)
             if session_id:
                 removed = _session_disabled.pop(session_id, None)
                 await _notify_session_by_id(session_id)
-                return JSONResponse({"token": token, "session_id": session_id,
-                                     "action": "cleared",
-                                     "previously_disabled": sorted(removed) if removed else []})
+                return JSONResponse(
+                    {
+                        "token": token,
+                        "session_id": session_id,
+                        "action": "cleared",
+                        "previously_disabled": sorted(removed) if removed else [],
+                    }
+                )
             return JSONResponse({"token": token, "session_id": None, "action": "cleared"})
 
         # POST — parse body (same format as /sessions/{id}/filter)
@@ -1319,9 +1348,12 @@ def create_combiner(
             else:
                 _session_disabled.pop(session_id, None)
             await _notify_session_by_id(session_id)
-            logger.info("REST token filter: token=%s session=%s disabled=%s",
-                        token, session_id,
-                        sorted(_session_disabled.get(session_id, set())))
+            logger.info(
+                "REST token filter: token=%s session=%s disabled=%s",
+                token,
+                session_id,
+                sorted(_session_disabled.get(session_id, set())),
+            )
             return JSONResponse(
                 {
                     "token": token,
@@ -1337,10 +1369,19 @@ def create_combiner(
             _pending_token_filters[token] = new_disabled
         else:
             _pending_token_filters.pop(token, None)
-        logger.info("REST token filter (pending): token=%s disabled=%s",
-                    token, sorted(new_disabled) if new_disabled else [])
-        return JSONResponse({"token": token, "session_id": None, "pending": True,
-                             "disabled_servers": sorted(new_disabled) if new_disabled else []})
+        logger.info(
+            "REST token filter (pending): token=%s disabled=%s",
+            token,
+            sorted(new_disabled) if new_disabled else [],
+        )
+        return JSONResponse(
+            {
+                "token": token,
+                "session_id": None,
+                "pending": True,
+                "disabled_servers": sorted(new_disabled) if new_disabled else [],
+            }
+        )
 
     # Neovim back-channel REST API (/neovim/instances, /neovim/bind).
     nvim_proxy.register_routes(combiner, _notify_tool_list_changed)

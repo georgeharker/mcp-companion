@@ -347,11 +347,15 @@ class TestProactiveRefreshNetworkHandling:
             self_inner.context.client_info = fake_ci
             self_inner._initialized = True
 
-        with patch.object(
-            oauth, "_proactive_refresh", new=AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR)
-        ), patch.object(
-            oauth, "_discover_oauth_metadata", new=AsyncMock(return_value=None)
-        ), patch.object(OAuthClientProvider, "_initialize", new=_fake_super_init):
+        with (
+            patch.object(
+                oauth,
+                "_proactive_refresh",
+                new=AsyncMock(return_value=_RefreshOutcome.NETWORK_ERROR),
+            ),
+            patch.object(oauth, "_discover_oauth_metadata", new=AsyncMock(return_value=None)),
+            patch.object(OAuthClientProvider, "_initialize", new=_fake_super_init),
+        ):
             oauth._initialized = False
             before = time.time()
             await oauth._initialize()
@@ -546,9 +550,7 @@ class TestPreflightRefresh:
         ref.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_network_error_does_not_shorten_distant_expiry(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_network_error_does_not_shorten_distant_expiry(self, tmp_path: Path) -> None:
         """Wake-up pre-flight that network-fails must not shorten a still-valid token.
 
         Repro of the production bug: at wake the token had ~42 min remaining,
@@ -579,9 +581,7 @@ class TestPreflightRefresh:
         )
 
     @pytest.mark.anyio
-    async def test_network_error_extends_short_or_expired_token(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_network_error_extends_short_or_expired_token(self, tmp_path: Path) -> None:
         """When the existing expiry IS within (or before) the grace window, extend it.
 
         The synthetic value is in-memory only — must not be persisted to
@@ -711,19 +711,18 @@ class TestUpstream401Suppression:
         response_401 = httpx.Response(401, request=initial)
         retry_response = httpx.Response(retry_status or 200, request=initial)
 
-        refresh_mock = AsyncMock(
-            return_value=refresh_outcome or _RefreshOutcome.AUTH_ERROR
-        )
+        refresh_mock = AsyncMock(return_value=refresh_outcome or _RefreshOutcome.AUTH_ERROR)
 
-        with patch.object(
-            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
-        ), patch.object(
-            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(
-            oauth,
-            "_probe_token_at",
-            new=AsyncMock(return_value=probe_outcome),
-        ), patch.object(oauth, "_proactive_refresh", new=refresh_mock):
+        with (
+            patch.object(fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow),
+            patch.object(oauth, "_preflight_refresh_if_needed", new=AsyncMock()),
+            patch.object(
+                oauth,
+                "_probe_token_at",
+                new=AsyncMock(return_value=probe_outcome),
+            ),
+            patch.object(oauth, "_proactive_refresh", new=refresh_mock),
+        ):
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
             try:
@@ -742,9 +741,7 @@ class TestUpstream401Suppression:
                 return sdk_yields, None
 
     @pytest.mark.anyio
-    async def test_401_propagated_when_google_says_token_valid(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_401_propagated_when_google_says_token_valid(self, tmp_path: Path) -> None:
         """Probe → VALID: workspace_mcp's problem; propagate 401 without re-auth."""
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
@@ -753,15 +750,11 @@ class TestUpstream401Suppression:
 
         # SDK flow saw the initial yield but was closed before it could
         # observe the 401 response or drive discovery.
-        assert sdk_yields == ["initial"], (
-            f"SDK flow continued past the 401: {sdk_yields}"
-        )
+        assert sdk_yields == ["initial"], f"SDK flow continued past the 401: {sdk_yields}"
         assert second is None
 
     @pytest.mark.anyio
-    async def test_401_propagated_when_probe_unknown(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_401_propagated_when_probe_unknown(self, tmp_path: Path) -> None:
         """Probe → UNKNOWN (we can't reach Google either): be safe, propagate."""
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
@@ -772,9 +765,7 @@ class TestUpstream401Suppression:
         assert second is None
 
     @pytest.mark.anyio
-    async def test_invalid_probe_with_refresh_success_retries_quietly(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_invalid_probe_with_refresh_success_retries_quietly(self, tmp_path: Path) -> None:
         """Probe → INVALID + refresh succeeds → retry, no popup.
 
         This is the "access token expired, refresh_token still valid" case —
@@ -874,9 +865,7 @@ class TestUpstream401Suppression:
         assert second is None
 
     @pytest.mark.anyio
-    async def test_401_without_refresh_token_falls_through_to_sdk(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_401_without_refresh_token_falls_through_to_sdk(self, tmp_path: Path) -> None:
         """If we have no refresh_token, a 401 must reach the SDK so it can full-reauth."""
         import fastmcp.client.auth.oauth as fastmcp_oauth_mod
         from mcp.shared.auth import OAuthToken
@@ -902,10 +891,9 @@ class TestUpstream401Suppression:
 
         initial = httpx.Request("POST", "https://mcp.example.com/mcp")
 
-        with patch.object(
-            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
-        ), patch.object(
-            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
+        with (
+            patch.object(fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow),
+            patch.object(oauth, "_preflight_refresh_if_needed", new=AsyncMock()),
         ):
             gen = oauth.async_auth_flow(initial)
             first = await gen.__anext__()
@@ -969,9 +957,7 @@ class TestUpstream401Suppression:
         assert outcome == _ProbeOutcome.UNKNOWN
 
     @pytest.mark.anyio
-    async def test_self_validating_provider_falls_through_to_sdk(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_self_validating_provider_falls_through_to_sdk(self, tmp_path: Path) -> None:
         """When the upstream IS the OAuth server (server host == token-endpoint
         host, e.g. clickup), its 401 is authoritative — let the SDK drive
         full re-auth.  No probe.
@@ -981,9 +967,7 @@ class TestUpstream401Suppression:
         oauth = self._make_oauth(tmp_path)
         # The fixture's server URL is mcp.example.com; match it so
         # _has_third_party_validator returns False.
-        self._seed_valid_tokens(
-            oauth, token_endpoint="https://mcp.example.com/oauth/token"
-        )
+        self._seed_valid_tokens(oauth, token_endpoint="https://mcp.example.com/oauth/token")
 
         sdk_yields: list[str] = []
 
@@ -998,11 +982,11 @@ class TestUpstream401Suppression:
 
         # The probe must NOT be called.
         probe = AsyncMock(return_value=_ProbeOutcome.VALID)
-        with patch.object(
-            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
-        ), patch.object(
-            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(oauth, "_probe_token_at", new=probe):
+        with (
+            patch.object(fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow),
+            patch.object(oauth, "_preflight_refresh_if_needed", new=AsyncMock()),
+            patch.object(oauth, "_probe_token_at", new=probe),
+        ):
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
             second = await gen.asend(response_401)
@@ -1012,9 +996,7 @@ class TestUpstream401Suppression:
         probe.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_third_party_unknown_validator_propagates(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_third_party_unknown_validator_propagates(self, tmp_path: Path) -> None:
         """Third-party validator we don't know how to probe → propagate 401."""
         import fastmcp.client.auth.oauth as fastmcp_oauth_mod
 
@@ -1036,11 +1018,11 @@ class TestUpstream401Suppression:
         response_401 = httpx.Response(401, request=initial)
 
         probe = AsyncMock(return_value=_ProbeOutcome.VALID)
-        with patch.object(
-            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
-        ), patch.object(
-            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
-        ), patch.object(oauth, "_probe_token_at", new=probe):
+        with (
+            patch.object(fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow),
+            patch.object(oauth, "_preflight_refresh_if_needed", new=AsyncMock()),
+            patch.object(oauth, "_probe_token_at", new=probe),
+        ):
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
             with pytest.raises(StopAsyncIteration):
@@ -1051,9 +1033,7 @@ class TestUpstream401Suppression:
         probe.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_delegated_validator_host_detects_different_host(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_delegated_validator_host_detects_different_host(self, tmp_path: Path) -> None:
         """gws-style: server is mcp.example.com, PRM points at accounts.google.com."""
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(
@@ -1065,9 +1045,7 @@ class TestUpstream401Suppression:
         assert oauth._has_third_party_validator() is True
 
     @pytest.mark.anyio
-    async def test_delegated_validator_host_rejects_same_host(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_delegated_validator_host_rejects_same_host(self, tmp_path: Path) -> None:
         """clickup-style: PRM advertises the server itself as the AS."""
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(
@@ -1079,9 +1057,7 @@ class TestUpstream401Suppression:
         assert oauth._has_third_party_validator() is False
 
     @pytest.mark.anyio
-    async def test_delegated_validator_host_handles_missing_prm(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_delegated_validator_host_handles_missing_prm(self, tmp_path: Path) -> None:
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
         oauth.context.protected_resource_metadata = None
@@ -1089,9 +1065,7 @@ class TestUpstream401Suppression:
         assert oauth._has_third_party_validator() is False
 
     @pytest.mark.anyio
-    async def test_delegated_validator_picks_external_when_mixed(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_delegated_validator_picks_external_when_mixed(self, tmp_path: Path) -> None:
         """Multi-AS PRM with both same-host and external entries → external wins."""
 
         oauth = self._make_oauth(tmp_path)
@@ -1110,9 +1084,7 @@ class TestUpstream401Suppression:
         self, tmp_path: Path
     ) -> None:
         oauth = self._make_oauth(tmp_path)
-        self._seed_valid_tokens(
-            oauth, authorization_server="https://accounts.google.com"
-        )
+        self._seed_valid_tokens(oauth, authorization_server="https://accounts.google.com")
         assert oauth._third_party_probe_url() is not None
         assert "googleapis.com" in oauth._third_party_probe_url()
 
@@ -1173,10 +1145,9 @@ class TestUpstream401Suppression:
 
         initial = httpx.Request("POST", "https://mcp.example.com/mcp")
 
-        with patch.object(
-            fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow
-        ), patch.object(
-            oauth, "_preflight_refresh_if_needed", new=AsyncMock()
+        with (
+            patch.object(fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow),
+            patch.object(oauth, "_preflight_refresh_if_needed", new=AsyncMock()),
         ):
             before = time.time()
             gen = oauth.async_auth_flow(initial)

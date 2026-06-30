@@ -312,9 +312,7 @@ class TestToolsListSingleFlight:
         ctx = MagicMock()
         ctx.fastmcp_context = None
 
-        tasks = [
-            asyncio.create_task(mw.on_list_tools(ctx, fake_call_next)) for _ in range(10)
-        ]
+        tasks = [asyncio.create_task(mw.on_list_tools(ctx, fake_call_next)) for _ in range(10)]
         # Yield so all tasks reach the in-flight join point before we release.
         for _ in range(20):
             await asyncio.sleep(0)

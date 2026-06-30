@@ -486,9 +486,7 @@ class _RefreshTokenOAuth(OAuth):
             # refresh_token in refresh responses.  Preserve the
             # original so we can keep refreshing silently.
             if not token_response.refresh_token and original_rt:
-                token_response = token_response.model_copy(
-                    update={"refresh_token": original_rt}
-                )
+                token_response = token_response.model_copy(update={"refresh_token": original_rt})
                 logger.debug("Preserved original refresh_token in proactive refresh")
 
             ctx.current_tokens = token_response
@@ -674,9 +672,7 @@ class _RefreshTokenOAuth(OAuth):
 
         token = ctx.current_tokens.access_token
         try:
-            async with httpx.AsyncClient(
-                timeout=_GOOGLE_PROBE_TIMEOUT_SECONDS
-            ) as http:
+            async with httpx.AsyncClient(timeout=_GOOGLE_PROBE_TIMEOUT_SECONDS) as http:
                 resp = await http.get(
                     probe_url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -747,8 +743,7 @@ class _RefreshTokenOAuth(OAuth):
             return
 
         logger.info(
-            "Pre-flight refresh: remaining=%.0fs margin=%.0fs wake=%s "
-            "(first_request=%s)",
+            "Pre-flight refresh: remaining=%.0fs margin=%.0fs wake=%s (first_request=%s)",
             remaining,
             _REFRESH_MARGIN_SECONDS,
             wake_detected,

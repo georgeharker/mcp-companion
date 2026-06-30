@@ -71,7 +71,10 @@ local function _make_combiner_cmd(singleton_client, namespaced_name, display_nam
                             elseif block.type == "image" then
                                 table.insert(text_parts, "[Image: " .. (block.mimeType or "unknown") .. "]")
                             elseif block.type == "resource" then
-                                table.insert(text_parts, "[Resource: " .. (block.resource and block.resource.uri or "unknown") .. "]")
+                                table.insert(
+                                    text_parts,
+                                    "[Resource: " .. (block.resource and block.resource.uri or "unknown") .. "]"
+                                )
                             end
                         end
                         local output = table.concat(text_parts, "\n")
@@ -151,16 +154,15 @@ local function _make_output(display_name)
         end,
         success = function(self, stdout, meta) -- luacheck: ignore 212/self
             local chat = meta and meta.tools and meta.tools.chat
-            if not chat then return end
+            if not chat then
+                return
+            end
             local out = stdout and (stdout[#stdout] or {}) or {}
             local text = type(out) == "table" and (out.data or "") or tostring(out)
             if text == "" then
                 chat:add_tool_output(self, string.format("**`%s` Tool**: Completed with no output.", display_name))
             else
-                chat:add_tool_output(
-                    self,
-                    string.format("**`%s` Tool**: Returned:\n```\n%s\n```", display_name, text)
-                )
+                chat:add_tool_output(self, string.format("**`%s` Tool**: Returned:\n```\n%s\n```", display_name, text))
             end
         end,
     }
@@ -200,9 +202,7 @@ function M.register()
     -- the closures below; changes to the project file take effect on the next
     -- re-registration (e.g. after :MCPRestart or a servers-updated event).
     local project = require("mcp_companion.project")
-    local sysp_enabled = project.resolve_tool_system_prompts(
-        config.get().cc.tool_system_prompts
-    )
+    local sysp_enabled = project.resolve_tool_system_prompts(config.get().cc.tool_system_prompts)
 
     for _, server in ipairs(servers) do
         -- Skip the internal _combiner pseudo-server
@@ -210,7 +210,7 @@ function M.register()
             goto continue
         end
 
-        local server_tools = {}  -- tool_name -> tool_config
+        local server_tools = {} -- tool_name -> tool_config
         local tool_keys = {}
 
         for _, tool in ipairs(server.tools or {}) do
@@ -360,12 +360,16 @@ function M.register_native()
                     return {
                         name = key,
                         cmds = { _make_native_cmd(server.name, display) },
-                        system_prompt = sysp_enabled and function(_g, _c)
-                            return string.format(
-                                "You can use the `%s` tool from the in-process `%s` server to: %s\n",
-                                display, server.name, description
-                            )
-                        end or nil,
+                        system_prompt = sysp_enabled
+                                and function(_g, _c)
+                                    return string.format(
+                                        "You can use the `%s` tool from the in-process `%s` server to: %s\n",
+                                        display,
+                                        server.name,
+                                        description
+                                    )
+                                end
+                            or nil,
                         output = _make_output(display),
                         schema = {
                             type = "function",
@@ -390,7 +394,8 @@ function M.register_native()
                     return string.format(
                         "You have access to the in-process `%s` server with %d tool(s) "
                             .. "that act on the running editor.\n",
-                        server.name, #tool_keys
+                        server.name,
+                        #tool_keys
                     )
                 end or nil,
                 opts = { collapse_tools = true },
@@ -405,7 +410,9 @@ end
 --- Unregister all previously registered tools
 function M.unregister()
     local cc_mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
-    if not cc_mcp_ok then return end
+    if not cc_mcp_ok then
+        return
+    end
 
     local state = require("mcp_companion.state")
     local servers = state.field("servers") or {}

@@ -77,9 +77,23 @@ async def combiner_and_nvim() -> AsyncIterator[None]:
 
     nvim = subprocess.Popen(
         [
-            "nvim", "--headless", "--noplugin", "-u", "NONE",
-            "-c", f"set rtp+={_PLUGIN_ROOT}",
-            "-c", setup, "-c", native, "-c", seed, "-c", start, "-c", bind,
+            "nvim",
+            "--headless",
+            "--noplugin",
+            "-u",
+            "NONE",
+            "-c",
+            f"set rtp+={_PLUGIN_ROOT}",
+            "-c",
+            setup,
+            "-c",
+            native,
+            "-c",
+            seed,
+            "-c",
+            start,
+            "-c",
+            bind,
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
@@ -116,15 +130,30 @@ async def test_tokenless_client_must_name_instance() -> None:
 
     combiner = subprocess.Popen(
         [sys.executable, "-m", "mcp_combiner", "--config", cfg, "--port", str(port)],
-        cwd=str(_COMBINER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        cwd=str(_COMBINER_DIR),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     nvim = subprocess.Popen(
-        ["nvim", "--headless", "--noplugin", "-u", "NONE", "--listen", sock,
-         "-c", f"set rtp+={_PLUGIN_ROOT}",
-         "-c", "lua require('mcp_companion.native')"
-               + ".setup({native_servers={neovim={enabled=true}}})",
-         "-c", "lua vim.api.nvim_buf_set_lines(0,0,-1,false,{'alpha','beta'})"],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [
+            "nvim",
+            "--headless",
+            "--noplugin",
+            "-u",
+            "NONE",
+            "--listen",
+            sock,
+            "-c",
+            f"set rtp+={_PLUGIN_ROOT}",
+            "-c",
+            "lua require('mcp_companion.native')"
+            + ".setup({native_servers={neovim={enabled=true}}})",
+            "-c",
+            "lua vim.api.nvim_buf_set_lines(0,0,-1,false,{'alpha','beta'})",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         async with httpx.AsyncClient() as http:
@@ -157,9 +186,7 @@ async def test_tokenless_client_must_name_instance() -> None:
 
             # Discovery works without targeting.
             listed = await client.call_tool("neovim_list_instances", {})
-            ltext = "".join(
-                b.text for b in listed.content if getattr(b, "type", None) == "text"
-            )
+            ltext = "".join(b.text for b in listed.content if getattr(b, "type", None) == "text")
             assert "solo" in ltext
 
             # No association + no nvim_instance → instructive error, not a guess.
@@ -171,9 +198,7 @@ async def test_tokenless_client_must_name_instance() -> None:
             result = await client.call_tool(
                 "neovim_read_buffer", {"buffer": 1, "nvim_instance": "solo"}
             )
-            text = "".join(
-                b.text for b in result.content if getattr(b, "type", None) == "text"
-            )
+            text = "".join(b.text for b in result.content if getattr(b, "type", None) == "text")
             assert "alpha" in text
     finally:
         nvim.terminate()
