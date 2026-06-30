@@ -45,8 +45,6 @@ local M = {}
 --- @field auto_http_tools? boolean|string[] Per-adapter override for auto_http_tools (same semantics).
 --- @field auto_acp_tools? boolean|string[] Per-adapter override for auto_acp_tools (same semantics).
 --- @field auto_cli_tools? boolean|string[] Per-adapter override for auto_cli_tools (same semantics).
---- @field schema_fixes? string[] Per-adapter schema fixes (same names as cc.schema_fixes). Unioned with
----   the global cc.schema_fixes; see cc.schema_fixes for the available fixes and semantics.
 
 --- @class MCPCompanion.CCConfig
 --- @field auto_http_tools boolean|string[] Controls which MCP tool groups are added to new chats.
@@ -78,16 +76,16 @@ local M = {}
 ---   cache-fill time.  Default false.  Equivalent to ``schema_fixes = {"anyof_type_hoist"}``.
 --- @field schema_fixes? string[] Named tool-schema fixes the combiner applies to every ``tools/list``
 ---   response, to satisfy strict adapters.  Each is opt-in (default: none — no behavior change), passed
----   as ``--schema-fix <name>`` flags.  The global list is unioned with every ``adapters.<name>.schema_fixes``
----   (fixes are process-global at the combiner; the per-adapter table is for organizing which fixes your
----   providers need).  Available fixes:
+---   as ``--schema-fix <name>`` flags.  Process-global at the combiner: the fixes apply to all tools for
+---   all clients (there is no per-adapter scoping — the combiner normalizes one shared tool cache).
+---   Available fixes:
 ---     * ``anyof_type_hoist``     — hoist a sibling ``type`` into ``anyOf`` items (moonshot-ai/kimi reject
 ---       ``type``+``anyOf`` coexistence).  Same as ``normalize_schema = true``.
 ---     * ``empty_object``         — a missing ``type`` becomes ``object`` and an ``object`` without
 ---       ``properties`` gets ``properties = {}``, so a schema never serializes to ``[]`` where a strict
 ---       adapter (e.g. Copilot) requires an object.
 ---     * ``drop_invalid_required`` — drop a ``required`` that isn't a list.
----   Example: ``schema_fixes = {"empty_object"}`` or ``adapters = { copilot = { schema_fixes = {"empty_object"} } }``.
+---   Example: ``schema_fixes = {"empty_object"}``.
 --- @field adapters? table<string, MCPCompanion.CCAdapterConfig> Per-adapter overrides for auto_http_tools
 ---   and auto_acp_tools.  Keys are adapter names as returned by chat.adapter.name (e.g. "moonshot-ai",
 ---   "claude", "openai").  Values override the corresponding top-level setting for sessions using that
