@@ -1,0 +1,9 @@
+# Ties this repo to a crib memory project. `crib import` pulls the docs below
+# into the `mcp-companion` project (one-way: source wins, ids/history preserved).
+project: mcp-companion
+import:
+  - README.md
+  - index.md
+  - docs/*.md
+  - docs/designs/*.md
+  - combiner/README.md
