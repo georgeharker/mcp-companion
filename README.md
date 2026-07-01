@@ -1,38 +1,40 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="mcp-companion logo" width="440" height="252">
+</p>
+
 # mcp-companion
 
-An MCP proxy bridge and editor integration that aggregates multiple
+An MCP aggregator (combiner) and editor integration that aggregates multiple
 [Model Context Protocol](https://modelcontextprotocol.io) servers behind a
 single HTTP endpoint, with first-class
 [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) support.
 
-The bridge runs standalone as a Python process — any MCP-aware client can
+The combiner runs standalone as a Python process — any MCP-aware client can
 connect to it over HTTP. The Lua plugin layer adds Neovim-specific features:
 tool registration, editor context, slash commands, ACP forwarding, and a status
 UI.
+
+> ⚠️ **The combiner was renamed `mcp-bridge` → [`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/combiner).** The Python package,
+> command, and import are now `mcp-combiner` / `mcp-combiner` / `mcp_combiner`; its admin tools are
+> `combiner__*`; config env vars are `MCP_COMBINER_*` (and `MCP_COMPANION_COMBINER_URL` →
+> `MCP_COMPANION_COMBINER_URL`). If you ran an earlier build, see
+> [`combiner/README.md`](https://github.com/georgeharker/mcp-companion/blob/main/combiner/README.md) to migrate (reinstall + a one-off OAuth re-auth). The
+> `mcp-companion` repo and Neovim plugin keep their name.
 
 > 📖 Rendered documentation:
 > [docs.georgeharker.com/mcp-companion](https://docs.georgeharker.com/mcp-companion/)
 
 ## Overview
 
-```
-┌─────────────────────────────────────────────────────┐
-│  MCP Bridge (Python, standalone)                    │
-│  Aggregates N MCP servers → single HTTP endpoint    │
-│  Auth, env interpolation, meta-tools, health API    │
-└────────────────────┬────────────────────────────────┘
-                     │ HTTP :9741
-        ┌────────────┼────────────────┐
-        ▼            ▼                ▼
-   Neovim plugin   OpenCode     Any HTTP client
-   (CodeCompanion) (ACP agent)  (curl, scripts)
-```
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="MCP Combiner aggregates N MCP servers behind one HTTP endpoint (:9741), serving the Neovim plugin (CodeCompanion), OpenCode (ACP agent), and any HTTP client (curl, scripts)" width="760">
+</p>
 
 ---
 
-## MCP Bridge (standalone)
+## MCP Combiner (standalone)
 
-The bridge is a [FastMCP](https://github.com/jlowin/fastmcp) server that
+The combiner is a [FastMCP](https://github.com/jlowin/fastmcp) server that
 proxies all configured MCP servers through a single HTTP endpoint. It works
 independently of Neovim — any MCP client that speaks HTTP can use it.
 
@@ -40,29 +42,29 @@ independently of Neovim — any MCP client that speaks HTTP can use it.
 
 ```bash
 # Install dependencies
-cd bridge
+cd combiner
 uv sync --frozen
 
-# Run the bridge
-uv run python -m mcp_bridge --config ~/.config/mcp/servers.json --port 9741
+# Run the combiner
+uv run python -m mcp_combiner --config ~/.config/mcp/servers.json --port 9741
 
 # Health check
 curl http://127.0.0.1:9741/health
 ```
 
-### What the bridge does
+### What the combiner does
 
 - Reads a standard `mcpServers` JSON config (VS Code / Claude Desktop format)
 - Spawns and manages stdio servers, connects to HTTP/SSE servers
 - Exposes all tools, resources, and prompts through one HTTP endpoint
 - Handles environment variable interpolation, OAuth 2.1 auth, schema sanitization
-- Provides meta-tools (`bridge__status`, `bridge__enable_server`, `bridge__disable_server`)
+- Provides meta-tools (`combiner__status`, `combiner__enable_server`, `combiner__disable_server`)
 - Serves a `/health` endpoint with server status
 
 ### Using with other MCP clients
 
 When using ACP adapters (OpenCode, Claude Code) through CodeCompanion, no
-manual configuration is needed — the bridge is automatically injected into
+manual configuration is needed — the combiner is automatically injected into
 the agent's session.
 
 Any MCP client that supports HTTP transport can also connect directly for
@@ -79,7 +81,7 @@ curl -X POST http://127.0.0.1:9741/mcp \
 
 ## MCP Server Config
 
-The bridge reads a standard MCP servers JSON file. VS Code and Claude Desktop
+The combiner reads a standard MCP servers JSON file. VS Code and Claude Desktop
 format is supported:
 
 ```json
@@ -129,35 +131,70 @@ format is supported:
 | `autoApprove` | `bool \| string[]` | Auto-approve spec — see [Auto-approve spec](#auto-approve-spec) |
 | `auth` | `string\|object` | Authentication config (see below) |
 | `sharedServer` | `string` | Name of a `sharedServers` entry to start before connecting (see below) |
+| `toolFilter` | `string[]` | Glob patterns; only matching tool names are exposed (empty = all) |
+| `isolate` | `boolean` | Give each chat its own upstream MCP session — see [isolate](#isolate--per-chat-sessions) |
+
+### isolate — per-chat sessions
+
+By default every chat shares one persistent upstream connection to an HTTP/SSE
+server, and therefore one upstream `Mcp-Session-Id`. A *stateful* server that
+keys state on the session — e.g. a server that tracks a "current document" —
+then sees all chats as the same session, so two concurrent chats clash.
+
+Set `"isolate": true` on such a server and the combiner opens a **separate
+upstream session per chat** (still one upstream server *instance*, shared
+transport). The server is handed a distinct, stable `Mcp-Session-Id` per chat
+and partitions its per-session state automatically — no clash. The session is
+torn down when the chat ends; an abandoned one is just an idle upstream session
+the server can expire.
+
+`isolate` is tri-state:
+
+- **absent (default)** — off; all chats share one upstream session.
+- **`true`** — on; per-chat upstream sessions. If the server uses `auth`/OAuth,
+  the token is shared across the per-chat sessions, so it still authenticates
+  once (no extra browser windows).
+- **`false`** — explicitly off (distinct from absent for layered overrides).
+
+Only applies to HTTP/SSE servers. An explicit `true` on a **stdio** server is
+ignored with a warning — stdio has one session per process, so per-chat
+isolation would need a subprocess per chat, which the combiner does not do.
+
+```jsonc
+"svg-mcp": {
+  "url": "http://127.0.0.1:9745/mcp",
+  "isolate": true        // each chat gets its own document/session state
+}
+```
 
 ### sharedServer — per-server process management
 
 Many MCP servers that expose an HTTP endpoint (as opposed to stdio) need to run as
-standalone processes: started before the bridge connects, kept alive during the session,
+standalone processes: started before the combiner connects, kept alive during the session,
 and shut down when no longer needed. Managing this manually is tedious — you have to
 remember to start them before your editor, keep them running, and clean them up
 afterward.
 
 The `sharedServer` field solves this. It links a server entry to a process definition in
-the top-level `sharedServers` dict. The bridge delegates lifecycle to
+the top-level `sharedServers` dict. The combiner delegates lifecycle to
 [sharedserver](https://github.com/georgeharker/sharedserver), a reference-counted
 process supervisor:
 
-- On bridge startup, sharedserver **starts** the process (or increments a refcount if
+- On combiner startup, sharedserver **starts** the process (or increments a refcount if
   it is already running from another client)
-- The process stays alive as long as any client holds a reference — multiple bridge
+- The process stays alive as long as any client holds a reference — multiple combiner
   instances, Neovim windows, or scripts share the same process transparently
 - After the last client detaches, the process remains alive for `grace_period` before
   stopping — so a quick restart or a second Neovim window opening does not cause an
   unnecessary restart
-- On bridge shutdown, sharedserver **decrements the refcount**; the process stops only
+- On combiner shutdown, sharedserver **decrements the refcount**; the process stops only
   when the grace period expires with no remaining clients
 
 The result is ephemeral-but-shared server processes: they start on demand, are shared
 across all clients that need them, and stop themselves when idle. You never need to
 manually start or stop them.
 
-The bridge waits up to `health_timeout` seconds for the process to become reachable
+The combiner waits up to `health_timeout` seconds for the process to become reachable
 after starting before mounting the proxy. If the process was already running, this
 passes immediately.
 
@@ -326,13 +363,13 @@ and reused across sessions. Refresh tokens are handled automatically.
 
 ```bash
 # Disable disk caching entirely (tokens lost on restart)
-python -m mcp_bridge --config servers.json --no-oauth-cache
+python -m mcp_combiner --config servers.json --no-oauth-cache
 
 # Use a custom token directory
-python -m mcp_bridge --config servers.json --oauth-token-dir /secure/tokens
+python -m mcp_combiner --config servers.json --oauth-token-dir /secure/tokens
 
 # Re-enable caching if config file says otherwise
-python -m mcp_bridge --config servers.json --oauth-cache
+python -m mcp_combiner --config servers.json --oauth-cache
 ```
 
 Priority order (highest to lowest): CLI flag → config `oauth` section → built-in default.
@@ -341,7 +378,7 @@ Priority order (highest to lowest): CLI flag → config `oauth` section → buil
 
 Some MCP servers support an "external OAuth provider" mode where the server
 does **not** run its own OAuth flow — it simply validates bearer tokens issued
-by the upstream identity provider (e.g. Google). In this mode the bridge holds
+by the upstream identity provider (e.g. Google). In this mode the combiner holds
 the real OAuth token and passes it on every request. The server is stateless: it
 can restart freely without invalidating any sessions.
 
@@ -350,14 +387,14 @@ can restart freely without invalidating any sessions.
 1. The MCP server is configured to advertise the identity provider (e.g.
    Google) via RFC 9728 `/.well-known/oauth-protected-resource` and returns
    `401` on unauthenticated requests.
-2. The bridge's OAuth client follows the discovery document, performs the PKCE
+2. The combiner's OAuth client follows the discovery document, performs the PKCE
    authorization code flow **directly against the identity provider**, and
-   caches the resulting access + refresh token in the bridge's encrypted token
+   caches the resulting access + refresh token in the combiner's encrypted token
    store.
 3. Every subsequent request to the MCP server carries
    `Authorization: Bearer <real-token>`. The MCP server validates it against
    the provider's API — no local state required.
-4. When the access token expires, the bridge silently refreshes it using the
+4. When the access token expires, the combiner silently refreshes it using the
    cached refresh token. No re-authentication required unless the refresh token
    itself expires.
 
@@ -416,10 +453,10 @@ Enable external provider mode on the GWS server:
    (use `localhost`, not `127.0.0.1`)
 4. Add your Google account as a test user on the OAuth consent screen
 
-On first connection the bridge opens a browser tab for the Google consent
+On first connection the combiner opens a browser tab for the Google consent
 screen. After you approve it, the access and refresh tokens are cached
 in `~/.cache/mcp-companion/oauth-tokens/gws/`. Subsequent restarts of
-GWS (or even the bridge) will silently re-use the cached token without
+GWS (or even the combiner) will silently re-use the cached token without
 prompting again.
 
 **Notes:**
@@ -427,12 +464,12 @@ prompting again.
 - `callback_port` must match the redirect URI registered in your OAuth app
   exactly. Google and most providers reject unregistered URIs.
 - The `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` env vars are
-  needed by both GWS (for token validation) and the bridge (for the OAuth
+  needed by both GWS (for token validation) and the combiner (for the OAuth
   flow). Use your shell environment or a secrets manager such as 1Password
   CLI (`op run --`) to supply them.
 - The `OAUTHLIB_INSECURE_TRANSPORT=1` env var is only needed when GWS itself
   runs over plain HTTP (the default in local development) — it is not needed
-  by the bridge.
+  by the combiner.
 
 ---
 
@@ -447,12 +484,12 @@ For stronger security, set a custom encryption key:
 
 ```bash
 # Via environment variable
-export MCP_BRIDGE_TOKEN_KEY="your-secret-key-here"
-python -m mcp_bridge --config servers.json
+export MCP_COMBINER_TOKEN_KEY="your-secret-key-here"
+python -m mcp_combiner --config servers.json
 
 # Or in Neovim config
 require("mcp_companion").setup({
-    bridge = {
+    combiner = {
         token_key = "your-secret-key-here",
     },
 })
@@ -465,7 +502,7 @@ need to re-authenticate with OAuth servers.
 
 ## Neovim Integration
 
-The Lua plugin connects the bridge to
+The Lua plugin connects the combiner to
 [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim), exposing
 MCP capabilities as native editor features.
 
@@ -474,12 +511,12 @@ MCP capabilities as native editor features.
 - Neovim 0.10+
 - Python 3.12+ with [`uv`](https://github.com/astral-sh/uv)
 - [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim) v19+
-- [sharedserver](https://github.com/georgeharker/sharedserver) — manages the bridge
+- [sharedserver](https://github.com/georgeharker/sharedserver) — manages the combiner
   process lifecycle across multiple Neovim instances
 
 ### Installing sharedserver
 
-The plugin uses sharedserver to share one bridge process across all Neovim instances,
+The plugin uses sharedserver to share one combiner process across all Neovim instances,
 with automatic startup, health polling, idle timeout, and graceful shutdown.
 
 **Install via cargo:**
@@ -499,14 +536,14 @@ lazy.nvim runs the build steps independently, then declare sharedserver as a
 dependency of mcp-companion so load order is correct:
 
 ```lua
--- sharedserver: builds the Rust binary that manages bridge process lifecycle
+-- sharedserver: builds the Rust binary that manages combiner process lifecycle
 {
     "georgeharker/sharedserver",
     build = "cargo install --path rust",
     lazy = false,
 },
 
--- mcp-companion: the bridge + Neovim plugin
+-- mcp-companion: the combiner + Neovim plugin
 {
     "georgeharker/mcp-companion",
     lazy = false,
@@ -514,10 +551,10 @@ dependency of mcp-companion so load order is correct:
         "olimorris/codecompanion.nvim",
         "georgeharker/sharedserver",
     },
-    build = "cd bridge && uv sync --frozen",
+    build = "cd combiner && uv sync --frozen",
     config = function()
         require("mcp_companion").setup({
-            bridge = {
+            combiner = {
                 port = 9741,
                 config = vim.fn.expand("~/.config/mcp/servers.json"),
             },
@@ -540,30 +577,31 @@ require("codecompanion").setup({
 })
 ```
 
-### Bridge runtime (Python venv)
+### Combiner runtime (Python venv)
 
-The Python bridge runs from a venv. On `setup()` the plugin **ensures it's installed**
-via `uv` if it isn't already (`uv venv <target>` + `uv pip install -e <plugin>/bridge`).
-This is async, idempotent, and a no-op once installed — so the `build = "cd bridge && uv
+The Python combiner runs from a venv. On `setup()` the plugin **ensures it's installed**
+via `uv` if it isn't already (`uv venv <target>` + `uv pip install -e <plugin>/combiner`).
+This is async, idempotent, and a no-op once installed — so the `build = "cd combiner && uv
 sync --frozen"` step above is now **optional**.
 
 **Where it installs:**
 
-- **Default (unset `bridge.venv`):** a **plugin-local** venv at `<plugin>/bridge/.venv` —
+- **Default (unset `combiner.venv`):** a **plugin-local** venv at `<plugin>/combiner/.venv` —
   self-contained, nothing leaks into your environment.
-- **Set `bridge.venv = "~/.venv"`** (or any path): install/run from **that** venv, so it
+- **Set `combiner.venv = "~/.venv"`** (or any path): install/run from **that** venv, so it
   can be **shared** with other clients (see below). A user-set venv must **already exist** —
   the plugin only `uv pip install`s into it (additive) and will **never** `uv venv` (wipe) a
   venv it doesn't own.
 
-`bridge.python_cmd` resolution order: an explicit custom path → the configured `venv` (once
-the bridge is installed there) → the plugin-local `bridge/.venv` → `python3`.
+`combiner.python_cmd` resolution order: an explicit custom path → the configured `venv` (once
+the combiner is installed there) → the plugin-local `combiner/.venv` → `python3`.
 
 ```lua
 require("mcp_companion").setup({
-    bridge = {
+    combiner = {
         -- venv = "~/.venv",               -- opt in to a shared venv (default: plugin-local)
         -- python_cmd = "/path/to/python", -- pin a python and skip auto-install entirely
+        -- command = "/path/to/mcp-combiner", -- run a prebuilt combiner binary directly (see Nix below)
     },
 })
 ```
@@ -571,11 +609,43 @@ require("mcp_companion").setup({
 Commands: `:MCPInstall` installs/refreshes into the target venv (`:MCPInstall!` forces a
 reinstall; `:MCPInstall /path/to/venv` targets a specific venv).
 
-**Sharing the bridge with standalone Claude Code.** Only relevant if you opt into a shared
-`bridge.venv`. Put its `bin/` on `PATH` (or `uv tool install <plugin>/bridge` for a global
-`mcp-bridge`), and the [`claude-mcp-bridge`](https://github.com/georgeharker/claude-mcp-bridge)
-plugin will find `mcp-bridge` directly — Neovim and standalone Claude then share one bridge
+**Sharing the combiner with standalone Claude Code.** Only relevant if you opt into a shared
+`combiner.venv`. Put its `bin/` on `PATH` (or `uv tool install <plugin>/combiner` for a global
+`mcp-combiner`), and the [`claude-mcp-combiner`](https://github.com/georgeharker/claude-mcp-combiner)
+plugin will find `mcp-combiner` directly — Neovim and standalone Claude then share one combiner
 process.
+
+### Nix
+
+A `flake.nix` is provided for Nix users. Because the Nix store is read-only, the runtime
+`uv venv` / `uv pip install` flow can't work — instead the flake builds the combiner ahead of
+time and you point the plugin at the prebuilt executable, which **skips the auto-install
+entirely**. The flake exposes three packages:
+
+- `mcp-combiner` — a Python venv with the combiner and its deps (`bin/python`, `bin/mcp-combiner`).
+- `mcp-combiner-bin` — the `mcp-combiner` console script as a standalone app (this is `default`,
+  i.e. what `nix run` executes).
+- `mcp-companion-nvim` — the Lua/Neovim plugin (no Python).
+
+Wire it up with `combiner.command`, pointing at the console script (the natural front door —
+same `main()` and CLI flags as `python -m mcp_combiner`):
+
+```nix
+# e.g. with nixvim
+extraConfigLua = ''
+  require("mcp_companion").setup({
+    combiner = {
+      command = "${lib.getExe pkgs.mcp-combiner-bin}",  -- prebuilt binary, no uv install
+      port = 9741,
+      config = vim.fn.expand("~/.config/mcp/servers.json"),
+    },
+  })
+'';
+```
+
+Alternatively, set `combiner.python_cmd = "${lib.getExe' pkgs.mcp-combiner "python"}"` — the venv
+interpreter also runs `-m mcp_combiner` and likewise skips the auto-install. Both work;
+`command` is the cleaner wiring because it consumes the package's advertised binary directly.
 
 ### Features
 
@@ -604,24 +674,24 @@ them in before the prompt messages are injected into the chat.
 A built-in `neovim` native server exposes your live editor to an agent as
 `neovim_*` tools (open files, read/edit buffers, diagnostics, navigation), with
 risk-tiered approval and multi-instance targeting. Works in CodeCompanion chats
-and for external agents (Claude Code, OpenCode) connected through the bridge.
+and for external agents (Claude Code, OpenCode) connected through the combiner.
 See [Controlling Neovim from an agent](docs/neovim-control.md).
 
 #### ACP forwarding
 
-When using an ACP adapter (OpenCode, Claude Code), the bridge is automatically
+When using an ACP adapter (OpenCode, Claude Code), the combiner is automatically
 injected into the ACP session via `session/new`. The agent connects to the
-bridge directly over HTTP (or via `mcp-remote` stdio fallback) and can call
+combiner directly over HTTP (or via `mcp-remote` stdio fallback) and can call
 all MCP tools autonomously without extra configuration.
 
 The injection adapts to however the adapter's `mcpServers` is configured in
 CodeCompanion:
 
-| `defaults.mcpServers` value | How bridge is injected |
+| `defaults.mcpServers` value | How combiner is injected |
 |---|---|
-| `"inherit_from_config"` | CC calls `transform_to_acp()` to build the server list from `config.mcp.servers`. Our patch wraps that function to also include HTTP servers (upstream only handles stdio) and appends the bridge entry. |
-| `{}` (empty table) | Bridge entry is inserted directly into the table during `ACPSessionPre`, before `_establish_session` reads it. |
-| `{ ... }` (table with entries) | Same as empty table — bridge entry is appended if not already present. User-configured servers are preserved. |
+| `"inherit_from_config"` | CC calls `transform_to_acp()` to build the server list from `config.mcp.servers`. Our patch wraps that function to also include HTTP servers (upstream only handles stdio) and appends the combiner entry. |
+| `{}` (empty table) | Combiner entry is inserted directly into the table during `ACPSessionPre`, before `_establish_session` reads it. |
+| `{ ... }` (table with entries) | Same as empty table — combiner entry is appended if not already present. User-configured servers are preserved. |
 
 Most ACP adapters ship with `defaults.mcpServers = {}`. Some (e.g. Copilot ACP)
 use `"inherit_from_config"` to pick up servers from the global CC MCP config.
@@ -658,12 +728,12 @@ before execution:
 
 #### Approval for external agents
 
-When an external agent reaches the bridge — over ACP (Claude Code, OpenCode via
-CodeCompanion) or as a directly-configured MCP client — **the bridge does not
-approve anything.** This is standard MCP: a server (the bridge is one) executes
+When an external agent reaches the combiner — over ACP (Claude Code, OpenCode via
+CodeCompanion) or as a directly-configured MCP client — **the combiner does not
+approve anything.** This is standard MCP: a server (the combiner is one) executes
 the `tools/call` it receives; **consent is the host/client's responsibility.**
 So tool permissions for these agents are configured **in the agent itself**, not
-in mcp-companion. That governs every tool the agent can reach through the bridge,
+in mcp-companion. That governs every tool the agent can reach through the combiner,
 including the `neovim_*` tools.
 
 | Agent | Where permissions live | Docs |
@@ -676,7 +746,7 @@ For example, to make Claude Code *always prompt* before any neovim write/exec
 tool, add an `ask` rule like `mcp__mcp-companion__neovim_edit_buffer` (or a
 broader pattern) in its `settings.json` per the linked docs.
 
-> The bridge's own controls are **exposure**, not approval: per-session server
+> The combiner's own controls are **exposure**, not approval: per-session server
 > gating (`/mcp-session`, `.mcp-companion.json`) and the `exec` tier being off by
 > default (`native_servers.neovim.expose_exec`). Combine those with the agent's
 > permission rules above.
@@ -699,20 +769,20 @@ The built-in `neovim` server defaults to `{ "tier:read", "tier:navigate" }` — 
 reads and navigation auto-approve while writes/exec prompt. Override it, e.g.
 `auto_approve = { "tier:read", "edit_buffer" }` or `auto_approve = true`.
 
-#### Bridge lifecycle
+#### Combiner lifecycle
 
 When sharedserver is available, the Neovim plugin calls:
 
 ```
-sharedserver use mcp-bridge --grace-period <idle_timeout> --pid <nvim-pid> \
-  -- python -m mcp_bridge --config <path> --port <port>
+sharedserver use mcp-combiner --grace-period <idle_timeout> --pid <nvim-pid> \
+  -- python -m mcp_combiner --config <path> --port <port>
 ```
 
-Multiple Neovim instances share the same bridge on `127.0.0.1:9741`. When
-the last Neovim instance exits (or calls `get_bridge().stop()`), the bridge stays
+Multiple Neovim instances share the same combiner on `127.0.0.1:9741`. When
+the last Neovim instance exits (or calls `get_combiner().stop()`), the combiner stays
 alive for `idle_timeout` in case another instance reconnects, then shuts down.
 
-Without sharedserver, the bridge starts directly via `vim.uv` and lives for
+Without sharedserver, the combiner starts directly via `vim.uv` and lives for
 the lifetime of the Neovim instance.
 
 #### Hot reload
@@ -723,18 +793,18 @@ in CodeCompanion automatically.
 
 #### Status UI
 
-`:MCPStatus` opens a floating window showing bridge state, connected servers,
+`:MCPStatus` opens a floating window showing combiner state, connected servers,
 and tool/resource/prompt counts. Servers can be expanded/collapsed, and a log
-view is available. `:MCPRestart` restarts the bridge. `:MCPLog` opens the log
+view is available. `:MCPRestart` restarts the combiner. `:MCPLog` opens the log
 file.
 
 #### Meta-tools
 
-The bridge exposes management tools that the LLM can call:
+The combiner exposes management tools that the LLM can call:
 
-- `bridge__status` — list all configured servers and their state
-- `bridge__enable_server` / `bridge__disable_server` — toggle servers globally (all sessions)
-- `bridge__session_disable_server` / `bridge__session_enable_server` — toggle a server for the calling session only
+- `combiner__status` — list all configured servers and their state
+- `combiner__enable_server` / `combiner__disable_server` — toggle servers globally (all sessions)
+- `combiner__session_disable_server` / `combiner__session_enable_server` — toggle a server for the calling session only
 
 ### Usage
 
@@ -766,13 +836,13 @@ If the prompt requires arguments, you will be prompted to enter them.
 
 #### With ACP agents (OpenCode, Claude Code)
 
-When you use an ACP adapter in CodeCompanion, the bridge is automatically
-forwarded to the agent via `session/new`. The agent connects to the bridge
+When you use an ACP adapter in CodeCompanion, the combiner is automatically
+forwarded to the agent via `session/new`. The agent connects to the combiner
 directly and can call all MCP tools autonomously:
 
 ```
 You: Use the todoist tool to list my tasks for today
-Agent: [calls todoist_get_tasks autonomously via bridge]
+Agent: [calls todoist_get_tasks autonomously via combiner]
 ```
 
 ### Commands
@@ -780,7 +850,9 @@ Agent: [calls todoist_get_tasks autonomously via bridge]
 | Command | Description |
 |---|---|
 | `:MCPStatus` | Toggle the status floating window |
-| `:MCPRestart` | Restart the MCP bridge |
+| `:MCPRestart` | Restart the MCP combiner |
+| `:MCPRestartServer <name>` | Restart a single server (stops + respawns its backing process; no full combiner restart) |
+| `:MCPReload` | Re-read the config file and apply server changes without a restart |
 | `:MCPLog` | Open the log file in a buffer |
 | `:MCPToggleServer <name>` | Globally enable/disable a server |
 | `:MCPSaveProjectConfig [shortest\|allowed\|disabled]` | Snapshot the current chat session's MCP server visibility to `.mcp-companion.json` (see [Per-project defaults](#per-project-defaults-mcp-companionjson)) |
@@ -789,24 +861,26 @@ Agent: [calls todoist_get_tasks autonomously via bridge]
 vim.keymap.set("n", "<leader>ms", "<cmd>MCPStatus<cr>", { desc = "MCP status" })
 ```
 
-The status window shows bridge state, connected servers, and tool/resource/prompt
+The status window shows combiner state, connected servers, and tool/resource/prompt
 counts. Key bindings:
 
 | Key | Action |
 |---|---|
 | `<CR>` | Expand/collapse the server under the cursor |
-| `e` | Toggle **global** enable/disable (calls `bridge__enable_server` / `bridge__disable_server`) |
+| `e` | Toggle **global** enable/disable (calls `combiner__enable_server` / `combiner__disable_server`) |
 | `p` | Toggle the server's visibility in `.mcp-companion.json` (creates the file if absent; preserves the existing `allowed_servers` / `disabled_servers` shape) |
 | `S` | Toggle the server for **this chat session only** — equivalent to `/mcp-session` on the chat the status window was opened from |
-| `r` | Refresh from the bridge |
-| `R` | Restart the bridge |
+| `r` | Refresh from the combiner |
+| `R` | Restart the combiner |
+| `x` | Restart the server under the cursor (calls `combiner__restart_server`; respawns its backing process, no full combiner restart) |
+| `c` | Reload the combiner config from disk and apply server changes (calls `combiner__reload_config`; no restart) |
 | `l` / `s` | Switch to logs / status view |
 | `q` | Close the window |
 
 The three toggle keys (`e`, `p`, `S`) form a hierarchy from broadest to
 narrowest scope:
 
-- `e` — global, persists in the bridge for every session.
+- `e` — global, persists in the combiner for every session.
 - `p` — per-project, persists across Neovim restarts via `.mcp-companion.json`.
 - `S` — per-chat, lives only as long as the chat session.
 
@@ -821,54 +895,54 @@ MCP companion writes logs to two locations:
 
 | Log | Default path | Purpose |
 |---|---|---|
-| Plugin log | `~/.local/state/nvim/mcp-companion.log` | Lua-side events (bridge lifecycle, server connections, errors) |
-| Bridge file log | `~/.local/state/nvim/mcp-bridge-py.log` | Python file logger (formatted, level set by `bridge.log_level`) |
-| Bridge stderr capture | `~/.local/state/nvim/mcp-bridge.log` | sharedserver-captured stderr from the Python bridge process |
+| Plugin log | `~/.local/state/nvim/mcp-companion.log` | Lua-side events (combiner lifecycle, server connections, errors) |
+| Combiner file log | `~/.local/state/nvim/mcp-combiner-py.log` | Python file logger (formatted, level set by `combiner.log_level`) |
+| Combiner stderr capture | `~/.local/state/nvim/mcp-combiner.log` | sharedserver-captured stderr from the Python combiner process |
 | sharedserver logs | `$XDG_RUNTIME_DIR/sharedserver` or `/tmp/sharedserver` | All processes managed by sharedserver |
 
 Use `:MCPLog` to open the plugin log directly in a Neovim buffer.
 
-The bridge file log is enabled by default. Configure it via `bridge.log` —
+The combiner file log is enabled by default. Configure it via `combiner.log` —
 same shape as the top-level `log` table:
 
 ```lua
 require("mcp_companion").setup({
   log = { level = "warn", file = true },        -- top-level (Lua side)
-  bridge = {
+  combiner = {
     log = {
       level = "debug",                          -- trace | debug | info (default) | warn | error
-      file = "/path/to/mcp-bridge.log",         -- true (default path), string (explicit), false (disabled)
+      file = "/path/to/mcp-combiner.log",         -- true (default path), string (explicit), false (disabled)
     },
   },
 })
 ```
 
 Defaults are `level = "info"` and `file = true` (resolves to
-`stdpath("log")/mcp-bridge-py.log`). At `level = "debug"` the upstream
+`stdpath("log")/mcp-combiner-py.log`). At `level = "debug"` the upstream
 `httpx`, `httpcore`, `mcp.client.auth`, and `fastmcp.client.auth` loggers
 also flip to DEBUG so refresh requests, metadata-discovery URLs, and HTTP
-request/response detail are captured. Restart the bridge after changing
+request/response detail are captured. Restart the combiner after changing
 either setting (`:MCPRestart!`).
 
-When the bridge is managed by [sharedserver](https://github.com/georgeharker/sharedserver),
+When the combiner is managed by [sharedserver](https://github.com/georgeharker/sharedserver),
 sharedserver writes its own logs to `$XDG_RUNTIME_DIR/sharedserver` (or `/tmp/sharedserver` if
 `XDG_RUNTIME_DIR` is not set).
 
 OAuth tokens are cached at `~/.cache/mcp-companion/oauth-tokens/<server>/`.
 
-### Manual bridge control
+### Manual combiner control
 
 ```lua
--- Start/stop bridge explicitly
-require("mcp_companion").get_bridge().start()
-require("mcp_companion").get_bridge().stop()
+-- Start/stop combiner explicitly
+require("mcp_companion").get_combiner().start()
+require("mcp_companion").get_combiner().stop()
 
 -- Check status
-local status = require("mcp_companion").get_bridge().status()
+local status = require("mcp_companion").get_combiner().status()
 
 -- Listen to events
-require("mcp_companion").on("bridge_ready", function()
-    print("Bridge connected!")
+require("mcp_companion").on("combiner_ready", function()
+    print("Combiner connected!")
 end)
 ```
 
@@ -876,8 +950,8 @@ end)
 
 | Event | When |
 |---|---|
-| `bridge_ready` | Bridge connected and all capabilities loaded |
-| `bridge_error` | Bridge encountered an error |
+| `combiner_ready` | Combiner connected and all capabilities loaded |
+| `combiner_error` | Combiner encountered an error |
 | `servers_updated` | Server list or capabilities changed |
 | `tool_list_changed` | Tool list changed on a server |
 | `resource_list_changed` | Resource list changed |
@@ -887,22 +961,28 @@ end)
 
 ```lua
 require("mcp_companion").setup({
-    bridge = {
-        port = 9741,                    -- bridge HTTP port
-        host = "127.0.0.1",            -- bridge host
+    combiner = {
+        port = 9741,                    -- combiner HTTP port
+        host = "127.0.0.1",            -- combiner host
         config = nil,                   -- path to MCP servers JSON (auto-detected)
         python_cmd = nil,               -- path to Python (auto-resolved from .venv)
         idle_timeout = "30m",           -- sharedserver grace period
-        startup_timeout = 30,           -- seconds to wait for bridge health
+        startup_timeout = 30,           -- seconds to wait for combiner health
         request_timeout = 60,           -- default MCP request timeout in seconds
-        token_key = nil,                -- encryption key for OAuth tokens (or use MCP_BRIDGE_TOKEN_KEY env)
+        token_key = nil,                -- encryption key for OAuth tokens (or use MCP_COMBINER_TOKEN_KEY env)
         log = {
           level = "info",               -- "trace" | "debug" | "info" | "warn" | "error"
           file = true,                  -- true = default path, string = explicit path, false = disabled
         },
         token_in_url = false,           -- embed session token in URL path; see Troubleshooting below
+        -- Tri-state control of the combiner's JSON-schema (re)validation of proxied tool calls
+        -- (the upstream server already validates). nil = leave combiner default; false = force off;
+        -- true = force on. The meaningful win is output_validation = false, which removes the
+        -- redundant per-call output validation that is measurably slow for large structured responses.
+        output_validation = nil,        -- nil | false | true  (--[no-]output-validation)
+        input_validation = nil,         -- nil | false | true  (--[no-]input-validation)
     },
-    global_env = {},                    -- extra environment variables passed to the bridge process
+    global_env = {},                    -- extra environment variables passed to the combiner process
     log = {
         level = "warn",                 -- file log level: "debug", "info", "warn", "error"
         notify = "error",               -- vim.notify level (default: errors only)
@@ -912,17 +992,17 @@ require("mcp_companion").setup({
     system_prompt_resources = nil,       -- true (all), or {"pattern1", "pattern2"} to match
     cc = {
         -- Controls which MCP tool groups are added to new chats automatically.
-        -- true (default): add the aggregate @mcp-bridge group (all servers, one context entry)
+        -- true (default): add the aggregate @mcp-combiner group (all servers, one context entry)
         -- false: do not auto-add; user manually @-mentions groups in each chat
         -- string[]: add only the named per-server groups, e.g. {"github", "filesystem"}
         auto_http_tools = true,
-        -- true (default): inject bridge as MCP server into ACP agent sessions
-        -- false or {}: inject bridge but disable all servers by default (use /mcp-session to enable)
-        -- string[]: inject bridge but only expose the named servers, e.g. {"github"}
+        -- true (default): inject combiner as MCP server into ACP agent sessions
+        -- false or {}: inject combiner but disable all servers by default (use /mcp-session to enable)
+        -- string[]: inject combiner but only expose the named servers, e.g. {"github"}
         auto_acp_tools = true,
         -- Per-session server filter for CodeCompanion CLI agents (codecompanion.interactions.cli).
-        -- The CLI agent connects back to the bridge via its own MCP config; this controls which
-        -- servers the bridge exposes on the per-session token.
+        -- The CLI agent connects back to the combiner via its own MCP config; this controls which
+        -- servers the combiner exposes on the per-session token.
         -- true (default): all servers visible to the CLI session
         -- false or {}: no servers visible (per-token filter set to empty)
         -- string[]: only the named servers, e.g. {"github"}
@@ -935,7 +1015,7 @@ require("mcp_companion").setup({
         -- Normalize tool JSON schemas to fix providers (e.g. moonshot-ai/kimi) that reject
         -- schemas where `type` and `anyOf` coexist at the same level with a 400 error.
         -- The transformation is semantically equivalent and accepted by lenient validators.
-        -- Passed to the bridge as --normalize-schema; applies at cache-fill time. Default false.
+        -- Passed to the combiner as --normalize-schema; applies at cache-fill time. Default false.
         normalize_schema = false,
         -- Per-adapter overrides for auto_http_tools / auto_acp_tools / auto_cli_tools.
         -- Keys are adapter names (chat.adapter.name, e.g. "moonshot-ai", "claude", "copilot_acp")
@@ -953,8 +1033,8 @@ require("mcp_companion").setup({
         height = 0.7,
         border = "rounded",
     },
-    on_ready = nil,                     -- fun(bridge) called when bridge connects
-    on_error = nil,                     -- fun(err) called on bridge errors
+    on_ready = nil,                     -- fun(combiner) called when combiner connects
+    on_error = nil,                     -- fun(err) called on combiner errors
 })
 ```
 
@@ -991,20 +1071,20 @@ When using a standard HTTP/LLM adapter (not ACP), MCP tools are available via
 
 | Mention | Effect |
 |---|---|
-| `@mcp-bridge` | Enable **all** MCP tools from all connected servers (one context block entry) |
+| `@mcp-combiner` | Enable **all** MCP tools from all connected servers (one context block entry) |
 | `@mcp__github` | Enable tools from a single server only (replace `github` with any server name) |
 
-With `cc.auto_http_tools = true` (the default), `@mcp-bridge` is added
-automatically to every new chat and all servers are enabled on the bridge for
+With `cc.auto_http_tools = true` (the default), `@mcp-combiner` is added
+automatically to every new chat and all servers are enabled on the combiner for
 that session. With `false`, no tool groups are added and all servers are
-disabled on the bridge — use `/mcp-session` or type `@mcp__<server>` manually
+disabled on the combiner — use `/mcp-session` or type `@mcp__<server>` manually
 to enable tools on demand.
 
 ```lua
 -- Default: all servers enabled automatically as a single group
 cc = { auto_http_tools = true }
 
--- Opt-in only: type @mcp-bridge or @mcp__github manually in each chat
+-- Opt-in only: type @mcp-combiner or @mcp__github manually in each chat
 cc = { auto_http_tools = false }
 
 -- Selective: auto-enable specific servers only
@@ -1018,26 +1098,26 @@ per-project defaults to a `.mcp-companion.json` file (see
 
 #### MCP tool availability in ACP chats
 
-When using an ACP adapter (OpenCode, Claude Code, Cline), the bridge is
+When using an ACP adapter (OpenCode, Claude Code, Cline), the combiner is
 injected as a single MCP server entry into the agent's `session/new` call.
-The agent discovers tools directly from the bridge — `@`-mention and tool
+The agent discovers tools directly from the combiner — `@`-mention and tool
 groups are not used.
 
-`cc.auto_acp_tools` controls whether and which servers the bridge exposes to ACP
+`cc.auto_acp_tools` controls whether and which servers the combiner exposes to ACP
 agents:
 
 ```lua
 cc = {
   auto_acp_tools = true,                          -- (default) all servers visible
-  auto_acp_tools = false,                         -- bridge injected, but no servers enabled by default
+  auto_acp_tools = false,                         -- combiner injected, but no servers enabled by default
   auto_acp_tools = {},                            -- same as false
   auto_acp_tools = { "github", "filesystem" },    -- only these servers visible
 }
 ```
 
-When `auto_acp_tools` is `false`, `{}`, or a list, the bridge is still injected but unlisted
-servers are automatically session-disabled for the ACP agent's bridge
-connection once it is established. The filter is applied via the bridge's
+When `auto_acp_tools` is `false`, `{}`, or a list, the combiner is still injected but unlisted
+servers are automatically session-disabled for the ACP agent's combiner
+connection once it is established. The filter is applied via the combiner's
 REST session API and cleaned up when the chat closes.
 
 **Per-session server gating** allows selectively hiding individual upstream
@@ -1054,17 +1134,17 @@ distinct from both HTTP CC chats and ACP CC chats:
 
 - **HTTP CC chat:** CodeCompanion is itself the MCP client; tools are dispatched
   through CC's `tool_registry` and the LLM sees them via the `tools` array.
-- **ACP CC chat:** the bridge is injected into the ACP agent's `session/new`
+- **ACP CC chat:** the combiner is injected into the ACP agent's `session/new`
   call (`mcpServers`), and the agent's own MCP client connects back to the
-  bridge.
+  combiner.
 - **CLI session:** the spawned CLI process is the MCP client. It connects to
-  the bridge using *its own* MCP config (whatever is in the CLI tool's config
-  file). The plugin does not inject a bridge entry into the CLI's process —
+  the combiner using *its own* MCP config (whatever is in the CLI tool's config
+  file). The plugin does not inject a combiner entry into the CLI's process —
   it only allocates a per-session token, applies the server filter to that
-  token on the bridge, and registers the session for `:MCPStatus` and
+  token on the combiner, and registers the session for `:MCPStatus` and
   `/mcp-session` gating.
 
-`cc.auto_cli_tools` controls the bridge-side filter for CLI sessions:
+`cc.auto_cli_tools` controls the combiner-side filter for CLI sessions:
 
 ```lua
 cc = {
@@ -1075,17 +1155,17 @@ cc = {
 }
 ```
 
-Because the CLI tool only sees the bridge via its own config, you must:
+Because the CLI tool only sees the combiner via its own config, you must:
 
-1. Configure the bridge as an MCP server in the CLI tool's own config (e.g.
+1. Configure the combiner as an MCP server in the CLI tool's own config (e.g.
    `~/.claude/mcp.json` or equivalent), pointing at `http://127.0.0.1:9741/mcp`
-   with your bridge port.
-2. Optionally set `bridge.token_in_url = true` and arrange for the CLI tool's
+   with your combiner port.
+2. Optionally set `combiner.token_in_url = true` and arrange for the CLI tool's
    config to embed the token (advanced; most users don't need this).
 
-Without step 1 the CLI tool will not see the bridge at all regardless of
+Without step 1 the CLI tool will not see the combiner at all regardless of
 `auto_cli_tools`. With step 1 but no token plumbing, the CLI tool connects
-to the bridge's singleton endpoint (no per-token filter), so `auto_cli_tools`
+to the combiner's singleton endpoint (no per-token filter), so `auto_cli_tools`
 becomes informational rather than enforced.
 
 Per-session gating (`/mcp-session`), per-adapter overrides via `cc.adapters`,
@@ -1207,15 +1287,15 @@ before writing.
 
 Filtering is enforced at two layers:
 
-1. **Bridge-side** (source of truth) — each chat gets a unique session token.
-   When you toggle a server, the plugin calls the bridge's REST filter API
+1. **Combiner-side** (source of truth) — each chat gets a unique session token.
+   When you toggle a server, the plugin calls the combiner's REST filter API
    (`/sessions/token/<token>/filter`) which controls which servers the session
    can execute tools on. This prevents tool calls from reaching a disabled
    server regardless of what the client sends.
 
-2. **Neovim-side** (mirrors bridge state) — for non-ACP chats, the plugin also
+2. **Neovim-side** (mirrors combiner state) — for non-ACP chats, the plugin also
    adds or removes tool groups from the CC `tool_registry` so the LLM's
-   available tools stay in sync. For ACP chats, the bridge sends a
+   available tools stay in sync. For ACP chats, the combiner sends a
    `notifications/tools/list_changed` notification and the agent re-fetches
    tools directly.
 
@@ -1225,16 +1305,16 @@ The initial filter for a new chat is derived in this order of precedence:
    (see [Per-project defaults](#per-project-defaults-mcp-companionjson) above)
 2. **`cc.auto_http_tools`** (or `cc.auto_acp_tools` for ACP chats,
    `cc.auto_cli_tools` for CLI sessions):
-   - `false` → all servers disabled on the bridge for that session
+   - `false` → all servers disabled on the combiner for that session
    - `{"github"}` → only `github` enabled; all others disabled
    - `true` → no filter; all servers enabled
 
-##### Bridge meta-tools
+##### Combiner meta-tools
 
-The underlying bridge tools are callable by the agent directly (e.g., in an
+The underlying combiner tools are callable by the agent directly (e.g., in an
 ACP session where the agent has autonomous tool access):
 
-**`bridge__session_disable_server`** — hide a server from this session
+**`combiner__session_disable_server`** — hide a server from this session
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1243,7 +1323,7 @@ ACP session where the agent has autonomous tool access):
 
 Returns JSON: `{ "session_id": "...", "action": "disabled", "server": "...", "disabled_servers": [...] }`
 
-**`bridge__session_enable_server`** — restore a hidden server for this session
+**`combiner__session_enable_server`** — restore a hidden server for this session
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1252,7 +1332,7 @@ Returns JSON: `{ "session_id": "...", "action": "disabled", "server": "...", "di
 
 Returns JSON: `{ "session_id": "...", "action": "enabled", "server": "...", "disabled_servers": [...] }`
 
-**`bridge__session_status`** — get the current session's disabled server list
+**`combiner__session_status`** — get the current session's disabled server list
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1260,44 +1340,44 @@ Returns JSON: `{ "session_id": "...", "action": "enabled", "server": "...", "dis
 
 Returns JSON: `{ "session_id": "...", "disabled_servers": [...] }`
 
-These complement the global `bridge__enable_server` / `bridge__disable_server`
+These complement the global `combiner__enable_server` / `combiner__disable_server`
 tools, which affect all sessions simultaneously.
 
 ##### Example workflow
 
 ```
 1. Open a chat with auto_http_tools = { "github" }
-   → only github tools available; other servers disabled on the bridge
+   → only github tools available; other servers disabled on the combiner
 
 2. Mid-conversation, run /mcp-session
    → picker shows:  [ ON] github   [OFF] todoist   [OFF] filesystem
 
 3. Select todoist to toggle it ON
-   → bridge enables todoist for this session
+   → combiner enables todoist for this session
    → todoist tools appear in tool suggestions
    → other chats are unaffected
 
 4. Close the chat
-   → session filter is automatically cleaned up on the bridge
+   → session filter is automatically cleaned up on the combiner
 ```
 
 ---
 
 ```
 ┌─────────────────────────────────────────────┐
-│ MCP Bridge (Python, FastMCP)                │
+│ MCP Combiner (Python, FastMCP)                │
 │                                             │
 │  server.py      Proxy + middleware + health  │
 │  config.py      Pydantic models, env interp  │
 │  auth.py        OAuth 2.1, bearer tokens     │
 │  sharedserver.py  sharedserver lifecycle     │
-│  meta_tools.py  bridge__status, enable/disable│
+│  meta_tools.py  combiner__status, enable/disable│
 └────────────────────┬────────────────────────┘
                      │ HTTP :9741
 ┌────────────────────┴────────────────────────┐
 │ Neovim Plugin (Lua)                         │
 │                                             │
-│  bridge/       HTTP client -> bridge process │
+│  combiner/       HTTP client -> combiner process │
 │  cc/           CodeCompanion extension       │
 │    tools       MCP tools -> CC tools         │
 │    editor_context  MCP resources -> #context │
@@ -1308,7 +1388,7 @@ tools, which affect all sessions simultaneously.
 └─────────────────────────────────────────────┘
 ```
 
-The bridge aggregates N MCP servers through a single HTTP endpoint. A
+The combiner aggregates N MCP servers through a single HTTP endpoint. A
 `SanitizeSchemaMiddleware` handles servers with circular `$ref` schemas
 (e.g. Todoist) that would otherwise crash Pydantic serialization.
 
@@ -1318,18 +1398,18 @@ The bridge aggregates N MCP servers through a single HTTP endpoint. A
 
 ### ACP agent cannot call MCP tools (per-chat session not established)
 
-Per-chat sessions rely on the `X-MCP-Bridge-Session` header to map a token to
-an MCP session on the bridge. The ACP spec requires HTTP MCP transports to
+Per-chat sessions rely on the `X-MCP-Combiner-Session` header to map a token to
+an MCP session on the combiner. The ACP spec requires HTTP MCP transports to
 forward custom headers, but some agent SDKs may strip them.
 
-**Symptom:** Tools fail or the bridge logs show no `Token mapped` entry for
+**Symptom:** Tools fail or the combiner logs show no `Token mapped` entry for
 the agent's session.
 
 **Fix:** Enable the URL-path fallback so the token is embedded in the URL
 itself:
 
 ```lua
-bridge = {
+combiner = {
     token_in_url = true,
 }
 ```
@@ -1342,13 +1422,13 @@ the ACP agent so we can track which SDKs need it.
 
 ## Development
 
-### Python bridge
+### Python combiner
 
 ```bash
-cd bridge
+cd combiner
 uv sync --frozen
 pytest tests/ -v
-mypy --strict mcp_bridge/ tests/
+mypy --strict mcp_combiner/ tests/
 ```
 
 ### Lua plugin
@@ -1357,7 +1437,7 @@ mypy --strict mcp_bridge/ tests/
 lua-language-server --check=. --checklevel=Warning
 ```
 
-Integration tests (requires a running bridge):
+Integration tests (requires a running combiner):
 
 ```vim
 :luafile tests/test_cc_tools.lua

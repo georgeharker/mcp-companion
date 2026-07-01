@@ -1,0 +1,38 @@
+name: CI (mcp-combiner)
+
+on:
+  push:
+    branches: [main, dev]
+    paths: ["combiner/**", ".github/workflows/ci.yml"]
+  pull_request:
+    paths: ["combiner/**", ".github/workflows/ci.yml"]
+
+defaults:
+  run:
+    working-directory: combiner
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install (project + dev group, from uv.lock)
+        run: uv sync
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format (ruff)
+        run: uv run ruff format --check .
+
+      - name: Types (mypy)
+        run: uv run mypy mcp_combiner
+
+      - name: Tests (pytest)
+        run: uv run pytest -q

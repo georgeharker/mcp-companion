@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="976" height="560" viewBox="46 0 488 280" role="img" aria-label="mcp-companion: terminal and chat interfaces funnel through a hub into managed mcp servers">
+  <defs>
+    <marker id="arrowhead" markerWidth="22" markerHeight="13" refX="20" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L22,6.5 L0,13 Z" fill="#8636C3"/>
+    </marker>
+
+    <linearGradient id="hubGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A3B47"/>
+      <stop offset="1" stop-color="#141519"/>
+    </linearGradient>
+    <linearGradient id="hubBezel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="0.4" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="cardSheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.42" stop-color="#FAFBFC"/>
+      <stop offset="1" stop-color="#D6DAE1"/>
+    </linearGradient>
+
+    <radialGradient id="dotPurple" cx="0.35" cy="0.30" r="0.78">
+      <stop offset="0" stop-color="#C49BEA"/>
+      <stop offset="0.55" stop-color="#7A3FBF"/>
+      <stop offset="1" stop-color="#4A2179"/>
+    </radialGradient>
+    <radialGradient id="dotMag" cx="0.35" cy="0.30" r="0.78">
+      <stop offset="0" stop-color="#E2A0DF"/>
+      <stop offset="0.55" stop-color="#B23BB0"/>
+      <stop offset="1" stop-color="#74206E"/>
+    </radialGradient>
+    <radialGradient id="dotPink" cx="0.35" cy="0.30" r="0.78">
+      <stop offset="0" stop-color="#F7A2C7"/>
+      <stop offset="0.55" stop-color="#E0398A"/>
+      <stop offset="1" stop-color="#9E1C5A"/>
+    </radialGradient>
+
+    <filter id="ds" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#1A1B22" flood-opacity="0.40"/>
+    </filter>
+    <filter id="dsDot" x="-80%" y="-80%" width="260%" height="260%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2.2" flood-color="#1A1B22" flood-opacity="0.55"/>
+    </filter>
+    <filter id="dsArrow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="1.2" flood-color="#1A1B22" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <!-- ===== flow arrows (behind nodes) ===== -->
+  <g filter="url(#dsArrow)">
+    <path d="M178,86 H210 C226,86 226,124 240,124 H262" fill="none" stroke="#7A3FBF" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowhead)"/>
+    <path d="M178,190 H210 C226,190 226,156 240,156 H262" fill="none" stroke="#7A3FBF" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowhead)"/>
+    <path d="M338,124 H370 C386,124 386,63 400,63 H424" fill="none" stroke="#9333C7" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowhead)"/>
+    <path d="M338,140 H424" fill="none" stroke="#9333C7" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowhead)"/>
+    <path d="M338,156 H370 C386,156 386,217 400,217 H424" fill="none" stroke="#9333C7" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowhead)"/>
+  </g>
+
+  <!-- ===== hub: glossy charcoal squircle + bullseye cutout ===== -->
+  <path d="M284,100 H316 A24,24 0 0 1 340,124 V156 A24,24 0 0 1 316,180 H284 A24,24 0 0 1 260,156 V124 A24,24 0 0 1 284,100 Z" fill="url(#hubGrad)" filter="url(#ds)"/>
+  <ellipse cx="300" cy="120" rx="32" ry="13" fill="#ffffff" opacity="0.10"/>
+  <path d="M284,100 H316 A24,24 0 0 1 340,124 V156 A24,24 0 0 1 316,180 H284 A24,24 0 0 1 260,156 V124 A24,24 0 0 1 284,100 Z" fill="none" stroke="url(#hubBezel)" stroke-width="2"/>
+  <circle cx="300" cy="140" r="15" fill="none" stroke="#ffffff" stroke-width="3"/>
+  <circle cx="300" cy="140" r="5" fill="#ffffff"/>
+
+  <!-- ===== terminal interface ===== -->
+  <path d="M84,56 H166 A14,14 0 0 1 180,70 V102 A14,14 0 0 1 166,116 H84 A14,14 0 0 1 70,102 V70 A14,14 0 0 1 84,56 Z" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.5" filter="url(#ds)"/>
+  <path d="M76,80 H174" fill="none" stroke="#1A1B22" stroke-width="1" opacity="0.18"/>
+  <circle cx="85" cy="70" r="4.5" fill="url(#dotPink)" stroke="#000" stroke-opacity="0.18" stroke-width="0.8" filter="url(#dsDot)"/>
+  <circle cx="99" cy="70" r="4.5" fill="url(#dotMag)" stroke="#000" stroke-opacity="0.18" stroke-width="0.8" filter="url(#dsDot)"/>
+  <circle cx="113" cy="70" r="4.5" fill="url(#dotPurple)" stroke="#000" stroke-opacity="0.18" stroke-width="0.8" filter="url(#dsDot)"/>
+  <ellipse cx="83.7" cy="68.5" rx="1.9" ry="1.35" fill="#fff" opacity="0.55"/>
+  <ellipse cx="97.7" cy="68.5" rx="1.9" ry="1.35" fill="#fff" opacity="0.55"/>
+  <ellipse cx="111.7" cy="68.5" rx="1.9" ry="1.35" fill="#fff" opacity="0.55"/>
+  <path d="M 90.548 105.194 V 101.736 L 97.438 97.42 V 97.316 L 90.548 93 V 89.542 L 100.584 96.042 V 98.694 Z M 105.16 110.264 V 107.404 H 117.64 V 110.264 Z" fill="#1A1B22"/>
+
+  <!-- ===== chat interface ===== -->
+  <path d="M90,160 H160 A20,20 0 0 1 180,180 V200 A20,20 0 0 1 160,220 H102 L90,232 L92,220 H90 A20,20 0 0 1 70,200 V180 A20,20 0 0 1 90,160 Z" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.5" filter="url(#ds)"/>
+  <circle cx="99" cy="190" r="6.5" fill="url(#dotPurple)" stroke="#000" stroke-opacity="0.18" stroke-width="0.9" filter="url(#dsDot)"/>
+  <circle cx="117" cy="190" r="6.5" fill="url(#dotMag)" stroke="#000" stroke-opacity="0.18" stroke-width="0.9" filter="url(#dsDot)"/>
+  <circle cx="135" cy="190" r="6.5" fill="url(#dotPink)" stroke="#000" stroke-opacity="0.18" stroke-width="0.9" filter="url(#dsDot)"/>
+  <ellipse cx="97.2" cy="187.8" rx="2.7" ry="1.95" fill="#fff" opacity="0.55"/>
+  <ellipse cx="115.2" cy="187.8" rx="2.7" ry="1.95" fill="#fff" opacity="0.55"/>
+  <ellipse cx="133.2" cy="187.8" rx="2.7" ry="1.95" fill="#fff" opacity="0.55"/>
+
+  <!-- ===== managed mcp servers ===== -->
+  <path d="M432,40 H500 A12,12 0 0 1 512,52 V74 A12,12 0 0 1 500,86 H432 A12,12 0 0 1 420,74 V52 A12,12 0 0 1 432,40 Z" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="3.5" filter="url(#ds)"/>
+  <path d="M432,117 H500 A12,12 0 0 1 512,129 V151 A12,12 0 0 1 500,163 H432 A12,12 0 0 1 420,151 V129 A12,12 0 0 1 432,117 Z" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="3.5" filter="url(#ds)"/>
+  <path d="M432,194 H500 A12,12 0 0 1 512,206 V228 A12,12 0 0 1 500,240 H432 A12,12 0 0 1 420,228 V206 A12,12 0 0 1 432,194 Z" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="3.5" filter="url(#ds)"/>
+  <circle cx="435" cy="63" r="6" fill="url(#dotPurple)" stroke="#000" stroke-opacity="0.18" stroke-width="0.9" filter="url(#dsDot)"/>
+  <circle cx="435" cy="140" r="6" fill="url(#dotMag)" stroke="#000" stroke-opacity="0.18" stroke-width="0.9" filter="url(#dsDot)"/>
+  <circle cx="435" cy="217" r="6" fill="url(#dotPink)" stroke="#000" stroke-opacity="0.18" stroke-width="0.9" filter="url(#dsDot)"/>
+  <ellipse cx="433.3" cy="61" rx="2.5" ry="1.8" fill="#fff" opacity="0.55"/>
+  <ellipse cx="433.3" cy="138" rx="2.5" ry="1.8" fill="#fff" opacity="0.55"/>
+  <ellipse cx="433.3" cy="215" rx="2.5" ry="1.8" fill="#fff" opacity="0.55"/>
+  <path d="M 453.51 69.3 V 56.404 H 456.396 L 456.656 57.99 H 456.76 Q 457.124 57.21 457.774 56.651 Q 458.424 56.092 459.542 56.092 Q 461.31 56.092 461.778 58.198 Q 462.142 57.314 462.831 56.703 Q 463.52 56.092 464.638 56.092 Q 466.016 56.092 466.77 57.21 Q 467.524 58.328 467.524 60.252 V 69.3 H 463.884 V 60.512 Q 463.884 59.342 463.182 59.342 Q 462.558 59.342 462.012 60.59 V 69.3 H 459.022 V 60.512 Q 459.022 59.342 458.294 59.342 Q 457.93 59.342 457.67 59.654 Q 457.41 59.966 457.15 60.59 V 69.3 Z M 477.118 69.612 Q 475.09 69.612 473.465 68.819 Q 471.84 68.026 470.891 66.505 Q 469.942 64.984 469.942 62.852 Q 469.942 60.694 470.982 59.186 Q 472.022 57.678 473.725 56.885 Q 475.428 56.092 477.404 56.092 Q 478.938 56.092 480.186 56.586 Q 481.434 57.08 482.24 57.834 L 480.472 60.2 Q 479.042 59.186 477.612 59.186 Q 475.948 59.186 474.908 60.174 Q 473.868 61.162 473.868 62.852 Q 473.868 64.516 474.882 65.517 Q 475.896 66.518 477.482 66.518 Q 478.496 66.518 479.341 66.154 Q 480.186 65.79 480.888 65.296 L 482.422 67.714 Q 481.252 68.676 479.848 69.144 Q 478.444 69.612 477.118 69.612 Z M 485.672 74.084 V 56.404 H 488.792 L 489.078 57.704 H 489.156 Q 489.936 57.002 490.95 56.547 Q 491.964 56.092 493.004 56.092 Q 495.422 56.092 496.8 57.873 Q 498.178 59.654 498.178 62.644 Q 498.178 64.854 497.385 66.414 Q 496.592 67.974 495.318 68.793 Q 494.044 69.612 492.588 69.612 Q 490.82 69.612 489.416 68.208 H 489.312 L 489.494 70.314 V 74.084 Z M 491.704 66.492 Q 492.77 66.492 493.511 65.582 Q 494.252 64.672 494.252 62.696 Q 494.252 59.212 491.886 59.212 Q 490.664 59.212 489.494 60.408 V 65.634 Q 490.04 66.102 490.625 66.297 Q 491.21 66.492 491.704 66.492 Z" fill="#1A1B22"/>
+  <path d="M 453.51 146.3 V 133.404 H 456.396 L 456.656 134.99 H 456.76 Q 457.124 134.21 457.774 133.651 Q 458.424 133.092 459.542 133.092 Q 461.31 133.092 461.778 135.198 Q 462.142 134.314 462.831 133.703 Q 463.52 133.092 464.638 133.092 Q 466.016 133.092 466.77 134.21 Q 467.524 135.328 467.524 137.252 V 146.3 H 463.884 V 137.512 Q 463.884 136.342 463.182 136.342 Q 462.558 136.342 462.012 137.59 V 146.3 H 459.022 V 137.512 Q 459.022 136.342 458.294 136.342 Q 457.93 136.342 457.67 136.654 Q 457.41 136.966 457.15 137.59 V 146.3 Z M 477.118 146.612 Q 475.09 146.612 473.465 145.819 Q 471.84 145.026 470.891 143.505 Q 469.942 141.984 469.942 139.852 Q 469.942 137.694 470.982 136.186 Q 472.022 134.678 473.725 133.885 Q 475.428 133.092 477.404 133.092 Q 478.938 133.092 480.186 133.586 Q 481.434 134.08 482.24 134.834 L 480.472 137.2 Q 479.042 136.186 477.612 136.186 Q 475.948 136.186 474.908 137.174 Q 473.868 138.162 473.868 139.852 Q 473.868 141.516 474.882 142.517 Q 475.896 143.518 477.482 143.518 Q 478.496 143.518 479.341 143.154 Q 480.186 142.79 480.888 142.296 L 482.422 144.714 Q 481.252 145.676 479.848 146.144 Q 478.444 146.612 477.118 146.612 Z M 485.672 151.084 V 133.404 H 488.792 L 489.078 134.704 H 489.156 Q 489.936 134.002 490.95 133.547 Q 491.964 133.092 493.004 133.092 Q 495.422 133.092 496.8 134.873 Q 498.178 136.654 498.178 139.644 Q 498.178 141.854 497.385 143.414 Q 496.592 144.974 495.318 145.793 Q 494.044 146.612 492.588 146.612 Q 490.82 146.612 489.416 145.208 H 489.312 L 489.494 147.314 V 151.084 Z M 491.704 143.492 Q 492.77 143.492 493.511 142.582 Q 494.252 141.672 494.252 139.696 Q 494.252 136.212 491.886 136.212 Q 490.664 136.212 489.494 137.408 V 142.634 Q 490.04 143.102 490.625 143.297 Q 491.21 143.492 491.704 143.492 Z" fill="#1A1B22"/>
+  <path d="M 453.51 223.3 V 210.404 H 456.396 L 456.656 211.99 H 456.76 Q 457.124 211.21 457.774 210.651 Q 458.424 210.092 459.542 210.092 Q 461.31 210.092 461.778 212.198 Q 462.142 211.314 462.831 210.703 Q 463.52 210.092 464.638 210.092 Q 466.016 210.092 466.77 211.21 Q 467.524 212.328 467.524 214.252 V 223.3 H 463.884 V 214.512 Q 463.884 213.342 463.182 213.342 Q 462.558 213.342 462.012 214.59 V 223.3 H 459.022 V 214.512 Q 459.022 213.342 458.294 213.342 Q 457.93 213.342 457.67 213.654 Q 457.41 213.966 457.15 214.59 V 223.3 Z M 477.118 223.612 Q 475.09 223.612 473.465 222.819 Q 471.84 222.026 470.891 220.505 Q 469.942 218.984 469.942 216.852 Q 469.942 214.694 470.982 213.186 Q 472.022 211.678 473.725 210.885 Q 475.428 210.092 477.404 210.092 Q 478.938 210.092 480.186 210.586 Q 481.434 211.08 482.24 211.834 L 480.472 214.2 Q 479.042 213.186 477.612 213.186 Q 475.948 213.186 474.908 214.174 Q 473.868 215.162 473.868 216.852 Q 473.868 218.516 474.882 219.517 Q 475.896 220.518 477.482 220.518 Q 478.496 220.518 479.341 220.154 Q 480.186 219.79 480.888 219.296 L 482.422 221.714 Q 481.252 222.676 479.848 223.144 Q 478.444 223.612 477.118 223.612 Z M 485.672 228.084 V 210.404 H 488.792 L 489.078 211.704 H 489.156 Q 489.936 211.002 490.95 210.547 Q 491.964 210.092 493.004 210.092 Q 495.422 210.092 496.8 211.873 Q 498.178 213.654 498.178 216.644 Q 498.178 218.854 497.385 220.414 Q 496.592 221.974 495.318 222.793 Q 494.044 223.612 492.588 223.612 Q 490.82 223.612 489.416 222.208 H 489.312 L 489.494 224.314 V 228.084 Z M 491.704 220.492 Q 492.77 220.492 493.511 219.582 Q 494.252 218.672 494.252 216.696 Q 494.252 213.212 491.886 213.212 Q 490.664 213.212 489.494 214.408 V 219.634 Q 490.04 220.102 490.625 220.297 Q 491.21 220.492 491.704 220.492 Z" fill="#1A1B22"/>
+</svg>

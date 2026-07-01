@@ -1,0 +1,91 @@
+# Build and check the Nix flake (flake.nix). Validates that the combiner venv,
+# the `mcp-combiner` application, and the Neovim plugin all build from a clean
+# evaluation across Linux + macOS — the one thing that can't be verified by
+# reading the flake. `nix flake check` also runs the flake's pytest + mypy
+# checks. Runs on PRs that touch the flake or the packaged sources (e.g. PR #6),
+# and is inert (skips cleanly) when no flake.nix is present.
+name: nix
+
+on:
+  workflow_dispatch:
+  push:
+    # `dev` is included so the flake can be validated on an integration branch
+    # before the workflow (and flake) land on main.
+    branches: [main, dev]
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "combiner/**"
+      - "lua/**"
+      - ".github/workflows/nix.yml"
+  pull_request:
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "combiner/**"
+      - "lua/**"
+      - ".github/workflows/nix.yml"
+
+concurrency:
+  group: nix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # id-token: write lets flakehub-cache-action authenticate to FlakeHub via
+    # GitHub OIDC (no secrets needed).
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Skip the rest of the job (rather than fail) when the flake hasn't
+      # landed yet — keeps the workflow safe to merge ahead of PR #6.
+      - name: Detect flake
+        id: flake
+        shell: bash
+        run: |
+          if [ -f flake.nix ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No flake.nix at this ref — skipping Nix build."
+          fi
+
+      - name: Install Nix
+        if: steps.flake.outputs.present == 'true'
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Enable FlakeHub Cache
+        if: steps.flake.outputs.present == 'true'
+        uses: DeterminateSystems/flakehub-cache-action@main
+
+      - name: flake check
+        if: steps.flake.outputs.present == 'true'
+        run: nix flake check --print-build-logs
+
+      - name: build combiner + plugin
+        if: steps.flake.outputs.present == 'true'
+        run: |
+          nix build --print-build-logs --no-link \
+            .#mcp-combiner \
+            .#mcp-combiner-bin \
+            .#mcp-companion-nvim
+
+      # Smoke-test the built combiner: the console script must at least parse
+      # args and print help (proves the venv resolves fastmcp/pynvim and the
+      # entry point is wired). `|| true` guards argparse's exit code on --help.
+      - name: smoke-test mcp-combiner --help
+        if: steps.flake.outputs.present == 'true'
+        run: |
+          out=$(nix run .#mcp-combiner-bin -- --help 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q -- "--config" \
+            || { echo "::error::mcp-combiner --help did not mention --config"; exit 1; }

@@ -4,7 +4,7 @@
 ---
 --- These tests verify the pure logic of converting an allow-list
 --- (auto_acp_tools = {"github"}) into a disable-list without needing
---- a live bridge connection.
+--- a live combiner connection.
 
 local function assert_eq(a, b, msg)
     if type(a) == "table" and type(b) == "table" then
@@ -48,7 +48,7 @@ local function compute_disable_list(allowed_servers, all_servers)
 
     local to_disable = {}
     for _, srv in ipairs(all_servers) do
-        if srv.name ~= "_bridge" and not allowed[srv.name] then
+        if srv.name ~= "_combiner" and not allowed[srv.name] then
             table.insert(to_disable, srv.name)
         end
     end
@@ -63,7 +63,7 @@ test("single server in allow list", function()
         { name = "github" },
         { name = "todoist" },
         { name = "filesystem" },
-        { name = "_bridge" },
+        { name = "_combiner" },
     }
     local result = compute_disable_list({ "github" }, servers)
     assert_eq(result, { "todoist", "filesystem" }, "should disable todoist and filesystem")
@@ -84,20 +84,20 @@ test("empty allow list disables all", function()
     local servers = {
         { name = "github" },
         { name = "todoist" },
-        { name = "_bridge" },
+        { name = "_combiner" },
     }
     local result = compute_disable_list({}, servers)
     assert_eq(result, { "github", "todoist" }, "should disable github and todoist")
 end)
 
--- Test: _bridge is always excluded
-test("_bridge excluded from disable list", function()
+-- Test: _combiner is always excluded
+test("_combiner excluded from disable list", function()
     local servers = {
-        { name = "_bridge" },
+        { name = "_combiner" },
         { name = "github" },
     }
     local result = compute_disable_list({}, servers)
-    assert_eq(result, { "github" }, "_bridge should not appear in disable list")
+    assert_eq(result, { "github" }, "_combiner should not appear in disable list")
 end)
 
 -- Test: allow list with unknown server name (no-op, just ignores it)

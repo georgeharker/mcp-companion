@@ -1,4 +1,4 @@
---- test_real_servers.lua — Integration test against the production bridge (port 9741)
+--- test_real_servers.lua — Integration test against the production combiner (port 9741)
 ---
 --- Run with:
 ---   :luafile lua/mcp_companion/test_real_servers.lua
@@ -7,8 +7,8 @@
 ---   1. mcp-companion.nvim on runtimepath
 ---   2. codecompanion.nvim installed
 ---   3. ~/.cache/secrets/geohar.mcpservers.json exists
----   4. Bridge will be started automatically if not already running;
----      a running bridge on 9741 will be reused.
+---   4. Combiner will be started automatically if not already running;
+---      a running combiner on 9741 will be reused.
 ---
 --- Expected servers: todoist, clickup, github, cli-mcp-server, repomix,
 ---   perplexity-ask, george-graphics-gmail, georgeharker-gmail,
@@ -17,7 +17,7 @@
 local pass = 0
 local fail = 0
 local results = {}
-local _bridge_job = nil
+local _combiner_job = nil
 
 local PROD_PORT = 9741
 local PROD_HOST = "127.0.0.1"
@@ -95,8 +95,8 @@ local function find_config(plugin_root)
         local ok_cfg, cfg = pcall(require, "mcp_companion.config")
         if ok_cfg then
             local resolved = cfg.resolve({})
-            if resolved.bridge and resolved.bridge.config then
-                return resolved.bridge.config
+            if resolved.combiner and resolved.combiner.config then
+                return resolved.combiner.config
             end
         end
     end
@@ -104,64 +104,71 @@ local function find_config(plugin_root)
     local ok_cfg2, cfg2 = pcall(require, "mcp_companion.config")
     if ok_cfg2 then
         local resolved = cfg2.resolve({})
-        if resolved.bridge and resolved.bridge.config then
-            return resolved.bridge.config
+        if resolved.combiner and resolved.combiner.config then
+            return resolved.combiner.config
         end
     end
     return nil
 end
 
---- Check if bridge is already healthy
-local function bridge_healthy()
+--- Check if combiner is already healthy
+local function combiner_healthy()
     local url = string.format("http://%s:%d/health", PROD_HOST, PROD_PORT)
     local out = vim.fn.system(string.format("curl -sf --connect-timeout 1 %s 2>/dev/null", url))
     return out and out:match('"status"') ~= nil
 end
 
---- Start bridge as a background job and poll until healthy.
+--- Start combiner as a background job and poll until healthy.
 --- Returns true on success, false + message on failure.
-local function start_bridge(plugin_root, config_path)
-    local python = plugin_root .. "/bridge/.venv/bin/python"
+local function start_combiner(plugin_root, config_path)
+    local python = plugin_root .. "/combiner/.venv/bin/python"
     if vim.fn.executable(python) == 0 then
         return false, "python not found at " .. python
     end
 
     local cmd = {
-        python, "-m", "mcp_bridge",
-        "--config", config_path,
-        "--port", tostring(PROD_PORT),
-        "--host", PROD_HOST,
+        python,
+        "-m",
+        "mcp_combiner",
+        "--config",
+        config_path,
+        "--port",
+        tostring(PROD_PORT),
+        "--host",
+        PROD_HOST,
     }
 
-    _bridge_job = vim.fn.jobstart(cmd, {
-        cwd = plugin_root .. "/bridge",
+    _combiner_job = vim.fn.jobstart(cmd, {
+        cwd = plugin_root .. "/combiner",
         on_stderr = function(_jid, _data)
-            -- suppress bridge startup noise
+            -- suppress combiner startup noise
         end,
     })
 
-    if _bridge_job <= 0 then
+    if _combiner_job <= 0 then
         return false, "jobstart failed"
     end
 
     -- Poll up to 30 seconds (real servers take longer to connect)
     local deadline = vim.loop.now() + 30000
     while vim.loop.now() < deadline do
-        vim.wait(500, function() return false end, 100)
-        if bridge_healthy() then
+        vim.wait(500, function()
+            return false
+        end, 100)
+        if combiner_healthy() then
             return true, nil
         end
     end
 
-    vim.fn.jobstop(_bridge_job)
-    _bridge_job = nil
-    return false, string.format("bridge did not become healthy within 30s on port %d", PROD_PORT)
+    vim.fn.jobstop(_combiner_job)
+    _combiner_job = nil
+    return false, string.format("combiner did not become healthy within 30s on port %d", PROD_PORT)
 end
 
-local function stop_bridge()
-    if _bridge_job and _bridge_job > 0 then
-        vim.fn.jobstop(_bridge_job)
-        _bridge_job = nil
+local function stop_combiner()
+    if _combiner_job and _combiner_job > 0 then
+        vim.fn.jobstop(_combiner_job)
+        _combiner_job = nil
     end
 end
 
@@ -169,28 +176,48 @@ end
 section("Module loads")
 
 local ok_log, _log = pcall(require, "mcp_companion.log")
-if ok_log then ok("mcp_companion.log") else err("mcp_companion.log", _log) end
+if ok_log then
+    ok("mcp_companion.log")
+else
+    err("mcp_companion.log", _log)
+end
 
 local ok_cfg, _cfg = pcall(require, "mcp_companion.config")
-if ok_cfg then ok("mcp_companion.config") else err("mcp_companion.config", _cfg) end
+if ok_cfg then
+    ok("mcp_companion.config")
+else
+    err("mcp_companion.config", _cfg)
+end
 
 local ok_state, state = pcall(require, "mcp_companion.state")
-if ok_state then ok("mcp_companion.state") else err("mcp_companion.state", state) end
+if ok_state then
+    ok("mcp_companion.state")
+else
+    err("mcp_companion.state", state)
+end
 
 local ok_tools, tools = pcall(require, "mcp_companion.cc.tools")
-if ok_tools then ok("mcp_companion.cc.tools") else err("mcp_companion.cc.tools", tools) end
+if ok_tools then
+    ok("mcp_companion.cc.tools")
+else
+    err("mcp_companion.cc.tools", tools)
+end
 
 local ok_cc, cc_config = pcall(require, "codecompanion.config")
-if ok_cc then ok("codecompanion.config") else err("codecompanion.config", cc_config) end
+if ok_cc then
+    ok("codecompanion.config")
+else
+    err("codecompanion.config", cc_config)
+end
 
--- ── 2. Locate config + start bridge ─────────────────────────────────────────
-section("Bridge startup")
+-- ── 2. Locate config + start combiner ─────────────────────────────────────────
+section("Combiner startup")
 
 local plugin_root = find_plugin_root()
 if plugin_root then
     ok("plugin_root: " .. plugin_root)
 else
-    -- Non-fatal: bridge may already be running; config found independently
+    -- Non-fatal: combiner may already be running; config found independently
     table.insert(results, "  INFO  plugin_root: not resolvable (continuing)")
 end
 
@@ -201,18 +228,18 @@ else
     err("servers.json", "not found")
 end
 
-local bridge_was_running = bridge_healthy()
-local bridge_ready = bridge_was_running
+local combiner_was_running = combiner_healthy()
+local combiner_ready = combiner_was_running
 
-if bridge_was_running then
-    ok("bridge already running on port " .. PROD_PORT .. " — reusing")
+if combiner_was_running then
+    ok("combiner already running on port " .. PROD_PORT .. " — reusing")
 elseif plugin_root and config_path then
-    local started, start_err = start_bridge(plugin_root, config_path)
+    local started, start_err = start_combiner(plugin_root, config_path)
     if started then
-        bridge_ready = true
-        ok(string.format("bridge started on port %d", PROD_PORT))
+        combiner_ready = true
+        ok(string.format("combiner started on port %d", PROD_PORT))
     else
-        err("start_bridge", tostring(start_err))
+        err("start_combiner", tostring(start_err))
     end
 end
 
@@ -223,8 +250,8 @@ section("Client connection")
 local client = nil
 local connected = false
 
-if bridge_ready then
-    local Client = require("mcp_companion.bridge.client")
+if combiner_ready then
+    local Client = require("mcp_companion.combiner.client")
     client = Client.new({ host = PROD_HOST, port = PROD_PORT })
 
     local done = false
@@ -236,7 +263,9 @@ if bridge_ready then
     end)
 
     -- Real servers may need up to 10s to enumerate all tools
-    vim.wait(10000, function() return done end, 100)
+    vim.wait(10000, function()
+        return done
+    end, 100)
 
     if not done then
         err("client:connect", "timed out after 10s")
@@ -287,7 +316,7 @@ if connected then
     table.insert(results, "  INFO  actual server names: " .. table.concat(server_name_list, ", "))
 
     -- Spot-check: verify some well-known server keywords appear in actual names.
-    -- We don't hardcode exact names since the bridge may prefix differently.
+    -- We don't hardcode exact names since the combiner may prefix differently.
     -- Check that at least one server name contains each expected keyword
     local expected_keywords = { "todoist", "clickup", "github", "memory" }
     for _, keyword in ipairs(expected_keywords) do
@@ -301,8 +330,7 @@ if connected then
         if found then
             ok("server with keyword '" .. keyword .. "' found")
         else
-            err("server missing keyword", keyword ..
-                " — actual servers: " .. table.concat(server_name_list, ", "))
+            err("server missing keyword", keyword .. " — actual servers: " .. table.concat(server_name_list, ", "))
         end
     end
 
@@ -316,15 +344,17 @@ end
 -- ── 5. HTTP tool calls ───────────────────────────────────────────────────────
 section("Tool calls")
 
--- Wire the bridge module so cc/tools.lua can find the client
+-- Wire the combiner module so cc/tools.lua can find the client
 if connected then
-    local bridge_mod = require("mcp_companion.bridge")
-    bridge_mod.client = client
+    local combiner_mod = require("mcp_companion.combiner")
+    combiner_mod.client = client
 end
 
 --- Helper: synchronous tool call with 8s timeout
 local function call_tool(namespaced, params)
-    if not connected or not client then return nil, "not connected" end
+    if not connected or not client then
+        return nil, "not connected"
+    end
     local result, call_err
     local done = false
     client:call_tool(namespaced, params or vim.empty_dict(), function(e, r)
@@ -332,14 +362,20 @@ local function call_tool(namespaced, params)
         result = r
         done = true
     end)
-    vim.wait(8000, function() return done end, 100)
-    if not done then return nil, "timeout" end
+    vim.wait(8000, function()
+        return done
+    end, 100)
+    if not done then
+        return nil, "timeout"
+    end
     return result, call_err
 end
 
 --- Extract text from MCP content array
 local function content_text(result)
-    if not result or not result.content then return nil end
+    if not result or not result.content then
+        return nil
+    end
     local parts = {}
     for _, item in ipairs(result.content) do
         if item.type == "text" and item.text then
@@ -425,7 +461,9 @@ if connected then
                     break
                 end
             end
-            if ns then break end
+            if ns then
+                break
+            end
         end
     end
     if not ns then
@@ -482,20 +520,16 @@ if connected and ok_tools and ok_cc then
         err("tools.register()", reg_err)
     end
 
-    tools_tbl = cc_config.interactions
-        and cc_config.interactions.chat
-        and cc_config.interactions.chat.tools
+    tools_tbl = cc_config.interactions and cc_config.interactions.chat and cc_config.interactions.chat.tools
 
     if tools_tbl then
         for _, v in pairs(tools_tbl) do
-            if type(v) == "table" and type(v.id) == "string"
-                and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
+            if type(v) == "table" and type(v.id) == "string" and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
                 registered_count = registered_count + 1
             end
         end
         for _, v in pairs(tools_tbl.groups or {}) do
-            if type(v) == "table" and type(v.id) == "string"
-                and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
+            if type(v) == "table" and type(v.id) == "string" and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
                 group_count = group_count + 1
             end
         end
@@ -513,12 +547,11 @@ if connected and ok_tools and ok_cc then
         err("CC groups", "0 groups registered")
     end
 
-    -- Registered count should roughly match total_tools (minus _bridge pseudo-server)
+    -- Registered count should roughly match total_tools (minus _combiner pseudo-server)
     if registered_count >= total_tools - 5 then
         ok(string.format("registered_count (%d) matches total_tools (%d)", registered_count, total_tools))
     else
-        err("registered_count mismatch",
-            string.format("CC has %d, bridge has %d", registered_count, total_tools))
+        err("registered_count mismatch", string.format("CC has %d, combiner has %d", registered_count, total_tools))
     end
 end
 
@@ -529,9 +562,12 @@ if tools_tbl and registered_count > 0 then
     -- Find the github get_me entry
     local test_key = nil
     for k, v in pairs(tools_tbl) do
-        if type(v) == "table" and type(v.id) == "string"
+        if
+            type(v) == "table"
+            and type(v.id) == "string"
             and v.id:sub(1, #"mcp_companion:") == "mcp_companion:"
-            and k:match("get_me") then
+            and k:match("get_me")
+        then
             test_key = k
             break
         end
@@ -539,8 +575,7 @@ if tools_tbl and registered_count > 0 then
     -- Fall back to any tool
     if not test_key then
         for k, v in pairs(tools_tbl) do
-            if type(v) == "table" and type(v.id) == "string"
-                and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
+            if type(v) == "table" and type(v.id) == "string" and v.id:sub(1, #"mcp_companion:") == "mcp_companion:" then
                 test_key = k
                 break
             end
@@ -564,10 +599,14 @@ if tools_tbl and registered_count > 0 then
             -- Actually invoke the cmd function
             local cb_result = nil
             spec.cmds[1]({}, {}, {
-                output_cb = function(r) cb_result = r end,
+                output_cb = function(r)
+                    cb_result = r
+                end,
             })
 
-            vim.wait(8000, function() return cb_result ~= nil end, 100)
+            vim.wait(8000, function()
+                return cb_result ~= nil
+            end, 100)
 
             if cb_result then
                 ok(string.format("cmd function returned (status=%s)", tostring(cb_result.status)))
@@ -596,12 +635,12 @@ if client then
     ok("client disconnected")
 end
 
--- Only stop bridge if we started it (don't kill someone else's bridge)
-if not bridge_was_running then
-    stop_bridge()
-    ok("bridge stopped (we started it)")
+-- Only stop combiner if we started it (don't kill someone else's combiner)
+if not combiner_was_running then
+    stop_combiner()
+    ok("combiner stopped (we started it)")
 else
-    ok("bridge left running (was already up)")
+    ok("combiner left running (was already up)")
 end
 
 -- ── Print results ─────────────────────────────────────────────────────────────
