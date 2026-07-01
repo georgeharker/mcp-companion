@@ -2,11 +2,11 @@
 
 mcp-companion can expose your **live Neovim instance** to an AI agent as a set of
 `neovim_*` MCP tools — so an agent (in a CodeCompanion chat, or an external agent like
-Claude Code / OpenCode connected through the bridge) can read and edit your buffers, open
+Claude Code / OpenCode connected through the combiner) can read and edit your buffers, open
 files, jump to diagnostics, and more, acting on the editor you're actually working in.
 
 This is a built-in **native server** named `neovim`: the tools run as pure Lua inside your
-editor, and the bridge routes an agent's tool calls back into the right instance over a
+editor, and the combiner routes an agent's tool calls back into the right instance over a
 private channel.
 
 ## Enabling
@@ -25,7 +25,7 @@ require("mcp_companion").setup({
 ```
 
 To turn it off, set `enabled = false`. Nothing else is required — when an editor with the
-plugin is running, the bridge advertises the `neovim_*` tools to every connected client.
+plugin is running, the combiner advertises the `neovim_*` tools to every connected client.
 
 ## How an agent uses it
 
@@ -47,7 +47,7 @@ tool accepts an optional `nvim_instance` argument, and there's a discovery tool:
 - The default, when `nvim_instance` is omitted, is **the editor that started the chat**.
   A CodeCompanion/ACP chat is automatically associated with its own editor, so you never
   need the argument there.
-- A directly-configured agent (e.g. Claude Code pointed at the bridge on its own) has **no
+- A directly-configured agent (e.g. Claude Code pointed at the combiner on its own) has **no
   association** — it must pass `nvim_instance`. If it doesn't, the tool returns an error
   telling it to call `neovim_list_instances` and choose one. (With a single editor you can
   still just name it.)
@@ -112,7 +112,7 @@ Who approves a tool call depends on how the agent is connected:
   (`auto_approve` here, plus the global `auto_approve`, are documented in the README's
   [Auto-approve spec](../README.md#auto-approve-spec).)
 - **External ACP / CLI agents (Claude Code, OpenCode, Copilot):** the agent's **own** host
-  approval governs tool calls — the bridge does not approve (standard MCP: the host gives
+  approval governs tool calls — the combiner does not approve (standard MCP: the host gives
   consent, not the server). Configure permissions in the agent itself; this covers the
   `neovim_*` tools like any other. See
   [Approval for external agents](../README.md#approval-for-external-agents) for per-host
@@ -149,27 +149,27 @@ handler receives `(args, ctx)` and returns an MCP result — use the helpers in
 `mcp_companion.native.util` (`text`, `json`, `err`).
 
 **Important — registration is setup-time and must be identical across instances.** The
-bridge captures the tool catalog **once per bridge process** (from the first editor to
+combiner captures the tool catalog **once per combiner process** (from the first editor to
 connect) and freezes it. So:
 
-- Register your tools during `setup()`, before an editor connects to the bridge.
-- Register the **same** tools in every editor that shares the bridge.
+- Register your tools during `setup()`, before an editor connects to the combiner.
+- Register the **same** tools in every editor that shares the combiner.
 
 Tools added late, or that differ between instances, still work for **in-process**
-CodeCompanion chats but won't appear in the bridge's advertised catalog for external
+CodeCompanion chats but won't appear in the combiner's advertised catalog for external
 agents. (Divergent per-editor toolsets would need per-connection manifests, which aren't
 implemented.)
 
 ## Troubleshooting
 
 **The agent doesn't see any `neovim_*` tools.**
-The bridge only advertises them once an editor has registered. Check:
+The combiner only advertises them once an editor has registered. Check:
 
-1. A Neovim with the plugin is running and the bridge is connected (`:MCPStatus`).
+1. A Neovim with the plugin is running and the combiner is connected (`:MCPStatus`).
 2. In a fresh chat, ask the agent to call `neovim_list_instances` — your editor should
    appear with its `cwd`/`name`.
-3. If you just restarted the bridge, the plugin re-registers automatically (it detects the
-   restart via the bridge's boot id). An **already-open** agent may have cached an empty
+3. If you just restarted the combiner, the plugin re-registers automatically (it detects the
+   restart via the combiner's boot id). An **already-open** agent may have cached an empty
    tool list — start a new chat, which re-lists.
 
 **"this connection is not associated with a specific Neovim instance".**

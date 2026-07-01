@@ -2,7 +2,7 @@
 --- Registers /mcp-session as a static CC slash command that lets the user
 --- enable or disable individual MCP servers for the current chat session only.
 ---
---- Unlike bridge__disable_server (global), the per-session toggle is invisible
+--- Unlike combiner__disable_server (global), the per-session toggle is invisible
 --- to other sessions and is automatically cleaned up when the session ends.
 ---
 --- Usage: type /mcp-session in a CC chat buffer, then pick a server and action.
@@ -13,7 +13,7 @@ local M = {}
 local log = require("mcp_companion.log")
 
 -- Track per-chat session-disabled state locally so the picker shows current status
--- without needing an extra round-trip to the bridge.
+-- without needing an extra round-trip to the combiner.
 -- Format: { [bufnr] = { [server_name] = true } }
 --- @type table<integer, table<string, boolean>>
 local _session_state = {}
@@ -35,20 +35,22 @@ end
 --- @param is_disabling boolean true if disabling, false if re-enabling
 local function _sync_cc_tool_group(chat, server_name, is_disabling)
     local cc_mcp_ok, cc_mcp = pcall(require, "codecompanion.mcp")
-    if not cc_mcp_ok then return end
+    if not cc_mcp_ok then
+        return
+    end
 
     local group_name = cc_mcp.tool_prefix() .. server_name
-    local bridge_group_name = cc_mcp.tool_prefix() .. "bridge"
+    local combiner_group_name = cc_mcp.tool_prefix() .. "combiner"
 
     if is_disabling then
         -- Remove the per-server group from this chat's tool_registry
         if chat.tool_registry and chat.tool_registry.remove then
             pcall(chat.tool_registry.remove, chat.tool_registry, group_name)
         end
-        -- Also remove the aggregate bridge group — it contains tools from the
+        -- Also remove the aggregate combiner group — it contains tools from the
         -- now-disabled server and needs to be rebuilt
         if chat.tool_registry and chat.tool_registry.remove then
-            pcall(chat.tool_registry.remove, chat.tool_registry, bridge_group_name)
+            pcall(chat.tool_registry.remove, chat.tool_registry, combiner_group_name)
         end
         -- Unregister from the global MCP registry so new chats don't see it
         if cc_mcp.unregister_tools then
@@ -57,7 +59,7 @@ local function _sync_cc_tool_group(chat, server_name, is_disabling)
         log.debug("CC: removed tool group '%s' for session-disabled server", group_name)
     else
         -- Re-enabling: trigger a full re-registration which will pick up
-        -- the re-enabled server from the bridge's tools/list
+        -- the re-enabled server from the combiner's tools/list
         local cc_init_ok, cc_init = pcall(require, "mcp_companion.cc")
         if cc_init_ok and cc_init._register_all then
             -- Clear tools fingerprint so re-registration isn't skipped
@@ -73,9 +75,9 @@ local function _sync_cc_tool_group(chat, server_name, is_disabling)
                 config = chat.tools and chat.tools.tools_config,
             })
         end
-        -- Re-add the aggregate bridge group
+        -- Re-add the aggregate combiner group
         if chat.tool_registry then
-            chat.tool_registry:add(bridge_group_name, {
+            chat.tool_registry:add(combiner_group_name, {
                 config = chat.tools and chat.tools.tools_config,
             })
         end
@@ -90,18 +92,18 @@ end
 --- Call the session toggle for the given chat via the token filter endpoint.
 --- Uses chat._mcp_token as the stable identifier for both ACP and HTTP adapter chats.
 --- @param chat table CC chat object
---- @param tool_name string "bridge__session_disable_server" or "bridge__session_enable_server"
+--- @param tool_name string "combiner__session_disable_server" or "combiner__session_enable_server"
 --- @param server_name string
 --- @param callback fun(err?: string, msg?: string)
 local function _call_session_tool(chat, tool_name, server_name, callback)
     local token = chat._mcp_token
     if token then
         local cfg = require("mcp_companion.config").get()
-        local host = (cfg.bridge and cfg.bridge.host) or "127.0.0.1"
-        local port = (cfg.bridge and cfg.bridge.port) or 9741
+        local host = (cfg.combiner and cfg.combiner.host) or "127.0.0.1"
+        local port = (cfg.combiner and cfg.combiner.port) or 9741
         local http = require("mcp_companion.http")
 
-        local is_disabling = tool_name == "bridge__session_disable_server"
+        local is_disabling = tool_name == "combiner__session_disable_server"
         local action_key = is_disabling and "disable" or "enable"
         local body = vim.json.encode({ [action_key] = server_name })
 
@@ -125,7 +127,7 @@ local function _call_session_tool(chat, tool_name, server_name, callback)
                         local action = is_disabling and "disabled" or "enabled"
                         callback(nil, string.format("%s %s for this session", action, server_name))
                     else
-                        callback(string.format("Bridge filter update failed (status %s)", r.status))
+                        callback(string.format("Combiner filter update failed (status %s)", r.status))
                     end
                 end)
             end,
@@ -133,25 +135,22 @@ local function _call_session_tool(chat, tool_name, server_name, callback)
         return
     end
 
-    -- Fallback: no token — call bridge meta-tool via Neovim MCP client
-    local bridge = require("mcp_companion.bridge")
-    if not bridge.client then
-        callback("Bridge not connected")
+    -- Fallback: no token — call combiner meta-tool via Neovim MCP client
+    local combiner = require("mcp_companion.combiner")
+    if not combiner.client then
+        callback("Combiner not connected")
         return
     end
 
     local chat_id = chat and chat.bufnr and tostring(chat.bufnr) or nil
 
-    bridge.client:call_tool(tool_name, { server_name = server_name, chat_id = chat_id }, function(err, result)
+    combiner.client:call_tool(tool_name, { server_name = server_name, chat_id = chat_id }, function(err, result)
         vim.schedule(function()
             if err then
                 callback(tostring(err))
                 return
             end
-            local text = result
-                and result.content
-                and result.content[1]
-                and result.content[1].text
+            local text = result and result.content and result.content[1] and result.content[1].text
             if text then
                 local ok, data = pcall(vim.json.decode, text)
                 if ok and data and data.disabled_servers and chat and chat.bufnr then
@@ -162,7 +161,7 @@ local function _call_session_tool(chat, tool_name, server_name, callback)
                     _session_state[chat.bufnr] = disabled_map
                 end
             end
-            local is_disabling = tool_name == "bridge__session_disable_server"
+            local is_disabling = tool_name == "combiner__session_disable_server"
             local action = is_disabling and "disabled" or "enabled"
             callback(nil, string.format("%s %s for this session", action, server_name))
         end)
@@ -187,13 +186,10 @@ function M.toggle_server_for_session(chat, server_name, done)
 
     local disabled = _get_disabled(chat.bufnr)
     local currently_disabled = disabled[server_name] == true
-    local tool = currently_disabled
-        and "bridge__session_enable_server"
-        or "bridge__session_disable_server"
-    local new_state = not currently_disabled  -- true = will be disabled
+    local tool = currently_disabled and "combiner__session_enable_server" or "combiner__session_disable_server"
+    local new_state = not currently_disabled -- true = will be disabled
 
-    log.debug("Session toggle: %s %s",
-        currently_disabled and "enabling" or "disabling", server_name)
+    log.debug("Session toggle: %s %s", currently_disabled and "enabling" or "disabling", server_name)
 
     _call_session_tool(chat, tool, server_name, function(err, msg)
         if err then
@@ -226,7 +222,7 @@ function M.toggle_server_for_session(chat, server_name, done)
 end
 
 --- Register /mcp-session as a static CC slash command.
---- Called once at setup — not driven by bridge_ready/servers_updated.
+--- Called once at setup — not driven by combiner_ready/servers_updated.
 function M.register()
     local cc_config_ok, cc_config = pcall(require, "codecompanion.config")
     if not cc_config_ok then
@@ -249,10 +245,10 @@ function M.register()
             local state = require("mcp_companion.state")
             local servers = state.field("servers") or {}
 
-            -- Filter out the internal _bridge pseudo-server
+            -- Filter out the internal _combiner pseudo-server
             local names = {}
             for _, srv in ipairs(servers) do
-                if srv.name ~= "_bridge" then
+                if srv.name ~= "_combiner" then
                     table.insert(names, srv.name)
                 end
             end
@@ -276,20 +272,20 @@ function M.register()
 
             vim.ui.select(items, {
                 prompt = "Toggle MCP server for this session:",
-                format_item = function(item) return item.label end,
+                format_item = function(item)
+                    return item.label
+                end,
             }, function(choice)
-                if not choice then return end
+                if not choice then
+                    return
+                end
                 M.toggle_server_for_session(chat, choice.name, function(err, info)
                     if err then
-                        vim.notify(
-                            string.format("mcp-companion: session toggle failed: %s", err),
-                            vim.log.levels.ERROR
-                        )
+                        vim.notify(string.format("mcp-companion: session toggle failed: %s", err), vim.log.levels.ERROR)
                         return
                     end
                     vim.notify(
-                        string.format("mcp-companion: %s %s for this session",
-                            info.action, info.server),
+                        string.format("mcp-companion: %s %s for this session", info.action, info.server),
                         vim.log.levels.INFO
                     )
                 end)
@@ -308,7 +304,9 @@ function M.register()
             vim.ui.select({ "shortest", "allowed", "disabled" }, {
                 prompt = "Project file format:",
             }, function(choice)
-                if not choice then return end
+                if not choice then
+                    return
+                end
                 local cc_init = require("mcp_companion.cc")
                 cc_init._save_project_config_interactive(chat, choice)
             end)
@@ -333,7 +331,7 @@ function M.set_session_state(bufnr, disabled_map)
     _session_state[bufnr] = disabled_map
 end
 
---- Fetch session status from the bridge (async).
+--- Fetch session status from the combiner (async).
 --- Uses chat._mcp_token as the stable identifier for both ACP and HTTP adapter chats.
 --- @param chat table|nil CC chat object (nil for non-chat context)
 --- @param callback fun(err: string|nil, disabled: table<string, boolean>|nil)
@@ -341,11 +339,14 @@ function M.fetch_session_status(chat, callback)
     local token = chat and chat._mcp_token
     if token then
         local cfg = require("mcp_companion.config").get()
-        local host = (cfg.bridge and cfg.bridge.host) or "127.0.0.1"
-        local port = (cfg.bridge and cfg.bridge.port) or 9741
+        local host = (cfg.combiner and cfg.combiner.host) or "127.0.0.1"
+        local port = (cfg.combiner and cfg.combiner.port) or 9741
         local http = require("mcp_companion.http")
-        log.debug("MCPStatus: fetching session filter via token (bufnr=%s token=%s)",
-            tostring(chat and chat.bufnr), token)
+        log.debug(
+            "MCPStatus: fetching session filter via token (bufnr=%s token=%s)",
+            tostring(chat and chat.bufnr),
+            token
+        )
 
         http.request({
             url = string.format("http://%s:%d/sessions/token/%s/filter", host, port, token),
@@ -376,27 +377,38 @@ function M.fetch_session_status(chat, callback)
         return
     end
 
-    -- Fallback: no token — call bridge meta-tool
-    local bridge = require("mcp_companion.bridge")
-    if not bridge.client then
-        log.debug("MCPStatus: bridge not connected (bufnr=%s)", tostring(chat and chat.bufnr))
-        callback("Bridge not connected", nil)
+    -- Fallback: no token — call combiner meta-tool
+    local combiner = require("mcp_companion.combiner")
+    if not combiner.client then
+        log.debug("MCPStatus: combiner not connected (bufnr=%s)", tostring(chat and chat.bufnr))
+        callback("Combiner not connected", nil)
         return
     end
 
     local chat_id = chat and chat.bufnr and tostring(chat.bufnr) or nil
-    bridge.client:call_tool("bridge__session_status", { chat_id = chat_id }, function(err, result)
+    combiner.client:call_tool("combiner__session_status", { chat_id = chat_id }, function(err, result)
         vim.schedule(function()
-            if err then callback(tostring(err), nil); return end
+            if err then
+                callback(tostring(err), nil)
+                return
+            end
             local text = result and result.content and result.content[1] and result.content[1].text
-            if not text then callback("Empty response", nil); return end
+            if not text then
+                callback("Empty response", nil)
+                return
+            end
             local ok, data = pcall(vim.json.decode, text)
-            if not ok or not data then callback("JSON parse error", nil); return end
+            if not ok or not data then
+                callback("JSON parse error", nil)
+                return
+            end
             local disabled = {}
             for _, name in ipairs(data.disabled_servers or {}) do
                 disabled[name] = true
             end
-            if chat and chat.bufnr then _session_state[chat.bufnr] = disabled end
+            if chat and chat.bufnr then
+                _session_state[chat.bufnr] = disabled
+            end
             callback(nil, disabled)
         end)
     end)

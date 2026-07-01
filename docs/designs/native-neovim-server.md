@@ -16,14 +16,14 @@ It never needed a back-channel.
 
 mcp-companion is a two-tier system:
 
-- A **shared Python FastMCP bridge** (one process, serving N Neovim instances) exposed
+- A **shared Python FastMCP combiner** (one process, serving N Neovim instances) exposed
   at `http://127.0.0.1:<port>/mcp`.
 - External agents — ACP (OpenCode) and CLI agents (claude_code, gemini_cli) — connect
-  to the bridge **from outside Neovim** and call tools autonomously (see
+  to the combiner **from outside Neovim** and call tools autonomously (see
   `docs/design.md` → ACP Forwarding).
 
 For those external agents, a "control Neovim" tool **must be reachable through the
-bridge**, and the bridge — a separate OS process — must reach *back into the specific
+combiner**, and the combiner — a separate OS process — must reach *back into the specific
 live Neovim instance* that owns the chat. That back-channel is the crux of this design.
 
 ### What we improve over mcphub
@@ -52,7 +52,7 @@ The mcphub `@neovim` server has clear design smells we deliberately avoid:
 
 - Expose a curated `neovim` MCP server that controls the live instance.
 - Work for **both** delivery paths from a single set of Lua tool definitions:
-  in-process CodeCompanion chats *and* external ACP/CLI agents via the bridge.
+  in-process CodeCompanion chats *and* external ACP/CLI agents via the combiner.
 - Precondition by design: native tools exist for a session **iff** a live Neovim
   instance has registered a channel for it. No instance → tools degrade cleanly.
 - Reuse existing machinery: per-chat token routing, `state.native_servers`,
@@ -64,9 +64,9 @@ The mcphub `@neovim` server has clear design smells we deliberately avoid:
   `add_resource_template`/`add_prompt` API (re-exported on the top-level module). The
   built-in `neovim` server is curated, but plugins may register additional native
   servers/tools. **Constraint:** registration is *setup-time* — call before any editor
-  connects to the bridge — and must be **identical across instances**, because the bridge
+  connects to the combiner — and must be **identical across instances**, because the combiner
   freezes the tool catalog once per process (see *Frozen global manifest*). Tools added
-  late, or diverging between instances, won't appear in the bridge's advertised manifest
+  late, or diverging between instances, won't appear in the combiner's advertised manifest
   (they still work in-process); divergent toolsets would require per-connection manifests.
 
 **Non-goals**
@@ -78,11 +78,11 @@ The mcphub `@neovim` server has clear design smells we deliberately avoid:
 Chosen over the alternatives (reverse long-poll queue, dedicated `vim.uv` listener, raw
 remote). Rationale:
 
-- Neovim's msgpack-RPC is the **native, mature** control channel; the bridge is already
+- Neovim's msgpack-RPC is the **native, mature** control channel; the combiner is already
   Python, so [pynvim](https://github.com/neovim/pynvim) gives us a connection for free.
 - The known risk of the standard remote — that it exposes the *entire* `vim.api` to
   anything holding the socket — is mitigated by the **single dispatch contract** below:
-  the bridge **never** calls arbitrary API. It only ever invokes one curated Lua function.
+  the combiner **never** calls arbitrary API. It only ever invokes one curated Lua function.
 
 ### Dedicated socket with a unique per-instance name
 
@@ -95,19 +95,19 @@ pipe named by it with `vim.fn.serverstart()` in a user-only directory:
 $XDG_RUNTIME_DIR/mcp-companion/<instance_id>.sock   # falls back to a private tmp dir
 ```
 
-The `instance_id` and socket path are disclosed only to the bridge via registration
+The `instance_id` and socket path are disclosed only to the combiner via registration
 (below). This narrows the exposure surface, guarantees no name collisions, and lets the
-bridge keep exactly one connection per instance shared across all that instance's chats.
+combiner keep exactly one connection per instance shared across all that instance's chats.
 
 ### The single dispatch contract
 
-The bridge's *only* RPC into Neovim targets one Lua function — `dispatch` — over the
+The combiner's *only* RPC into Neovim targets one Lua function — `dispatch` — over the
 async msgpack session (never raw `vim.api`). Calls are serialized through the
-per-instance queue (see *Async & bridge liveness*); the worker awaits the response future
+per-instance queue (see *Async & combiner liveness*); the worker awaits the response future
 rather than blocking:
 
 ```python
-# Python (bridge side) — driven by the per-instance queue worker, on the event loop:
+# Python (combiner side) — driven by the per-instance queue worker, on the event loop:
 call_id = await session.request(           # async msgpack-RPC, msgid-correlated future
     "nvim_exec_lua",
     "return require('mcp_companion.native').dispatch(...)",
@@ -129,12 +129,12 @@ function M.dispatch(name, args, ctx) ... end
 `req.nvim` context, executes the (already-approved) handler, and returns an MCP-shaped
 result inline — or `{ pending, call_id }` for async jobs that complete later via
 `rpcnotify`. It performs **no approval** (that is the host's job). Even though the socket
-*could* run arbitrary API, the bridge code path cannot — it knows only this one function.
+*could* run arbitrary API, the combiner code path cannot — it knows only this one function.
 
 ## Routing & registration
 
 Two-level registry, keyed by a stable per-**instance** id and the existing per-**chat**
-token (`_token_sessions`, `_pending_token_filters` in `bridge/server.py`):
+token (`_token_sessions`, `_pending_token_filters` in `combiner/server.py`):
 
 1. **Instance registration (once per Neovim instance).** On setup the plugin creates its
    private socket and registers the instance:
@@ -144,7 +144,7 @@ token (`_token_sessions`, `_pending_token_filters` in `bridge/server.py`):
    DELETE /neovim/instances   { "instance_id": "<uid>" }     # on VimLeave
    ```
 
-   The bridge stores `instance_id -> socket` and keeps **one** pynvim connection per
+   The combiner stores `instance_id -> socket` and keeps **one** pynvim connection per
    instance, shared across all of that instance's chats.
 
 2. **Token binding (per chat/session).** The plugin already mints a token per chat
@@ -155,7 +155,7 @@ token (`_token_sessions`, `_pending_token_filters` in `bridge/server.py`):
    DELETE /neovim/bind   { "token": "<uuid>" }     # on chat close
    ```
 
-   The bridge stores `token -> instance_id`. (TokenRewriteMiddleware already records
+   The combiner stores `token -> instance_id`. (TokenRewriteMiddleware already records
    `token -> session_id`; we add the reverse `session_id -> token` so a tool call can
    recover its token.)
 
@@ -172,20 +172,20 @@ filtering** — it is just another server a chat can toggle, with no new UI.
 Tools are authored once in Lua. Two carriers:
 
 - **In-process (CodeCompanion chat):** `cc/tools.lua` calls `M.dispatch(name, args, ctx)`
-  directly. No socket, no bridge round-trip.
-- **External (ACP/CLI agent → bridge):** the bridge's synthetic `neovim` server forwards
+  directly. No socket, no combiner round-trip.
+- **External (ACP/CLI agent → combiner):** the combiner's synthetic `neovim` server forwards
   to `M.dispatch` over msgpack-RPC as above.
 
-## Async & bridge liveness
+## Async & combiner liveness
 
-The bridge is a **single shared process** serving N instances and multiple agents. The
+The combiner is a **single shared process** serving N instances and multiple agents. The
 governing constraint is that a tool call into one slow / human-waiting Neovim must never
-degrade the bridge's ability to serve everyone else (other sessions, `/health`, upstream
+degrade the combiner's ability to serve everyone else (other sessions, `/health`, upstream
 keepalives, capability polls).
 
 **Rule 0 — never block the event loop, and never busy-wait.** All Neovim RPC happens off
-the loop thread; the bridge only ever `await`s a future — no polling, no `vim.wait` on the
-bridge side, no parked threads.
+the loop thread; the combiner only ever `await`s a future — no polling, no `vim.wait` on the
+combiner side, no parked threads.
 
 ### Approval is the caller's job, not the editor's
 
@@ -195,18 +195,18 @@ like every other tool the agent can call:
 - **In-process CodeCompanion:** CC's own tool-approval flow (`cc/approval.lua`) gates the
   call before it is ever dispatched.
 - **External ACP / CLI agents:** the agent (OpenCode, Claude Code, …) confirms with its
-  own user before issuing `tools/call`. The bridge does **not** re-approve.
+  own user before issuing `tools/call`. The combiner does **not** re-approve.
 
-The bridge therefore performs **no editor-side confirmation** — there is no
+The combiner therefore performs **no editor-side confirmation** — there is no
 `vim.fn.confirm()`, no `vim.ui.select`, nothing that waits on a human inside the Neovim
 dispatch. By the time a call reaches Neovim it is already approved. This removes
 unbounded human-wait from the liveness story at the source: every dispatch is **bounded
-work** (a read, an edit, or a job with a timeout). What the bridge governs is *exposure*,
+work** (a read, an edit, or a job with a timeout). What the combiner governs is *exposure*,
 not per-call approval — see *Exposure & safety*.
 
 ### Per-instance FIFO queue
 
-Calls to a given Neovim session execute **in order** — the bridge holds one **FIFO queue
+Calls to a given Neovim session execute **in order** — the combiner holds one **FIFO queue
 per instance**, drained by a single async worker coroutine. The worker processes exactly
 one call at a time:
 
@@ -215,13 +215,13 @@ one call at a time:
    - **fast tools** (read / navigate / edit) resolve inline from the RPC response;
    - **async tools** (`run_command`) return `{ pending, call_id }` immediately and resolve
      later when Neovim `rpcnotify`s `{ call_id, result }` back over the same channel
-     (standard bidirectional msgpack-RPC; the bridge holds a notification handler).
+     (standard bidirectional msgpack-RPC; the combiner holds a notification handler).
 3. On **complete** → resolve the agent's `tools/call`, advance the queue.
    On **timeout** → fail that call, send a best-effort `abort call_id` to Neovim (so it
    discards the edit / kills the job before the next runs, preserving order), advance.
 
 One in-flight call per instance falls out of the queue, so editor mutations are strictly
-ordered and Neovim's single main loop is never contended. The bridge event loop stays
+ordered and Neovim's single main loop is never contended. The combiner event loop stays
 free throughout — other instances' queues and all other sessions run concurrently.
 
 Async msgpack session (msgid-correlated futures) is preferred over `to_thread` + sync
@@ -240,7 +240,7 @@ serialization is the queue's job, not the transport's.
   pending futures. No eager heartbeat waking idle editors.
 - **Listing is liveness-independent.** The catalog is static, so `tools/list` never
   touches an instance; only `tools/call` needs a live one.
-- **Bridge restart:** in-flight futures vanish (agents get errors); a **Neovim-side
+- **Combiner restart:** in-flight futures vanish (agents get errors); a **Neovim-side
   timeout** on pending `call_id`s self-cleans orphaned jobs.
 - **Per-instance ordering** is the queue's guarantee, reinforced by Neovim's single main
   loop (each handler runs to completion atomically). Serialization lives in the queue, not
@@ -248,17 +248,17 @@ serialization is the queue's job, not the transport's.
 
 ### Re-entrancy & ordering (the loop-back topology)
 
-The originator of a bridge call may *indirectly be Neovim itself*: a CodeCompanion chat in
-instance X prompts an ACP agent, the agent calls a `neovim_*` tool on the bridge, and the
-bridge routes it **back into instance X**. Originator and target are the same instance.
+The originator of a combiner call may *indirectly be Neovim itself*: a CodeCompanion chat in
+instance X prompts an ACP agent, the agent calls a `neovim_*` tool on the combiner, and the
+combiner routes it **back into instance X**. Originator and target are the same instance.
 This has two implications the locking design must respect:
 
-1. **The bridge queue is not a total order.** In-process CC calls reach `dispatch`
-   *directly* (they never traverse the bridge queue); external/looped-back calls arrive
+1. **The combiner queue is not a total order.** In-process CC calls reach `dispatch`
+   *directly* (they never traverse the combiner queue); external/looped-back calls arrive
    *through* it. So the per-instance FIFO only orders the external calls among themselves.
    The single thing that serializes **all** calls to an instance is **Neovim's main loop** —
    it runs one `dispatch` to completion before the next. Execution atomicity per call is
-   therefore free; the queue exists to bound in-flight *bridge* RPCs and order them, not to
+   therefore free; the queue exists to bound in-flight *combiner* RPCs and order them, not to
    be the sole serializer.
 
 2. **No lock may span an agent round-trip.** A per-instance mutex held across the
@@ -275,11 +275,11 @@ Deadlock-avoidance rules (enforced from the async phase onward):
   an agent turn that may loop back (CC's ACP path is already async — keep it so).
 - **Locks scope to one dispatch**, never across the network round-trip.
 - Calls carry their **origin instance id** in `ctx` for loop-back detection / observability
-  (and so the bridge can avoid pathological self-queuing).
+  (and so the combiner can avoid pathological self-queuing).
 
 **Phase 1 is safe by construction:** all native tools are synchronous, so the main loop
 fully serializes every `dispatch` (in-process or looped-back) with no lock at all. These
-rules become load-bearing only when the async `jobstart` path and the bridge queue land.
+rules become load-bearing only when the async `jobstart` path and the combiner queue land.
 
 ## Tool surface (curated, risk-tiered)
 
@@ -366,7 +366,7 @@ Handlers never reimplement mcphub's per-plugin caller branching.
 
 ## Exposure & safety
 
-Per-call approval is the agent / hosting harness's responsibility (see *Async & bridge
+Per-call approval is the agent / hosting harness's responsibility (see *Async & combiner
 liveness*), so the `neovim` server does **not** implement its own confirmation. Instead it
 controls **what an agent can reach**, which composes with whatever approval the host
 already enforces:
@@ -379,15 +379,15 @@ already enforces:
 - **In-process CC** additionally keeps `cc/approval.lua` in the loop, since CC tools flow
   through that gate regardless.
 
-This is consistent with how the bridge already exposes its other ~180 tools to agents:
+This is consistent with how the combiner already exposes its other ~180 tools to agents:
 safety comes from **exposure control + the host's normal approval**, not from a bespoke
 editor-side dialog. It still avoids mcphub's footgun (one `auto_approve` boolean covering
 `read_file` and `execute_command`) because the dangerous tier is opt-in at the exposure
 layer rather than relying on a single approval flag.
 
-## Bridge changes (Python)
+## Combiner changes (Python)
 
-Implemented in `mcp_bridge/nvim_channel.py` (`NvimChannelManager`):
+Implemented in `mcp_combiner/nvim_channel.py` (`NvimChannelManager`):
 
 - A `NvimChannelManager`: one `instance_id -> pynvim` connection per instance, lazy
   connect, evict on deregister or connection/timeout error. Every interaction (tool
@@ -398,7 +398,7 @@ Implemented in `mcp_bridge/nvim_channel.py` (`NvimChannelManager`):
   hardening for long-running jobs.
 - **Frozen global manifest.** The tool/resource catalog is fetched over the channel
   (`require('mcp_companion.native').manifest()`) from **whichever instance connects
-  first**, then **locked for the life of the bridge process** (`ensure_manifest()`,
+  first**, then **locked for the life of the combiner process** (`ensure_manifest()`,
   single-flight under a lock). No `neovim` tools are advertised until the first editor has
   connected; thereafter the catalog is stable even as instances come and go. Call routing
   remains per-session — only the catalog is global.
@@ -413,11 +413,11 @@ REST + routing (implemented in `server.py`/`__main__.py`):
   a live instance and `neovim` isn't session-disabled; `on_call_tool` intercepts
   `neovim_*`, resolves `session_id -> token -> instance_id`, and routes to
   `NvimChannelManager.call(...)`, returning a clean error if no instance is bound.
-- New dependency: `pynvim` (in `bridge/pyproject.toml`).
+- New dependency: `pynvim` (in `combiner/pyproject.toml`).
 
 **Which editor a call targets.** The catalog is global (once-off frozen manifest), but a
 call must reach a *specific* editor. Every `neovim_*` tool carries an optional
-`nvim_instance` arg (injected by the bridge, stripped before dispatch), plus a
+`nvim_instance` arg (injected by the combiner, stripped before dispatch), plus a
 `neovim_list_instances` discovery tool that returns connected editors with metadata
 (`instance_id`, `cwd`, `name`, `servername`). Target resolution at **call time** (not from
 guessing by instance count):
@@ -429,13 +429,13 @@ guessing by instance count):
    the caller to pass `nvim_instance` and pointing at `neovim_list_instances`.
 
 Tool *listing* is independent of association: once any editor has connected, `neovim_*`
-tools are advertised to every bridge client (ACP-injected or directly configured).
+tools are advertised to every combiner client (ACP-injected or directly configured).
 
 > **Gotcha — two session ids.** The MCP `mcp-session-id` *header* (recorded into
 > `_token_sessions` by `TokenRewriteMiddleware`) is **not** the same value as
 > `context.fastmcp_context.session_id` seen by the tool middleware. So the `session_id ->
 > token` reverse map must be built in `ToolProcessingMiddleware.on_request` keyed by the
-> *context* session id, reading the token from the `X-MCP-Bridge-Session` header.
+> *context* session id, reading the token from the `X-MCP-Combiner-Session` header.
 > `TokenRewriteMiddleware` now injects that header when the token arrives via the URL path
 > (`/mcp/<token>`), so URL-token and header-token clients correlate identically.
 
@@ -443,9 +443,9 @@ tools are advertised to every bridge client (ACP-injected or directly configured
 
 Back-channel registration is implemented in `lua/mcp_companion/native/channel.lua`:
 a unique per-instance id + private `serverstart()` socket, `POST /neovim/instances`
-registration with **bounded retry/backoff** (registration may race the bridge becoming
+registration with **bounded retry/backoff** (registration may race the combiner becoming
 healthy), per-chat `bind(token)`/`unbind(token)`, and `deregister()` on `VimLeave`.
-Wired from `init.lua` (`start()` on `bridge_ready`, `deregister()` on `VimLeavePre`) and
+Wired from `init.lua` (`start()` on `combiner_ready`, `deregister()` on `VimLeavePre`) and
 `cc/init.lua` (`bind` in `_apply_token_filter`, `unbind` in `_cleanup_session_filter`).
 
 - Rewrite `native/init.lua` (currently a stub): an internal tool/resource registry,
@@ -457,15 +457,15 @@ Wired from `init.lua` (`start()` on `bridge_ready`, `deregister()` on `VimLeaveP
 - Private socket lifecycle (`serverstart`/`serverstop`) + registration calls on chat
   open/close and `VimLeave`.
 - `cc/tools.lua`: surface native-server tools to in-process chats by calling `dispatch`
-  directly (alongside bridge tools).
+  directly (alongside combiner tools).
 - `state.lua` already has a `native_servers` slot; populate it so `:MCPStatus` shows the
   `neovim` server like any other.
 
 ## Security considerations
 
 - The dedicated socket lives in a user-only directory; its path is disclosed only to the
-  bridge via registration.
-- The **single dispatch contract** is the real guardrail: the bridge cannot call raw
+  combiner via registration.
+- The **single dispatch contract** is the real guardrail: the combiner cannot call raw
   `vim.api`, only the curated dispatcher, which enforces the registered tool set + tiered
   approval. Residual risk — any *other* local process that learns the socket path could
   use full RPC — is inherent to the standard remote and is documented, not eliminated.
@@ -476,13 +476,13 @@ Wired from `init.lua` (`start()` on `bridge_ready`, `deregister()` on `VimLeaveP
 
 1. **Lua dispatcher + in-process delivery.** Implement `native/init.lua` + the `neovim`
    server + `read`/`navigate`/buffer `write` tools. Wire into CodeCompanion chats. Zero
-   bridge changes — fully testable in-editor.
+   combiner changes — fully testable in-editor.
 2. **Back-channel.** Add pynvim, the `NvimChannelManager`, the per-instance FIFO queue +
    worker, the `/neovim/instances` + `/neovim/bind` routes, the synthetic `neovim` server,
    and `session_id -> token -> instance_id -> socket` routing. Fast-sync path only at this
    step. External ACP/CLI agents can now drive the editor.
 3. **Deferred-notify (async jobs).** Add the `rpcnotify` completion path and the
-   bridge-side `call_id` future map so async work resolves out-of-band without holding the
+   combiner-side `call_id` future map so async work resolves out-of-band without holding the
    queue on a thread. Wire `:MCPStatus` integration + per-chat filtering verification.
 4. **exec tier** (`run_command` async via `jobstart` over the deferred path, `exec_lua`)
    behind explicit opt-in (exposure gated, off by default).
@@ -492,8 +492,8 @@ Wired from `init.lua` (`start()` on `bridge_ready`, `deregister()` on `VimLeaveP
 - **Streaming exec.** The deferred-notify path delivers a single terminal result per
   `call_id`. Long-running/streaming commands that should report incremental output need a
   progress-notification channel (multiple notifications per `call_id`). Deferred.
-- **Bridge-side concurrency cap.** Liveness knob still open: bound in-flight calls
-  *per instance* (Neovim's loop is serial anyway) vs. *globally* on the bridge. Lean
+- **Combiner-side concurrency cap.** Liveness knob still open: bound in-flight calls
+  *per instance* (Neovim's loop is serial anyway) vs. *globally* on the combiner. Lean
   per-instance, but unset until phase 2 measurements.
 - **Multiple instances racing one token.** Tokens are per-chat and minted in one instance,
   so a token maps to exactly one `instance_id`; documented assumption to validate.

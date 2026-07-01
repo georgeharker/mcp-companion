@@ -1,0 +1,29 @@
+name: flakehub
+
+# Publishes the flake to FlakeHub (https://flakehub.com/flake/georgeharker/mcp-companion).
+# Authenticates via GitHub OIDC (no token/secret).
+#
+#   * push a `v*` tag  -> a semver release (same tags that publish to PyPI, release.yml)
+#   * run manually     -> a rolling release from the current branch HEAD
+#                         (Actions -> flakehub -> Run workflow)
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC auth to FlakeHub
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flakehub-push@main
+        with:
+          visibility: public
+          # tag pushes -> semver from the tag; manual runs -> rolling release.
+          rolling: ${{ github.ref_type != 'tag' }}
+          tag: ${{ github.ref_type == 'tag' && github.ref_name || '' }}

@@ -4,7 +4,7 @@
 
 ## Problem
 
-mcp-companion needs to inject a local MCP bridge server into CodeCompanion's ACP
+mcp-companion needs to inject a local MCP combiner server into CodeCompanion's ACP
 sessions so that agents (Copilot, Claude Code, etc.) gain access to additional
 MCP tools. The ACP spec explicitly supports this:
 
@@ -13,7 +13,7 @@ MCP tools. The ACP spec explicitly supports this:
 >
 > — [ACP Session Setup](https://agentclientprotocol.com/protocol/session-setup)
 
-The bridge entry must be added to `adapter_modified.defaults.mcpServers` before
+The combiner entry must be added to `adapter_modified.defaults.mcpServers` before
 `session/new` is sent. The transport type (HTTP vs stdio/mcp-remote) depends on
 the agent's `mcpCapabilities.http` capability, which is only available from
 `_agent_info` after the INITIALIZE RPC completes.
@@ -162,21 +162,21 @@ All ACP adapters ship with `defaults.mcpServers = {}`.
 
 Patches two methods on the `Connection` prototype:
 
-### 1. `connect_and_initialize` — bridge warm-up
+### 1. `connect_and_initialize` — combiner warm-up
 
 ```lua
 Connection.connect_and_initialize = function(self)
-  M._start_bridge_async()  -- non-blocking, kicks off bridge if not running
+  M._start_combiner_async()  -- non-blocking, kicks off combiner if not running
   return original_connect(self)
 end
 ```
 
-### 2. `_establish_session` — bridge injection
+### 2. `_establish_session` — combiner injection
 
 ```lua
 Connection._establish_session = function(self)
-  local bridge_entry = build_bridge_entry(self)
-  if bridge_entry then
+  local combiner_entry = build_combiner_entry(self)
+  if combiner_entry then
     local defaults = self.adapter_modified and self.adapter_modified.defaults
     if defaults then
       defaults.mcpServers = defaults.mcpServers or {}
@@ -186,10 +186,10 @@ Connection._establish_session = function(self)
       -- Idempotency: check if already present
       local already = false
       for _, s in ipairs(defaults.mcpServers) do
-        if s.name == "mcp-bridge" then already = true; break end
+        if s.name == "mcp-combiner" then already = true; break end
       end
       if not already then
-        table.insert(defaults.mcpServers, bridge_entry)
+        table.insert(defaults.mcpServers, combiner_entry)
       end
     end
   end
@@ -197,7 +197,7 @@ Connection._establish_session = function(self)
 end
 ```
 
-### `build_bridge_entry(conn)` — transport selection
+### `build_combiner_entry(conn)` — transport selection
 
 Reads deterministic host/port from config, then checks agent capabilities:
 
@@ -207,9 +207,9 @@ local caps = conn._agent_info
     and conn._agent_info.agentCapabilities.mcpCapabilities
 
 if caps and caps.http then
-  return { type = "http", name = "mcp-bridge", url = bridge_url, headers = {} }
+  return { type = "http", name = "mcp-combiner", url = combiner_url, headers = {} }
 else
-  return { name = "mcp-bridge", command = "npx", args = { "-y", "mcp-remote", bridge_url }, env = {} }
+  return { name = "mcp-combiner", command = "npx", args = { "-y", "mcp-remote", combiner_url }, env = {} }
 end
 ```
 
@@ -278,7 +278,7 @@ Always use stdio/mcp-remote transport, eliminating the need to check `_agent_inf
 -- Could be set declaratively in adapter config:
 defaults = {
   mcpServers = {
-    { name = "mcp-bridge", command = "npx", args = { "-y", "mcp-remote", "http://127.0.0.1:9741/mcp" }, env = {} }
+    { name = "mcp-combiner", command = "npx", args = { "-y", "mcp-remote", "http://127.0.0.1:9741/mcp" }, env = {} }
   }
 }
 ```
@@ -312,7 +312,7 @@ concerns.
 ### Context
 
 I'm building [mcp-companion](https://github.com/georgeharker/mcp-companion), a
-Neovim plugin that runs a local MCP bridge server and injects it into ACP sessions
+Neovim plugin that runs a local MCP combiner server and injects it into ACP sessions
 so that agents like Copilot get access to additional MCP tools.
 
 The ACP spec explicitly supports this pattern — from the
@@ -321,7 +321,7 @@ The ACP spec explicitly supports this pattern — from the
 > Clients **MAY** use this ability to provide tools directly to the underlying
 > language model by including their own MCP server.
 
-The bridge entry needs to be added to `adapter_modified.defaults.mcpServers`
+The combiner entry needs to be added to `adapter_modified.defaults.mcpServers`
 before `session/new` is sent. However, the transport type (HTTP vs stdio/mcp-remote)
 depends on the agent's `mcpCapabilities.http` capability, which is only available
 from `_agent_info` after the INITIALIZE RPC completes.
@@ -348,7 +348,7 @@ _establish_session()
 ### Current workaround
 
 Monkey-patching `Connection._establish_session` on the prototype to inject the
-bridge entry just before the original runs:
+combiner entry just before the original runs:
 
 https://github.com/georgeharker/mcp-companion/blob/main/lua/mcp_companion/cc/init.lua#L249-L312
 

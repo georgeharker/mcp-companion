@@ -1,0 +1,420 @@
+"""sharedserver integration for mcp-combiner.
+
+Provides helpers to start and stop HTTP server processes via the ``sharedserver``
+CLI tool, and to poll a URL until the server is reachable.
+
+sharedserver owns the process lifetime — the combiner only increments/decrements
+the reference count.  Multiple clients (Neovim instances, combiner processes) can
+attach to the same named server concurrently; it stays alive as long as any
+client holds a reference.
+
+Typical flow::
+
+    ss = SharedServerManager(config, sharedserver_bin="sharedserver")
+    await ss.start_all()        # use + health-poll each server with sharedserver config
+    ...
+    await ss.stop_all()         # unuse all servers that were started
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import shutil
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mcp_combiner.config import CombinerConfig, SharedServerConfig
+
+logger = logging.getLogger("mcp-combiner.sharedserver")
+
+
+def _require_binary() -> str:
+    """Return the path to ``sharedserver``, raising if not on PATH."""
+    found = shutil.which("sharedserver")
+    if not found:
+        raise FileNotFoundError(
+            "sharedserver not found on PATH. "
+            "Install it with `cargo install sharedserver` or add it to your PATH."
+        )
+    return found
+
+
+async def _poll_url(url: str, timeout: int) -> bool:
+    """Poll *url* with HTTP GET until a response is received or *timeout* expires.
+
+    Returns ``True`` if the server responded (any HTTP status), ``False`` on timeout.
+    Uses asyncio subprocess to run ``curl --silent --max-time 1`` in a loop so we
+    don't need an additional Python HTTP dependency at this layer.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    interval = 0.5
+
+    while time.monotonic() < deadline:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl",
+                "--silent",
+                "--max-time",
+                "1",
+                "--output",
+                "/dev/null",
+                "--write-out",
+                "%{http_code}",
+                url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2)
+            if proc.returncode == 0 or (stdout and stdout.strip() not in (b"000", b"")):
+                return True
+        except (asyncio.TimeoutError, OSError):
+            pass
+        await asyncio.sleep(interval)
+
+    return False
+
+
+def _build_use_cmd(
+    binary: str,
+    ss: "SharedServerConfig",
+    *,
+    interpolate: bool = True,
+    pid: int | None = None,
+) -> list[str]:
+    """Build the ``sharedserver use`` argv list.
+
+    ``pid`` should be the long-lived process that owns the sharedserver
+    reference (e.g. the combiner process).  sharedserver tracks this PID and
+    decrements the refcount when it exits.  Without an explicit ``--pid`` the
+    tool defaults to the *caller's* PID, which for async subprocess calls is
+    the same as the combiner process — but we pass it explicitly for clarity.
+    """
+    from mcp_combiner.config import _interpolate_dict, _interpolate_list, _interpolate_str
+
+    cmd = [binary, "use", ss.name]
+
+    if ss.grace_period:
+        cmd += ["--grace-period", ss.grace_period]
+
+    # Tie the sharedserver reference to the combiner process explicitly.
+    cmd += ["--pid", str(pid if pid is not None else os.getpid())]
+
+    # Expand env vars in the process environment entries
+    env_dict = _interpolate_dict(ss.env) if interpolate else ss.env
+    for key, value in env_dict.items():
+        cmd += ["--env", f"{key}={value}"]
+
+    # Separator between sharedserver flags and the server command
+    cmd.append("--")
+    cmd.append(_interpolate_str(ss.command) if interpolate else ss.command)
+    cmd += _interpolate_list(ss.args) if interpolate else ss.args
+
+    return cmd
+
+
+class SharedServerManager:
+    """Manages sharedserver lifecycle for all servers in a ``CombinerConfig``.
+
+    Usage::
+
+        mgr = SharedServerManager(config)
+        await mgr.start_all()
+        # ... combiner runs ...
+        await mgr.stop_all()
+    """
+
+    def __init__(
+        self,
+        config: "CombinerConfig",
+    ) -> None:
+        self._config = config
+        self._binary: str | None = None
+        # Track which server names we successfully `use`d so we can `unuse` them.
+        self._active: list[str] = []
+
+    def _get_binary(self) -> str:
+        if self._binary is None:
+            self._binary = _require_binary()
+        return self._binary
+
+    async def start_all(self) -> None:
+        """Launch ``sharedserver use`` for every enabled server concurrently.
+
+        Each server is started in parallel.  The ``sharedserver use`` command
+        itself is quick (just increments a refcount), but the subsequent
+        health-poll can take up to ``health_timeout`` seconds per server.
+        Running them concurrently keeps total wall-clock time close to the
+        single-longest timeout instead of the sum of all timeouts.
+
+        Servers that fail to start or become healthy are logged as warnings —
+        the combiner continues mounting other servers.
+        """
+        servers_with_ss = [
+            name
+            for name in self._config.get_enabled_servers()
+            if self._config.resolve_shared_server(name) is not None
+        ]
+        if servers_with_ss:
+            logger.warning(
+                "Starting sharedserver-managed servers: %s",
+                ", ".join(servers_with_ss),
+            )
+        else:
+            logger.warning("No sharedserver-managed servers configured")
+            return
+
+        tasks = []
+        seen_ss: set[str] = set()
+        for name, srv in self._config.get_enabled_servers().items():
+            ss = self._config.resolve_shared_server(name)
+            if ss is None:
+                continue
+            # Multiple server entries may reference the same sharedServer (e.g.
+            # several `gws` accounts pointing at one workspace-mcp process). Start
+            # that process once — sharedserver refcounts, but we avoid a duplicate
+            # `use` + health-poll per referring entry.
+            if ss.name in seen_ss:
+                continue
+            seen_ss.add(ss.name)
+            tasks.append(self._start_one(name, ss, srv.url))
+
+        # Run all sharedserver starts concurrently.
+        # return_exceptions=True ensures one failure doesn't cancel others.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning("sharedserver start failed: %s", result)
+
+    async def _start_one(
+        self,
+        server_name: str,
+        ss: "SharedServerConfig",
+        url: str | None,
+    ) -> None:
+        try:
+            binary = self._get_binary()
+        except FileNotFoundError as exc:
+            logger.warning("Skipping sharedserver start for '%s': %s", server_name, exc)
+            return
+
+        cmd = _build_use_cmd(binary, ss, pid=os.getpid())
+        logger.warning(
+            "Starting sharedserver '%s' via: %s",
+            ss.name,
+            " ".join(cmd),
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode != 0:
+                logger.warning(
+                    "sharedserver use '%s' exited %d: %s",
+                    ss.name,
+                    proc.returncode,
+                    stderr.decode().strip() if stderr else "",
+                )
+                return
+        except asyncio.TimeoutError:
+            logger.warning("sharedserver use '%s' timed out", ss.name)
+            return
+        except OSError as exc:
+            logger.warning("sharedserver use '%s' failed: %s", ss.name, exc)
+            return
+
+        self._active.append(ss.name)
+        logger.info("sharedserver '%s' started (refcount incremented)", ss.name)
+
+        # Poll for health
+        if url:
+            health_url = url.rstrip("/")
+            logger.info(
+                "Waiting up to %ds for '%s' at %s",
+                ss.health_timeout,
+                server_name,
+                health_url,
+            )
+            ready = await _poll_url(health_url, ss.health_timeout)
+            if ready:
+                logger.info("'%s' is healthy", server_name)
+            else:
+                logger.warning(
+                    "'%s' did not become healthy within %ds — "
+                    "proxy will be mounted but may fail until server is ready",
+                    server_name,
+                    ss.health_timeout,
+                )
+
+    async def ensure_started(self, server_name: str) -> None:
+        """Start (``sharedserver use`` + health-poll) the sharedserver backing
+        *server_name*, if it has one and isn't already started.
+
+        Idempotent: a no-op for non-sharedserver servers or ones already up.
+        Called when a server becomes *enabled* — at boot (``start_all``) or
+        dynamically via ``combiner__enable_server`` — so "enabled" is the single
+        trigger; there is no separate run/lazy control.
+        """
+        ss = self._config.resolve_shared_server(server_name)
+        if ss is None:
+            return  # not a sharedserver-backed server
+        if ss.name in self._active:
+            return  # already started by us
+        srv = self._config.servers.get(server_name)
+        await self._start_one(server_name, ss, srv.url if srv else None)
+
+    async def ensure_stopped(self, server_name: str) -> None:
+        """Drop our reference (``sharedserver unuse``) on *server_name*'s backing
+        sharedserver, if we started it. Idempotent. Called when a server is
+        disabled dynamically via ``combiner__disable_server``."""
+        ss = self._config.resolve_shared_server(server_name)
+        if ss is None or ss.name not in self._active:
+            return
+        try:
+            binary = self._get_binary()
+        except FileNotFoundError:
+            return
+        await self._stop_one(binary, ss.name)
+        self._active.remove(ss.name)
+
+    async def restart(self, server_name: str) -> bool:
+        """Hard-restart the sharedserver backing *server_name*.
+
+        Unlike ``ensure_stopped`` + ``ensure_started`` (which decrement/increment
+        a refcount and therefore re-attach to the *same* still-running process
+        within its grace period), this stops the backing process via
+        ``sharedserver admin stop --force`` (graceful SIGTERM, then SIGKILL
+        fallback) — clearing all sharedserver state — then starts a fresh one
+        with ``use`` + health-poll.
+
+        Returns ``True`` if a sharedserver-backed process was restarted, ``False``
+        if *server_name* has no sharedserver (caller handles the plain case).
+        """
+        ss = self._config.resolve_shared_server(server_name)
+        if ss is None:
+            return False
+        try:
+            binary = self._get_binary()
+        except FileNotFoundError as exc:
+            logger.warning("Cannot restart '%s': %s", server_name, exc)
+            return False
+
+        # Stop the backing process (graceful, force fallback) and clear state.
+        await self._stop_force(binary, ss.name)
+        if ss.name in self._active:
+            self._active.remove(ss.name)
+
+        # Respawn from scratch (use + health-poll re-establishes our reference).
+        srv = self._config.servers.get(server_name)
+        await self._start_one(server_name, ss, srv.url if srv else None)
+        return True
+
+    async def _stop_force(self, binary: str, name: str) -> None:
+        """``sharedserver admin stop --force`` — graceful, then SIGKILL fallback.
+
+        A non-zero exit (e.g. "server is not running") is logged and ignored:
+        the goal is simply to ensure the old process is gone before respawning.
+        """
+        cmd = [binary, "admin", "stop", "--force", name]
+        logger.warning("sharedserver admin stop --force '%s'", name)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode != 0:
+                logger.info(
+                    "sharedserver admin stop '%s' exited %s (continuing): %s",
+                    name,
+                    proc.returncode,
+                    stderr.decode().strip() if stderr else "",
+                )
+        except (asyncio.TimeoutError, OSError) as exc:
+            logger.warning("sharedserver admin stop '%s' failed: %s", name, exc)
+
+    async def stop_all(self) -> None:
+        """Call ``sharedserver unuse`` (decref) for every server we started.
+
+        Runs all decrefs **concurrently**. This is invoked from the ASGI lifespan
+        shutdown when the combiner is itself being stopped by sharedserver, which
+        sends SIGTERM and escalates to SIGKILL after only ~5s. A sequential loop
+        (N servers × the per-call timeout) can overrun that window and get
+        SIGKILLed mid-cleanup, leaving the remaining downstreams orphaned — so we
+        fan out and bound each call short (see ``_stop_one``).
+        """
+        if not self._active:
+            return
+        try:
+            binary = self._get_binary()
+        except FileNotFoundError:
+            return
+
+        await asyncio.gather(
+            *(self._stop_one(binary, name) for name in list(self._active)),
+            return_exceptions=True,
+        )
+        self._active.clear()
+
+    async def _stop_one(self, binary: str, name: str) -> None:
+        cmd = [binary, "unuse", name]
+        logger.info("sharedserver unuse '%s'", name)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            # Short: `unuse` is just a refcount decrement and should return fast.
+            # Bounded so a concurrent stop_all() completes well inside the ~5s
+            # SIGTERM→SIGKILL window sharedserver gives us on shutdown.
+            await asyncio.wait_for(proc.communicate(), timeout=2)
+        except (asyncio.TimeoutError, OSError) as exc:
+            logger.warning("sharedserver unuse '%s' failed: %s", name, exc)
+
+
+# Module-level manager reference for cleanup
+_manager: SharedServerManager | None = None
+
+
+def register_for_cleanup(manager: SharedServerManager) -> None:
+    """Register a SharedServerManager for cleanup on process exit."""
+    global _manager
+    _manager = manager
+
+
+def cleanup() -> None:
+    """Cleanup sharedserver references on exit.
+
+    Safe to call from signal handlers or atexit. Runs stop_all() to
+    decrement reference counts for all started servers.
+    """
+    global _manager
+    if _manager is None:
+        return
+
+    try:
+        # Run stop_all in a new event loop if needed
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Schedule cleanup in the running loop
+            asyncio.ensure_future(_manager.stop_all())
+        else:
+            # Create new loop for cleanup
+            asyncio.run(_manager.stop_all())
+    except Exception as e:
+        logger.warning("Failed to cleanup sharedservers: %s", e)
+    finally:
+        _manager = None

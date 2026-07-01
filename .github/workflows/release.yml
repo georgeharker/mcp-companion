@@ -1,0 +1,59 @@
+name: Release (mcp-combiner)
+
+# Publishes the `mcp-combiner` package (in combiner/) to PyPI when a version tag is pushed:
+#   git tag v0.6.0 && git push origin v0.6.0
+#
+# Note: this is a monorepo and docs-on-tag.yml also fires on `v*` (it refreshes docs and is
+# inert unless DOCS_SSH_DEST is configured) — both running on a release tag is intended.
+#
+# Auth — pick one in the publish job below:
+#   A) Trusted Publishing (OIDC) — DEFAULT, no secrets. PyPI setup at
+#      https://pypi.org/manage/account/publishing/ (pending publisher):
+#         PyPI project:  mcp-combiner
+#         owner/repo:    georgeharker/mcp-companion
+#         workflow:      release.yml
+#         environment:   pypi
+#   B) API token — set repo secret PYPI_API_TOKEN and uncomment the `password:` line.
+#
+# Also create a GitHub environment named "pypi" (Settings → Environments).
+
+on:
+  push:
+    tags: ["v*"]
+
+defaults:
+  run:
+    working-directory: combiner
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Build sdist + wheel
+        run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: combiner/dist/   # path is relative to the repo root, not working-directory
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # required for Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Option A (trusted publishing): leave `password` unset — OIDC is used automatically.
+          # Option B (API token): uncomment and set the PYPI_API_TOKEN secret.
+          # password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: true
