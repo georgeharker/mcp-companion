@@ -57,14 +57,17 @@ if ok_native then
         err("is_native_server", "neovim not registered")
     end
 
-    -- issue #7 regression: every manifest tool schema must JSON-encode as an
-    -- object, never `[]` (an empty Lua table). This is what strict adapters
-    -- (Copilot) reject. The combiner reads exactly this manifest.
+    -- issue #7 regression: every manifest tool schema (input AND output) must
+    -- JSON-encode as an object, never `[]` (an empty Lua table). This is what
+    -- strict adapters (Copilot) reject. The combiner reads exactly this manifest.
     local bad = {}
     for _, srv in pairs(native.manifest()) do
         for _, t in ipairs(srv.tools or {}) do
             if vim.json.encode(t.inputSchema):find("%[%]") then
-                table.insert(bad, t.name)
+                table.insert(bad, t.name .. ".inputSchema")
+            end
+            if t.outputSchema and vim.json.encode(t.outputSchema):find("%[%]") then
+                table.insert(bad, t.name .. ".outputSchema")
             end
         end
     end
@@ -123,12 +126,18 @@ end
 section("write tier")
 
 if ok_native then
-    local sr = native.dispatch("set_buffer_lines", { buffer = buf, start = 2, ["end"] = 2, lines = { "BETA" } })
+    local sr = native.dispatch("set_buffer_lines", { buffer = buf, start_line = 2, end_line = 2, lines = { "BETA" } })
     local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
     if not sr.isError and lines[2] == "BETA" then
         ok("set_buffer_lines replaced line 2")
     else
         err("set_buffer_lines", vim.inspect(lines))
+    end
+    -- structured output: set_buffer_lines returns structuredContent + text fallback.
+    if type(sr.structuredContent) == "table" and sr.structuredContent.buffer == buf then
+        ok("set_buffer_lines returns structuredContent")
+    else
+        err("set_buffer_lines structuredContent", vim.inspect(sr.structuredContent))
     end
 
     local diff = "<<<<<<< SEARCH\ngamma\n=======\nGAMMA\n>>>>>>> REPLACE"

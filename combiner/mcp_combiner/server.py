@@ -538,6 +538,8 @@ def _normalize_tool_schema(tool: Tool, fixes: frozenset[str]) -> Tool:
         name=str(tool.name) if tool.name else "unknown",
         description=str(tool.description) if tool.description else "",
         parameters=params,
+        # Preserve the declared output schema — a params fix must not drop it.
+        output_schema=getattr(tool, "output_schema", None),
         annotations=tool.annotations,
     )
 
@@ -973,6 +975,14 @@ class ToolProcessingMiddleware(Middleware):
         except (ValueError, RecursionError, TypeError, AttributeError):
             clean_annotations = None
 
+        # Preserve the output schema (JSON-cleaned); if it's the thing that can't
+        # serialize, the verify+fallback below drops it along with params.
+        clean_output: dict[str, Any] | None
+        try:
+            clean_output = _safe_json_clone(getattr(tool, "output_schema", None))
+        except (ValueError, RecursionError, TypeError):
+            clean_output = None
+
         # Build a fresh FunctionTool with no circular refs
         dummy_fn = lambda: None  # noqa: E731 -- never called, just for FunctionTool ctor
         new_tool = FunctionTool(
@@ -980,6 +990,7 @@ class ToolProcessingMiddleware(Middleware):
             name=str(tool.name) if tool.name else "unknown",
             description=str(tool.description) if tool.description else "",
             parameters=clean_params,
+            output_schema=clean_output,
             annotations=mt.ToolAnnotations(**clean_annotations) if clean_annotations else None,
         )
 

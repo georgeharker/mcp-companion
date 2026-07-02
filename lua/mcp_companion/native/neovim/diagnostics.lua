@@ -12,6 +12,28 @@ local SEVERITY = {
     [vim.diagnostic.severity.HINT] = "HINT",
 }
 
+-- Shared output sub-schema for a single diagnostic entry (see to_entry).
+local DIAG_ENTRY = {
+    type = "object",
+    properties = {
+        severity = { type = "string", description = "ERROR | WARN | INFO | HINT" },
+        range = {
+            type = "object",
+            properties = {
+                start_line = { type = "integer", description = "1-based" },
+                start_col = { type = "integer" },
+                end_line = { type = "integer", description = "1-based" },
+                end_col = { type = "integer" },
+            },
+            required = { "start_line", "start_col", "end_line", "end_col" },
+        },
+        code = { type = { "string", "integer", "null" } },
+        source = { type = { "string", "null" } },
+        message = { type = "string" },
+    },
+    required = { "severity", "range", "message" },
+}
+
 --- Convert a vim.Diagnostic into a structured entry.
 --- @param d vim.Diagnostic
 --- @return table
@@ -35,14 +57,34 @@ M.tools = {
         inputSchema = {
             type = "object",
             properties = {
-                scope = { type = "string", enum = { "buffer", "workspace" }, description = "default: buffer" },
+                scope = {
+                    type = "string",
+                    enum = { "buffer", "workspace" },
+                    default = "buffer",
+                },
                 buffer = { type = "integer", description = "Buffer id when scope=buffer (default: active)" },
             },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                scope = { type = "string", enum = { "buffer", "workspace" } },
+                buffer = { type = "integer", description = "present when scope=buffer" },
+                diagnostics = {
+                    description = "array of entries (scope=buffer), or a map of filename → entries (scope=workspace)",
+                    oneOf = {
+                        { type = "array", items = DIAG_ENTRY },
+                        { type = "object", additionalProperties = { type = "array", items = DIAG_ENTRY } },
+                    },
+                },
+            },
+            required = { "scope", "diagnostics" },
         },
         handler = function(args, ctx)
             local scope = args.scope or "buffer"
             if scope == "workspace" then
-                local grouped = {}
+                -- vim.empty_dict(): keep an empty filename→entries map encoded as {} not [].
+                local grouped = vim.empty_dict()
                 for _, d in ipairs(vim.diagnostic.get(nil)) do
                     local name = vim.api.nvim_buf_get_name(d.bufnr)
                     grouped[name] = grouped[name] or {}
@@ -66,9 +108,23 @@ M.tools = {
         inputSchema = {
             type = "object",
             properties = {
-                direction = { type = "string", enum = { "next", "prev", "first" }, description = "default: next" },
+                direction = {
+                    type = "string",
+                    enum = { "next", "prev", "first" },
+                    default = "next",
+                },
                 severity = { type = "string", enum = { "ERROR", "WARN", "INFO", "HINT" } },
             },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                direction = { type = "string", enum = { "next", "prev", "first" } },
+                buffer = { type = "integer" },
+                line = { type = "integer", description = "1-based" },
+                col = { type = "integer", description = "0-based" },
+            },
+            required = { "direction", "buffer", "line", "col" },
         },
         handler = function(args, _ctx)
             -- Jump in the user's code window, not the focused window (often a chat).

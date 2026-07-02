@@ -12,15 +12,24 @@ function M.text(text)
     return { content = { { type = "text", text = text or "" } } }
 end
 
---- Wrap a Lua value as a JSON text result (structured output).
---- @param value any
+--- Wrap a Lua value as a structured tool result.
+---
+--- Emits BOTH a text content block (the JSON-encoded value — the universal
+--- fallback for clients that ignore structured output) AND `structuredContent`
+--- (the value itself), which pairs with the tool's declared `outputSchema` so a
+--- capable client/LLM gets a typed result instead of parsing prose. `value`
+--- must be a JSON object (MCP requires `structuredContent` to be an object).
+--- @param value table
 --- @return table
 function M.json(value)
     local ok, encoded = pcall(vim.json.encode, value)
     if not ok then
         return M.err("failed to encode result: " .. tostring(encoded))
     end
-    return M.text(encoded)
+    return {
+        content = { { type = "text", text = encoded } },
+        structuredContent = value,
+    }
 end
 
 --- Build an MCP error result (isError = true).

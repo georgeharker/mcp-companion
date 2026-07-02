@@ -134,6 +134,9 @@ def _build_nvim_tools(manifest: dict[str, Any]) -> list[Tool]:
                 name=_NVIM_PREFIX + str(tool["name"]),
                 description=str(tool.get("description") or ""),
                 parameters=_inject_instance_arg(params),
+                # Advertised so a capable client gets a typed result; the handler
+                # returns matching structuredContent. None for text-only tools.
+                output_schema=tool.get("outputSchema"),
             )
         )
 
@@ -145,6 +148,30 @@ def _build_nvim_tools(manifest: dict[str, Any]) -> list[Tool]:
             description="List connected Neovim instances (instance_id + metadata such as "
             "cwd/name) so you can pass one as nvim_instance to other neovim_* tools.",
             parameters={"type": "object", "properties": {}},
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "instances": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "instance_id": {"type": "string"},
+                                "cwd": {"type": "string"},
+                                "name": {"type": "string"},
+                                "pid": {"type": "integer"},
+                                "servername": {"type": "string"},
+                            },
+                            "required": ["instance_id"],
+                        },
+                    },
+                    "bound": {
+                        "type": ["string", "null"],
+                        "description": "instance_id bound to the calling chat, or null",
+                    },
+                },
+                "required": ["instances", "bound"],
+            },
         )
     )
     return out
@@ -169,7 +196,11 @@ def _dispatch_result_to_tool_result(result: Any, tool_name: str) -> ToolResult:
         detail = texts[0] if texts else "unknown error"
         raise ToolError(f"{tool_name}: {detail}")
 
-    return ToolResult(content=blocks)
+    # Forward structuredContent (paired with the tool's outputSchema) when the
+    # handler provided it; the text block remains the fallback for clients that
+    # don't consume structured output.
+    structured = result.get("structuredContent") if isinstance(result, dict) else None
+    return ToolResult(content=blocks, structured_content=structured)
 
 
 async def append_nvim_tools(
@@ -226,18 +257,13 @@ async def call_nvim_tool(
 
     # Discovery tool: enumerate connected editors (no routing needed).
     if local_name == "list_instances":
+        payload = {
+            "instances": channel.instances(),
+            "bound": _instance_for_session(sid),
+        }
         return ToolResult(
-            content=[
-                mt.TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "instances": channel.instances(),
-                            "bound": _instance_for_session(sid),
-                        }
-                    ),
-                )
-            ]
+            content=[mt.TextContent(type="text", text=json.dumps(payload))],
+            structured_content=payload,
         )
 
     # Resolve the target editor. The default comes from how THIS connection was

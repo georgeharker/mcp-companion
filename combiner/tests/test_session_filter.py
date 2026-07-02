@@ -701,6 +701,77 @@ class TestOnListToolsIntegration:
         assert isinstance(params["properties"], dict)
 
 
+class TestOutputSchemaPlumbing:
+    """outputSchema is advertised end-to-end, structuredContent is forwarded, and
+    a params fix must not drop the declared output schema."""
+
+    @staticmethod
+    def _out():
+        return {
+            "type": "object",
+            "properties": {"buffer": {"type": "integer"}},
+            "required": ["buffer"],
+        }
+
+    def test_build_nvim_tools_carries_output_schema(self):
+        from mcp_combiner.nvim_proxy import _build_nvim_tools
+
+        manifest = {
+            "neovim": {
+                "tools": [
+                    {
+                        "name": "get_cursor",
+                        "inputSchema": {"type": "object", "properties": {}},
+                        "outputSchema": self._out(),
+                    },
+                    {"name": "read_buffer", "inputSchema": {"type": "object", "properties": {}}},
+                ]
+            }
+        }
+        by = {str(t.name): t for t in _build_nvim_tools(manifest)}
+        assert by["neovim_get_cursor"].output_schema == self._out()
+        assert by["neovim_read_buffer"].output_schema is None  # text-only tool
+
+    def test_dispatch_forwards_structured_content(self):
+        from mcp_combiner.nvim_proxy import _dispatch_result_to_tool_result
+
+        res = _dispatch_result_to_tool_result(
+            {
+                "content": [{"type": "text", "text": '{"buffer":3}'}],
+                "structuredContent": {"buffer": 3},
+            },
+            "neovim_get_cursor",
+        )
+        assert res.structured_content == {"buffer": 3}
+
+    def test_dispatch_text_only_has_no_structured(self):
+        from mcp_combiner.nvim_proxy import _dispatch_result_to_tool_result
+
+        res = _dispatch_result_to_tool_result(
+            {"content": [{"type": "text", "text": "hi"}]}, "neovim_x"
+        )
+        assert res.structured_content is None
+
+    def test_normalize_preserves_output_schema_on_rebuild(self):
+        """A schema_fix that rebuilds the tool must keep its output_schema."""
+        from fastmcp.tools.function_tool import FunctionTool
+
+        import mcp_combiner.server as srv
+
+        # Missing `properties` → empty_object fix changes params → tool is rebuilt.
+        t = FunctionTool(
+            fn=lambda: None,
+            name="neovim_x",
+            description="",
+            parameters={"type": "object"},
+            output_schema=self._out(),
+        )
+        fixed = srv._normalize_tool_schema(t, frozenset({"empty_object"}))
+        assert fixed is not t  # actually rebuilt (params changed)
+        assert fixed.parameters.get("properties") == {}  # fix applied
+        assert fixed.output_schema == self._out()  # ...and output schema survived
+
+
 # ── _pending_token_filters dict ────────────────────────────────────
 
 

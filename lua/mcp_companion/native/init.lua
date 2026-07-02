@@ -70,6 +70,10 @@ local function _publish()
                 name = t.name,
                 description = t.description,
                 inputSchema = schema.normalize(t.inputSchema),
+                -- outputSchema (when declared) is authored correct + non-empty, so it
+                -- is forwarded raw; schema.normalize is input-only and would mangle
+                -- its union/oneOf forms.
+                outputSchema = t.outputSchema,
                 tier = t.tier,
                 _display = t.name,
                 _namespaced = def.name .. "_" .. t.name,
@@ -191,6 +195,9 @@ function M.manifest()
                 name = t.name,
                 description = t.description,
                 inputSchema = schema.normalize(t.inputSchema),
+                -- Forwarded raw (authored correct + non-empty); schema.normalize is
+                -- input-only and would mangle union/oneOf output forms.
+                outputSchema = t.outputSchema,
                 tier = t.tier,
             })
         end
