@@ -25,9 +25,14 @@ def register_meta_tools(
     def combiner__status() -> dict[str, ServerStatusInfo]:
         """Get status of all configured MCP servers.
 
-        Returns a dict of server names to their configuration and status.
+        Returns a dict of server names to their configuration and runtime
+        ``state`` (ready / connected / disconnected / auth_failed / disabled) —
+        the same lifecycle state the Neovim MCPStatus panel shows, via the
+        shared status builder.
         """
-        return {name: config.get_server_status(name) for name in config.servers}
+        from mcp_combiner.server import build_server_status
+
+        return {name: build_server_status(config, conn_manager, name) for name in config.servers}
 
     @combiner.tool()
     async def combiner__enable_server(server_name: str) -> str:
@@ -273,7 +278,7 @@ def register_meta_tools(
         #    dead proxy: ConnectionError → RetryMiddleware retries → "hanging".
         #    So we clear our local cache but defer the tools/list_changed
         #    notification to the reconnect monitor, which fires it via
-        #    on_connected once the upstream is genuinely live.
+        #    on_tools_ready once the upstream's tools are genuinely listable.
         http = conn_manager.is_http_server(srv)
         connected = (not http) or conn_manager.is_connected(server_name)
         if connected:

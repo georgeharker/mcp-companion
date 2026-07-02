@@ -865,14 +865,43 @@ function Client:_update_server_state()
         table.insert(servers, info)
     end
 
-    -- Merge disabled servers from health data (they have no tools mounted)
+    -- Merge per-server lifecycle state from /health. The combiner reports a
+    -- `state` field (ready / connected / disconnected / auth_failed / disabled)
+    -- that is authoritative for the status indicator — it decouples the display
+    -- from the volatile "does this server have tools right now" heuristic, so a
+    -- server warming up reads amber (connecting), a genuine drop reads
+    -- grey/red, and only a tools-listable server reads green.
     local health = self._server_health or {}
+
+    -- Map the combiner lifecycle `state` to the UI status vocabulary. Returns
+    -- nil when there's no usable state (older combiner) so the caller keeps its
+    -- own default rather than forcing a wrong value.
+    local function ui_status(info)
+        local st = info and info.state
+        if st == "ready" then
+            return "connected" -- green: tools listable
+        elseif st == "connected" then
+            return "connecting" -- amber: session up, tools still warming
+        elseif st == "auth_failed" then
+            return "error" -- red: needs combiner__enable_server
+        elseif st == "disabled" then
+            return "disabled"
+        elseif st == "disconnected" then
+            return "disconnected"
+        end
+        -- No lifecycle state (older combiner): fall back to the disabled flag.
+        if info and info.disabled then
+            return "disabled"
+        end
+        return nil
+    end
+
     for name, info in pairs(health) do
         if not server_map[name] then
-            -- Server exists in config but has no tools (disabled or disconnected)
+            -- Server exists in config but contributed no tools this fetch.
             table.insert(servers, {
                 name = name,
-                status = info.disabled and "disabled" or "disconnected",
+                status = ui_status(info) or "disconnected",
                 disabled = info.disabled or false,
                 tools = {},
                 resources = {},
@@ -881,12 +910,15 @@ function Client:_update_server_state()
             })
         end
     end
-    -- Mark enabled/disabled status on existing servers from health data
+    -- Overlay lifecycle state on servers built from the tool list — the health
+    -- `state` overrides the optimistic "connected" set during tool grouping.
     for _, srv in ipairs(servers) do
-        if health[srv.name] then
-            srv.disabled = health[srv.name].disabled or false
-            if srv.disabled then
-                srv.status = "disabled"
+        local info = health[srv.name]
+        if info then
+            srv.disabled = info.disabled or false
+            local ui = ui_status(info)
+            if ui then
+                srv.status = ui
             end
         else
             srv.disabled = false

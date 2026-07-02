@@ -798,6 +798,22 @@ and tool/resource/prompt counts. Servers can be expanded/collapsed, and a log
 view is available. `:MCPRestart` restarts the combiner. `:MCPLog` opens the log
 file.
 
+Each server shows a lifecycle state reported by the combiner (also returned by
+the `combiner__status` meta-tool, so the UI and the agent never disagree):
+
+| State | Indicator | Meaning |
+|---|---|---|
+| **connected** | green | Tools are listable and callable (fully ready). |
+| **connecting** | amber | Session established, tool set still warming up (common for OAuth servers just after connect). |
+| **disconnected** | grey/red | Down, reconnecting, or a recent call hit a dead transport / crashed subprocess. |
+| **error** | red | Authentication failed — re-enable with `combiner__enable_server` (or `:MCPToggleServer`). |
+| **disabled** | dim | Turned off in config or for this session. |
+
+The state is decoupled from the volatile "does this server return tools right
+now" heuristic: a server that is only transiently absent (mid-reconnect, a quick
+restart) keeps its last-known tools for a short grace window rather than
+flickering out of the list.
+
 #### Meta-tools
 
 The combiner exposes management tools that the LLM can call:
@@ -974,7 +990,9 @@ require("mcp_companion").setup({
           level = "info",               -- "trace" | "debug" | "info" | "warn" | "error"
           file = true,                  -- true = default path, string = explicit path, false = disabled
         },
-        token_in_url = false,           -- embed session token in URL path; see Troubleshooting below
+        token_in_url = nil,             -- nil (default) = auto: ON for ACP agents, OFF for the HTTP-adapter
+                                        --   client; true = always embed token in URL; false = header-only.
+                                        --   See Troubleshooting below.
         -- Tri-state control of the combiner's JSON-schema (re)validation of proxied tool calls
         -- (the upstream server already validates). nil = leave combiner default; false = force off;
         -- true = force on. The meaningful win is output_validation = false, which removes the
@@ -1398,25 +1416,33 @@ The combiner aggregates N MCP servers through a single HTTP endpoint. A
 
 ### ACP agent cannot call MCP tools (per-chat session not established)
 
-Per-chat sessions rely on the `X-MCP-Combiner-Session` header to map a token to
-an MCP session on the combiner. The ACP spec requires HTTP MCP transports to
-forward custom headers, but some agent SDKs may strip them.
+Per-chat sessions map a token to an MCP session on the combiner via the
+`X-MCP-Combiner-Session` header. The ACP spec requires HTTP MCP transports to
+forward custom headers, but several agents (e.g. Copilot CLI) strip them — so
+header-only correlation silently fails and the injected combiner tools never
+surface in the chat.
 
-**Symptom:** Tools fail or the combiner logs show no `Token mapped` entry for
-the agent's session.
+Because of this, **`token_in_url` defaults to auto: for ACP agents the token is
+embedded in the URL path (`/mcp/<token>`) as well as the header**, which works
+regardless of header forwarding. You normally do not need to configure anything.
 
-**Fix:** Enable the URL-path fallback so the token is embedded in the URL
-itself:
+**Symptom (should be rare now):** Tools fail or the combiner logs show no
+`Token mapped` entry, and every request logs `acp-token-hdr=-`.
+
+**Opt out** (force header-only, cleaner URLs — only if your agent is known to
+forward the header):
 
 ```lua
 combiner = {
-    token_in_url = true,
+    token_in_url = false,
 }
 ```
 
-If you need this workaround, please open an issue at
-<https://github.com/georgeharker/mcp-companion/issues> with the name and version of
-the ACP agent so we can track which SDKs need it.
+Setting `token_in_url = true` forces the URL token everywhere (including the
+HTTP-adapter client), i.e. belt-and-braces. If an ACP agent still fails to see
+tools with the auto default, please open an issue at
+<https://github.com/georgeharker/mcp-companion/issues> with the agent name and
+version.
 
 ---
 

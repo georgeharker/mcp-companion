@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp>=3.0,<4",
+    "fastmcp>=3.4.1,<4",
     "pynvim>=0.6.0",
 ]
 

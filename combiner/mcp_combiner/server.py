@@ -63,6 +63,31 @@ UPSTREAM_TOOL_LIST_TIMEOUT = 5.0  # seconds
 _tool_cache: list[Tool] | None = None
 _tool_cache_time: float = 0
 
+# Per-server "last-known-good" tool slices, keyed by server name, plus the
+# wall-clock time each slice was last seen live. These let a server's tools
+# survive a *transient* upstream drop (health-check reconnect, a dev restart)
+# instead of vanishing from tools/list the instant it goes down.
+#
+# Why this exists: the tool set a client sees is derived, with no hysteresis,
+# from whichever servers return tools in the current fetch. Because any one
+# server's reconnect invalidates the whole cache and forces a refetch, a second
+# server that happens to be mid-reconnect at that moment contributes zero tools
+# and silently drops out — even though nothing changed for it (cross-server
+# contamination). Re-injecting its last-known slice within a short grace window
+# breaks that coupling and stops the green/red flapping.
+#
+# Slices are only re-served for servers that are configured, not disabled, and
+# not auth-failed — a genuinely gone server (disabled/removed/auth-failed) is
+# dropped and evicted, so we never advertise tools that can't be called.
+_server_tool_cache: dict[str, list[Tool]] = {}
+_server_tool_seen: dict[str, float] = {}
+
+# How long a reconnecting server's last-known tools stay advertised after it
+# stops appearing in fresh fetches. Long enough to ride out health-check
+# reconnects and quick dev restarts; short enough that a truly-wedged server's
+# tools eventually disappear rather than lingering forever.
+STALE_TOOL_GRACE = 90.0  # seconds
+
 # --- Session registry for ToolListChanged notifications ---
 # Weak references to all active ServerSessions connected to this combiner.
 # Populated by ToolProcessingMiddleware on each request; entries are
@@ -181,6 +206,60 @@ def _find_server_for_tool(tool_name: str) -> tuple[str | None, str]:
     return None, tool_name
 
 
+def build_server_status(
+    config: CombinerConfig,
+    conn_manager: ConnectionManager | None,
+    name: str,
+) -> ServerStatusInfo:
+    """Single source of truth for a server's status snapshot + lifecycle state.
+
+    Used by BOTH the ``/health`` endpoint (→ MCPStatus in Neovim) and the
+    ``combiner__status`` meta-tool (→ self-reporting to the agent), so the two
+    never diverge. Config fields come from ``CombinerConfig``; the runtime
+    ``state`` is overlaid from the ``ConnectionManager`` for HTTP servers, or
+    inferred for stdio/local servers (mounted ⇒ available ⇒ ``ready``).
+    """
+    info = config.get_server_status(name)
+    srv = config.servers[name]
+    failed = name in _failed_servers
+    if srv.disabled:
+        state = "disabled"
+    elif conn_manager is not None and conn_manager.has_connection(name):
+        state = conn_manager.lifecycle_state(name)
+        # A recorded call failure (transport/process death) overrides an
+        # optimistic connection-derived "ready"/"connected".
+        if failed and state in ("ready", "connected"):
+            state = "disconnected"
+    elif failed:
+        # stdio / non-connection-managed server whose last call failed — its
+        # subprocess has crashed. No connection lifecycle tracks this, so the
+        # failure mark is the down signal until a successful call clears it.
+        state = "disconnected"
+    else:
+        # stdio / non-connection-managed server: no connect lifecycle — once
+        # mounted its tools are served directly, so treat it as ready.
+        state = "ready"
+    return info.model_copy(update={"state": state})
+
+
+def _is_transport_dead(exc: BaseException) -> bool:
+    """True if *exc* signals the upstream process/transport is gone.
+
+    Distinguishes a dead server (crashed stdio subprocess, broken pipe, closed
+    stream, dropped connection) from an ordinary tool-level error. A dead
+    transport marks the server down in ``_failed_servers``; a tool error does
+    not. Matches anyio's stream-closed exceptions by name to avoid importing it.
+    """
+    if isinstance(exc, (ConnectionError, BrokenPipeError, TimeoutError, EOFError, OSError)):
+        return True
+    return type(exc).__name__ in (
+        "ClosedResourceError",
+        "BrokenResourceError",
+        "EndOfStream",
+        "ProcessLookupError",
+    )
+
+
 def _filter_tools(tools: list[Tool]) -> list[Tool]:
     """Filter tools based on server-specific tool_filter patterns."""
     if _combiner_config is None:
@@ -218,7 +297,7 @@ def clear_tool_cache() -> None:
     *not* sending ``tools/list_changed`` keeps clients from re-fetching and then
     calling into a proxy whose connection is still down (which would surface as
     retries/"hanging"). The reconnect monitor fires the notification via
-    ``on_connected`` once the upstream is actually live.
+    ``on_tools_ready`` once the upstream's tools are actually listable.
     """
     global _tool_cache, _tool_cache_time
     _tool_cache = None
@@ -229,6 +308,74 @@ def clear_tool_cache() -> None:
 
     fastvalidate.clear_cache()
     logger.info("Tool cache cleared")
+
+
+def _partition_by_server(tools: list[Tool]) -> tuple[dict[str, list[Tool]], list[Tool]]:
+    """Split *tools* into per-server slices and a "local" bucket.
+
+    The local bucket holds tools with no server prefix — the combiner's own
+    meta-tools and the virtual ``neovim_*`` tools — which are always fresh and
+    never subject to stale re-injection.
+    """
+    per: dict[str, list[Tool]] = {}
+    local: list[Tool] = []
+    for t in tools:
+        server, _ = _find_server_for_tool(str(t.name) if t.name else "")
+        if server is None:
+            local.append(t)
+        else:
+            per.setdefault(server, []).append(t)
+    return per, local
+
+
+def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
+    """Re-inject last-known-good tools for servers that are only transiently absent.
+
+    Refreshes the per-server slice cache for every server present in *fresh*,
+    then appends the cached slice for any *known* server that dropped out of
+    this fetch while merely reconnecting — within ``STALE_TOOL_GRACE``. Servers
+    that are removed from config, disabled, auth-failed, or past the grace
+    window are dropped and evicted, so we never advertise uncallable tools.
+
+    This is the hysteresis that stops one server's reconnect (which clears the
+    whole cache) from blanking another server that happens to be mid-reconnect.
+    """
+    per_fresh, _local = _partition_by_server(fresh)
+
+    # Every server that returned tools this fetch is live: refresh its slice.
+    for server, slice_ in per_fresh.items():
+        _server_tool_cache[server] = slice_
+        _server_tool_seen[server] = now
+
+    result = list(fresh)
+    if _combiner_config is None:
+        return result
+
+    present = set(per_fresh)
+    for server in list(_server_tool_cache):
+        if server in present:
+            continue
+        srv = _combiner_config.servers.get(server)
+        auth_failed = _conn_manager.is_auth_failed(server) if _conn_manager else False
+        age = now - _server_tool_seen.get(server, 0.0)
+        eligible = (
+            srv is not None and not srv.disabled and not auth_failed and age < STALE_TOOL_GRACE
+        )
+        if eligible:
+            stale = _server_tool_cache[server]
+            result.extend(stale)
+            logger.info(
+                "tools/list: server '%s' absent (reconnecting) — serving %d "
+                "last-known-good tool(s), %.0fs stale",
+                server,
+                len(stale),
+                age,
+            )
+        else:
+            # Removed, disabled, auth-failed, or grace expired — let it drop.
+            _server_tool_cache.pop(server, None)
+            _server_tool_seen.pop(server, None)
+    return result
 
 
 def invalidate_tool_cache() -> None:
@@ -243,7 +390,7 @@ def invalidate_tool_cache() -> None:
 
     # Fire-and-forget notification to all connected sessions.
     # We schedule this as a task because invalidate_tool_cache() is called
-    # from sync contexts (e.g. ConnectionManager.on_connected callback).
+    # from sync contexts (e.g. ConnectionManager.on_tools_ready callback).
     # The task is stored in _notification_tasks to prevent GC before completion.
     try:
         loop = asyncio.get_running_loop()
@@ -496,7 +643,12 @@ class ToolProcessingMiddleware(Middleware):
             logger.debug("tools/list: joining in-flight fetch")
             return await fut
 
-        logger.warning("tools/list: CACHE MISS - fetching fresh (cache_age=%.1fs)", cache_age)
+        if _tool_cache is None:
+            # No prior cache (first fetch, or just invalidated). cache_age would
+            # be a meaningless now-minus-epoch value here, so don't log it.
+            logger.warning("tools/list: CACHE MISS - fetching fresh (no prior cache)")
+        else:
+            logger.warning("tools/list: CACHE MISS - fetching fresh (cache_age=%.1fs)", cache_age)
         try:
             tools = await self._do_fetch(context, call_next)
             fut.set_result(tools)
@@ -526,13 +678,32 @@ class ToolProcessingMiddleware(Middleware):
             return []
 
         sanitized: list[Tool] = []
+        rebuilt: list[str] = []
         for tool in raw:
             try:
-                tool.model_dump(by_alias=True, mode="json", exclude_none=True)
+                # Exclude fn/serializer to match how tools are actually serialized
+                # for the wire (and _to_clean_tool's own verify dump). Without this
+                # exclusion, every locally-registered FunctionTool — including the
+                # combiner's own meta-tools — would fail here purely on its `fn`
+                # field and be needlessly rebuilt on every fetch. What survives to
+                # the except is a genuinely broken schema (circular $refs, e.g.
+                # Todoist), where model_dump raises "Circular reference detected".
+                tool.model_dump(
+                    by_alias=True, mode="json", exclude_none=True, exclude={"fn", "serializer"}
+                )
                 sanitized.append(tool)
             except (ValueError, RecursionError):
-                logger.warning("Replacing circular tool: %s", tool.name)
+                # Schema won't round-trip to JSON (circular $refs). Rebuilding as a
+                # clean FunctionTool is the expected recovery, so aggregate into one
+                # debug line instead of a per-tool warning.
+                rebuilt.append(str(tool.name))
                 sanitized.append(self._to_clean_tool(tool))
+        if rebuilt:
+            logger.debug(
+                "tools/list: rebuilt %d tool(s) with non-serializable schemas: %s",
+                len(rebuilt),
+                ", ".join(sorted(rebuilt)),
+            )
 
         if _schema_fixes_global:
             sanitized = [_normalize_tool_schema(t, _schema_fixes_global) for t in sanitized]
@@ -550,10 +721,16 @@ class ToolProcessingMiddleware(Middleware):
                 len(filtered),
             )
 
-        _tool_cache = filtered
+        # Re-inject last-known-good tools for servers that are only transiently
+        # absent (mid-reconnect), so a peer server's reconnect can't blank them.
+        # The reinjected slices were already sanitized + filtered when cached, so
+        # they are appended after _filter_tools rather than run through it again.
+        merged = _merge_stale_server_tools(filtered, time.time())
+
+        _tool_cache = merged
         _tool_cache_time = time.time()
-        logger.info("tools/list: cached %d tools", len(filtered))
-        return filtered
+        logger.info("tools/list: cached %d tools", len(merged))
+        return merged
 
     @staticmethod
     def _apply_session_filter(
@@ -628,8 +805,18 @@ class ToolProcessingMiddleware(Middleware):
                 raise
             except (RuntimeError, AttributeError):
                 pass
+        # Resolve the owning server once (longest prefix wins — disambiguates
+        # names that are prefixes of each other) for failure/recovery bookkeeping
+        # around the call result.
+        call_server: str | None = None
+        if _combiner_config:
+            for sname in sorted(_combiner_config.servers, key=len, reverse=True):
+                if tool_name.startswith(sname + "_"):
+                    call_server = sname
+                    break
+
         try:
-            return await call_next(context)
+            result = await call_next(context)
         except NotFoundError:
             # Protocol error — wrong tool name or server disabled. Re-raise
             # so the MCP layer returns a -32002 JSON-RPC error, not a tool result.
@@ -647,16 +834,7 @@ class ToolProcessingMiddleware(Middleware):
                 f"failed. Use combiner__enable_server to retry authentication."
             ) from e
         except Exception as e:
-            # Extract server name by stripping the known namespace prefix.
-            # FastMCP namespaces as "servername_toolname"; longest match wins
-            # to handle server names that are prefixes of each other.
-            server_name: str | None = None
-            if _combiner_config:
-                for sname in sorted(_combiner_config.servers, key=len, reverse=True):
-                    if tool_name.startswith(sname + "_"):
-                        server_name = sname
-                        break
-
+            server_name = call_server
             error_str = str(e)
 
             # Check for rate limiting (429) — transient, caller should retry
@@ -670,6 +848,18 @@ class ToolProcessingMiddleware(Middleware):
                     f"Tool '{tool_name}' is temporarily unavailable due to rate limiting "
                     f"(HTTP 429). Please wait a moment and retry."
                 ) from e
+
+            # Lazy liveness: a transport/process death (crashed stdio subprocess,
+            # broken pipe, dropped connection) means the upstream isn't serving.
+            # Record it in _failed_servers so /health and combiner__status show
+            # the server as down — for stdio there is no connection lifecycle, so
+            # this mark is the ONLY down signal; for HTTP we also downgrade out of
+            # "ready". 429s are transient (handled above) and skipped here. The
+            # mark is cleared on the next successful call (see the else branch).
+            if server_name and (_is_transport_dead(e) or is_stale_client_error(e)):
+                _failed_servers[server_name] = f"{type(e).__name__}: {e}"
+                if _conn_manager is not None:
+                    _conn_manager.mark_tools_unready(server_name)
 
             # Check if this is a stale OAuth error — clear cache so next
             # attempt triggers fresh authentication
@@ -688,6 +878,14 @@ class ToolProcessingMiddleware(Middleware):
 
             logger.error("Tool '%s' failed: %s", tool_name, e)
             raise ToolError(f"Error calling tool '{tool_name}': {e}") from e
+        else:
+            # Success proves the server is alive again — clear any stale failure
+            # mark so /health and combiner__status flip it back to ready. For a
+            # crashed stdio server this is the recovery signal (a fresh subprocess
+            # answered); for HTTP the reconnect monitor already restored it.
+            if call_server and _failed_servers.pop(call_server, None) is not None:
+                logger.info("Server '%s' recovered on a successful call", call_server)
+            return result
 
     @staticmethod
     def _to_clean_tool(tool: Tool) -> Tool:
@@ -967,9 +1165,11 @@ def create_combiner(
       and returns immediately** — it does not wait for them to finish.  The
       combiner starts serving right away so that servers needing OAuth (which
       may block on a browser flow) don't hold up the rest.  Their tools
-      appear once the connection succeeds: each ``on_connected`` callback
+      appear once their tools are listable: each ``on_tools_ready`` callback
       invalidates the tool cache and emits ``notifications/tools/list_changed``
-      so clients re-fetch and pick up the newly available tools.
+      so clients re-fetch and pick up the newly available tools. (The earlier
+      ``on_connection_success`` lifecycle event does not invalidate — the
+      session can be established before the upstream can answer ``tools/list``.)
     * Per-chat *isolated OAuth* servers are the exception: session creation
       gates on the primer's first connect attempt via ``wait_ready()``
       (60s timeout) before the session is opened.
@@ -1028,7 +1228,14 @@ def create_combiner(
 
     ss_manager = SharedServerManager(config)
     conn_manager = ConnectionManager(
-        on_connected=lambda name: invalidate_tool_cache(),
+        # Connection-open is a lifecycle signal only — it does NOT mean the
+        # upstream can list tools yet, so it must not invalidate the cache.
+        on_connection_success=lambda name: logger.debug(
+            "Upstream '%s' connected (session established)", name
+        ),
+        # Tools-ready is the correct invalidation trigger: only once the
+        # upstream's tools are listable does a refetch actually pick them up.
+        on_tools_ready=lambda name: invalidate_tool_cache(),
     )
     _conn_manager = conn_manager
 
@@ -1118,7 +1325,7 @@ def create_combiner(
     @combiner.custom_route("/health", methods=["GET"])
     async def health_check(request: Request) -> JSONResponse:
         server_statuses: dict[str, ServerStatusInfo] = {
-            name: config.get_server_status(name) for name in config.servers
+            name: build_server_status(config, conn_manager, name) for name in config.servers
         }
         auth_failed = [n for n in conn_manager._connections if conn_manager.is_auth_failed(n)]
         response = HealthResponse(

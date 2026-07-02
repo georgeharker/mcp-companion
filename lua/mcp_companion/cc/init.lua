@@ -102,13 +102,20 @@ local function build_combiner_entry(agent_capabilities, token)
     --   * the token rides in the URL path /mcp/<token> and TokenRewriteMiddleware
     --     injects the header internally.
     --
-    -- `combiner.token_in_url` (default false) controls the HTTP branch:
-    --   false → /mcp + header only (cleaner; relies on the client forwarding headers)
+    -- `combiner.token_in_url` controls the HTTP branch (tri-state):
+    --   nil (default) → /mcp/<token> + header. ACP agents (e.g. Copilot CLI) often
+    --                   forward only the servers/tools they list and DROP custom HTTP
+    --                   headers, so header-only correlation silently fails and the
+    --                   injected combiner tools never surface. Defaulting the token
+    --                   into the URL for ACP is the robust choice; the header is still
+    --                   sent as the primary channel.
+    --   false → /mcp + header only (explicit opt-out; cleaner, relies on header forwarding)
     --   true  → /mcp/<token> + header (belt-and-braces; works for any HTTP client)
     -- The stdio (mcp-remote) branch ALWAYS uses /mcp/<token>: mcp-remote forwards
     -- neither headers nor env, so the URL is the only channel that can correlate.
     local caps = agent_capabilities and agent_capabilities.mcpCapabilities
-    local token_in_url = config.combiner.token_in_url == true -- default false (header-only)
+    -- nil/true → true; only an explicit `false` opts out of URL-embedded token for ACP.
+    local token_in_url = config.combiner.token_in_url ~= false
     local plain_url = string.format("http://%s:%d/mcp", host, port)
     local token_url = string.format("http://%s:%d/mcp/%s", host, port, token)
 
