@@ -45,6 +45,7 @@ from mcp_combiner.config import (
     _interpolate_str,  # noqa: PLC2701
 )
 from mcp_combiner.connections import AuthenticationError, ConnectionManager
+from mcp_combiner.schema import normalize_object_schema
 from mcp_combiner.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-combiner")
@@ -525,6 +526,12 @@ def _normalize_tool_schema(tool: Tool, fixes: frozenset[str]) -> Tool:
     except (ValueError, RecursionError, TypeError):
         params = tool.parameters or {"type": "object", "properties": {}}
 
+    # Idempotent: if no fix changed the schema, return the tool untouched rather
+    # than rebuilding it. This keeps the egress pass cheap when re-run each
+    # tools/list, and preserves the original tool's identity/fn when unaffected.
+    if params == tool.parameters:
+        return tool
+
     dummy_fn = lambda: None  # noqa: E731
     return FunctionTool(
         fn=dummy_fn,
@@ -533,6 +540,57 @@ def _normalize_tool_schema(tool: Tool, fixes: frozenset[str]) -> Tool:
         parameters=params,
         annotations=tool.annotations,
     )
+
+
+def _coerce_object_schemas(tools: Sequence[Tool]) -> list[Tool]:
+    """Unconditional final-pass guarantee that every advertised tool's parameter
+    schema is object-shaped — belt-and-braces, independent of the opt-in
+    ``schema_fixes`` ("clean") path.
+
+    A blank / non-object / ``[]``-encoded ``inputSchema`` is never valid and is
+    rejected by strict adapters (e.g. Copilot: ``[] is not of type 'object'`` —
+    issue #7). This runs on the FINAL list returned from ``on_list_tools`` —
+    after ``append_nvim_tools`` — so proxied tools, stale-reinjected tools AND
+    the neovim virtual tools are all covered, regardless of any configured
+    schema fix. The source of the ``[]`` is fixed on the Lua side too; this is
+    the process-global safety net so a wrong upstream/virtual schema can never
+    reach the wire. Only tools that actually need it are rebuilt (via
+    ``model_copy``, which preserves ``fn`` so dispatch is unaffected).
+    """
+    out: list[Tool] = []
+    for t in tools:
+        fixed = normalize_object_schema(t.parameters)
+        if fixed == t.parameters:
+            out.append(t)  # already valid — preserve identity/fn, don't rebuild
+        else:
+            out.append(t.model_copy(update={"parameters": fixed}))
+    return out
+
+
+def _finalize_schemas(tools: Sequence[Tool]) -> list[Tool]:
+    """The single, global schema-cleanup path for advertised tools.
+
+    Applied once at the ``on_list_tools`` egress to the COMPLETE assembled list —
+    proxied upstream tools AND the appended neovim virtual tools — so every tool
+    source gets identical treatment and none can bypass it. (That bypass was the
+    root cause of issue #7: neovim tools were appended after the cleanup and so
+    never saw ``schema_fixes``.)
+
+      1. Configured global ``schema_fixes`` (``empty_object`` /
+         ``anyof_type_hoist`` / ``drop_invalid_required``), if any are enabled —
+         now genuinely global, covering neovim tools too. Idempotent, so
+         re-running each request is cheap.
+      2. Unconditional object-shape + valid-``required`` coercion — the always-on
+         net (a blank/``[]`` schema is never valid regardless of config).
+
+    Circular-``$ref`` rebuilding is intentionally NOT here: only proxied upstream
+    schemas can be non-serializable, and that guard must run in ``_do_fetch``
+    before they enter the cache.
+    """
+    result = list(tools)
+    if _schema_fixes_global:
+        result = [_normalize_tool_schema(t, _schema_fixes_global) for t in result]
+    return _coerce_object_schemas(result)
 
 
 class ToolProcessingMiddleware(Middleware):
@@ -615,11 +673,13 @@ class ToolProcessingMiddleware(Middleware):
                 cache_age,
             )
             base = self._apply_session_filter(context, _tool_cache)
-            return await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
+            full = await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
+            return _finalize_schemas(full)
 
         tools = await self._fetch_or_join(context, call_next, cache_age)
         base = self._apply_session_filter(context, tools)
-        return await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
+        full = await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
+        return _finalize_schemas(full)
 
     async def _fetch_or_join(
         self,
@@ -705,14 +765,11 @@ class ToolProcessingMiddleware(Middleware):
                 ", ".join(sorted(rebuilt)),
             )
 
-        if _schema_fixes_global:
-            sanitized = [_normalize_tool_schema(t, _schema_fixes_global) for t in sanitized]
-            logger.debug(
-                "tools/list: applied schema fixes %s to %d tool(s)",
-                sorted(_schema_fixes_global),
-                len(sanitized),
-            )
-
+        # NB: schema_fixes + object-shape coercion are NOT applied here. They run
+        # once at the on_list_tools egress (_finalize_schemas) over the COMPLETE
+        # assembled list — upstream AND the appended neovim virtual tools — so no
+        # tool source can bypass them. Only the circular-$ref rebuild (above) is
+        # fetch-local, because it must guard what enters the cache.
         filtered = _filter_tools(sanitized)
         if len(filtered) < len(sanitized):
             logger.info(

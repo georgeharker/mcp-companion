@@ -11,6 +11,7 @@ local M = {}
 
 local config = require("mcp_companion.config")
 local log = require("mcp_companion.log")
+local schema = require("mcp_companion.schema")
 
 --- Fingerprint of the last successful registration (tool count + sorted names).
 --- Used to skip re-registration when nothing has changed.
@@ -225,7 +226,7 @@ function M.register()
             local captured_display = display
             local captured_namespaced = namespaced
             local captured_description = tool.description or ("MCP tool: " .. display)
-            local captured_input_schema = tool.inputSchema or { type = "object", properties = {} }
+            local captured_input_schema = schema.normalize(tool.inputSchema)
 
             server_tools[key] = {
                 description = captured_description,
@@ -352,7 +353,7 @@ function M.register_native()
             local key = tool._namespaced or (server.name .. "_" .. tool.name)
             local display = tool._display or tool.name
             local description = tool.description or ("Neovim tool: " .. display)
-            local input_schema = tool.inputSchema or { type = "object", properties = {} }
+            local input_schema = schema.normalize(tool.inputSchema)
 
             server_tools[key] = {
                 description = description,

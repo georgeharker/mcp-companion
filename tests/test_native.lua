@@ -56,6 +56,23 @@ if ok_native then
     else
         err("is_native_server", "neovim not registered")
     end
+
+    -- issue #7 regression: every manifest tool schema must JSON-encode as an
+    -- object, never `[]` (an empty Lua table). This is what strict adapters
+    -- (Copilot) reject. The combiner reads exactly this manifest.
+    local bad = {}
+    for _, srv in pairs(native.manifest()) do
+        for _, t in ipairs(srv.tools or {}) do
+            if vim.json.encode(t.inputSchema):find("%[%]") then
+                table.insert(bad, t.name)
+            end
+        end
+    end
+    if #bad == 0 then
+        ok("manifest emits no []-encoded tool schemas")
+    else
+        err("manifest schemas", "[]-encoded: " .. table.concat(bad, ", "))
+    end
 end
 
 -- ── Prepare a scratch file buffer ────────────────────────────────────────────

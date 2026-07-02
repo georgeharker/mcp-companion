@@ -18,7 +18,9 @@ M.tools = {
         name = "list_buffers",
         tier = "read",
         description = "List open buffers with id, name, active/modified flags, filetype and line count.",
-        inputSchema = { type = "object", properties = {} },
+        -- vim.empty_dict() (not `{}`): an empty Lua table encodes to JSON `[]`,
+        -- which strict adapters (Copilot) reject where an object is required.
+        inputSchema = { type = "object", properties = vim.empty_dict() },
         handler = function(_args, ctx)
             local current = util.resolve_buf({}, ctx)
             local out = {}
@@ -70,7 +72,9 @@ M.tools = {
         tier = "read",
         description = "Get the cursor position {buffer, line (1-based), col (0-based)} in the "
             .. "user's code window (not a chat/tree window).",
-        inputSchema = { type = "object", properties = {} },
+        -- vim.empty_dict() (not `{}`): an empty Lua table encodes to JSON `[]`,
+        -- which strict adapters (Copilot) reject where an object is required.
+        inputSchema = { type = "object", properties = vim.empty_dict() },
         handler = function(_args, _ctx)
             local win = winpick.code_win()
             if not win then
@@ -86,7 +90,9 @@ M.tools = {
         name = "get_selection",
         tier = "read",
         description = "Get the current/last visual selection {buffer, range, text}.",
-        inputSchema = { type = "object", properties = {} },
+        -- vim.empty_dict() (not `{}`): an empty Lua table encodes to JSON `[]`,
+        -- which strict adapters (Copilot) reject where an object is required.
+        inputSchema = { type = "object", properties = vim.empty_dict() },
         handler = function(_args, ctx)
             local buf = util.resolve_buf({}, ctx)
             local s = vim.api.nvim_buf_get_mark(buf, "<")

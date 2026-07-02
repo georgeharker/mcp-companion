@@ -8,6 +8,7 @@
 --- @module mcp_companion.native
 
 local util = require("mcp_companion.native.util")
+local schema = require("mcp_companion.schema")
 
 local M = {}
 
@@ -68,7 +69,7 @@ local function _publish()
             table.insert(tools, {
                 name = t.name,
                 description = t.description,
-                inputSchema = t.inputSchema,
+                inputSchema = schema.normalize(t.inputSchema),
                 tier = t.tier,
                 _display = t.name,
                 _namespaced = def.name .. "_" .. t.name,
@@ -189,7 +190,7 @@ function M.manifest()
             table.insert(tools, {
                 name = t.name,
                 description = t.description,
-                inputSchema = t.inputSchema or { type = "object", properties = {} },
+                inputSchema = schema.normalize(t.inputSchema),
                 tier = t.tier,
             })
         end
