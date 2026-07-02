@@ -62,6 +62,7 @@ _INITIAL_BACKOFF = 2.0  # seconds
 _MAX_BACKOFF = 60.0
 _BACKOFF_MULTIPLIER = 2.0
 _HEALTH_CHECK_INTERVAL = 30.0  # seconds between keepalive pings
+_TOOLS_READY_TIMEOUT = 30.0  # seconds to await a just-connected upstream's first tools/list
 
 # How long the factory waits for an in-flight connect before giving up.
 _FACTORY_WAIT_TIMEOUT = 60.0  # seconds
@@ -109,6 +110,11 @@ class _ManagedConnection:
     # Signalled once the first connect attempt finishes (success or failure).
     # The factory waits on this so it never falls back to creating new OAuth.
     _ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    # True once a post-connect tools/list has confirmed the upstream's tools are
+    # listable (see _signal_tools_ready). Distinct from "connected": the session
+    # can be up while the tool set is still warming. Drives the lifecycle_state
+    # "connected" → "ready" transition. Cleared on reconnect / call failure.
+    _tools_ready: bool = field(default=False, repr=False)
 
 
 class ConnectionManager:
@@ -122,15 +128,31 @@ class ConnectionManager:
         # ... combiner runs ...
         await mgr.close_all()                 # called in lifespan finally
 
-    The optional *on_connected* callback is invoked (from a background task)
-    whenever a persistent connection transitions from down → up.  The combiner
-    uses this to invalidate the tool cache so the next ``tools/list`` picks
-    up the newly-connected server's tools.
+    Two optional callbacks are invoked (from the background connect task) at
+    distinct points in a connection's lifecycle — do not conflate them:
+
+    * ``on_connection_success(name)`` — the persistent connection is
+      established (the MCP ``initialize`` handshake completed).  This mirrors
+      the transport/session "connected" event.  It does **not** imply the
+      upstream can yet answer ``tools/list``: an OAuth server routinely accepts
+      the session while still warming up its tool set.
+
+    * ``on_tools_ready(name)`` — the upstream's tools are actually listable (a
+      post-connect ``tools/list`` has returned).  This is the combiner's own
+      semantic event and the *correct* trigger for invalidating the tool cache:
+      only now will a refetch pick up the server's tools.  Invalidating on mere
+      connection-open instead races the warm-up and can cache an incomplete tool
+      set until the TTL expires minutes later.
     """
 
-    def __init__(self, on_connected: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        on_connection_success: Callable[[str], None] | None = None,
+        on_tools_ready: Callable[[str], None] | None = None,
+    ) -> None:
         self._connections: dict[str, _ManagedConnection] = {}
-        self._on_connected = on_connected
+        self._on_connection_success = on_connection_success
+        self._on_tools_ready = on_tools_ready
         self._background_tasks: list[asyncio.Task[None]] = []
 
     # ------------------------------------------------------------------
@@ -247,6 +269,42 @@ class ConnectionManager:
         """Return True if *name* is paused due to an authentication error."""
         conn = self._connections.get(name)
         return conn is not None and conn._auth_failed
+
+    def lifecycle_state(self, name: str) -> str:
+        """Return the lifecycle state of a managed connection.
+
+        One of:
+          * ``"auth_failed"``  — paused on an auth error; needs manual re-enable.
+          * ``"ready"``        — connected AND tools confirmed listable.
+          * ``"connected"``    — session established, tools not yet listable
+                                 (warming up, or the priming list failed).
+          * ``"disconnected"`` — down / reconnecting / never came up.
+          * ``"unknown"``      — *name* is not a managed (HTTP) connection.
+
+        Derived live from connection fields — no proactive probing. Downgrades
+        happen lazily: the reconnect monitor and ``mark_tools_unready`` (called
+        on a failed tool call) clear ``_tools_ready``.
+        """
+        conn = self._connections.get(name)
+        if conn is None:
+            return "unknown"
+        if conn._auth_failed:
+            return "auth_failed"
+        client = conn.client_ref[0]
+        if client is not None and client.is_connected():
+            return "ready" if conn._tools_ready else "connected"
+        return "disconnected"
+
+    def mark_tools_unready(self, name: str) -> None:
+        """Downgrade *name* out of ``ready`` after a concrete failure.
+
+        Lazy liveness: a tool call that fails with a connection error tells us
+        the upstream isn't serving, so we drop ``_tools_ready``. The health-check
+        monitor's reconnect restores ``ready`` once the upstream is live again.
+        """
+        conn = self._connections.get(name)
+        if conn is not None:
+            conn._tools_ready = False
 
     def reset_auth_failure(self, name: str) -> None:
         """Clear the auth-failure flag so the server can be retried."""
@@ -393,12 +451,17 @@ class ConnectionManager:
             conn._auth_failed = False
             conn._auth_error_msg = ""
             logger.info("Persistent connection opened: %s", conn.name)
-            # Notify the combiner so it can invalidate the tool cache
-            if self._on_connected:
+            # Lifecycle event: the session is established (initialize done). This
+            # mirrors the MCP "connected" moment — it does NOT mean tools are
+            # listable yet, so it must not drive cache invalidation.
+            if self._on_connection_success:
                 try:
-                    self._on_connected(conn.name)
+                    self._on_connection_success(conn.name)
                 except Exception:
                     pass
+            # Confirm the upstream can actually list tools, then fire the
+            # tools-ready event that drives invalidation. See _signal_tools_ready.
+            await self._signal_tools_ready(conn)
         except SystemExit as e:
             # uvicorn calls sys.exit(1) when it can't bind the callback
             # port.  Treat this as a transient auth error — the health-check
@@ -427,6 +490,44 @@ class ConnectionManager:
                     e,
                 )
 
+    async def _signal_tools_ready(self, conn: _ManagedConnection) -> None:
+        """Confirm the upstream can list tools, then fire ``on_tools_ready``.
+
+        Bridges "session established" → "tools listable": a just-connected OAuth
+        server often accepts the session before its tool set is ready. We issue
+        one bounded ``tools/list`` against the upstream; if it returns, the tools
+        are live and we signal readiness so the combiner invalidates its cache
+        and refetches. If it times out or errors we do NOT signal — the tools
+        aren't confirmed, and the health-check monitor plus the cache TTL remain
+        the fallbacks.
+
+        This handles upstreams whose first ``tools/list`` *blocks* until their
+        tool set is ready. An upstream that instead returns an empty list and
+        later emits ``notifications/tools/list_changed`` needs that notification
+        propagated too — the upstream message handler (not yet installed) should
+        also call ``on_tools_ready``.
+        """
+        client = conn.client_ref[0]
+        if client is None or self._on_tools_ready is None:
+            return
+        try:
+            await asyncio.wait_for(client.list_tools(), timeout=_TOOLS_READY_TIMEOUT)
+        except Exception as e:
+            logger.warning(
+                "Priming tools/list for '%s' failed (%s: %s) — deferring "
+                "tools-ready; cache TTL / health-check will recover",
+                conn.name,
+                type(e).__name__,
+                e or "no message",
+            )
+            return
+        conn._tools_ready = True
+        logger.info("Tools ready for '%s' — signalling cache invalidation", conn.name)
+        try:
+            self._on_tools_ready(conn.name)
+        except Exception:
+            pass
+
     async def _teardown(self, conn: _ManagedConnection) -> None:
         """Cancel the monitor and close the exit stack."""
         if conn._monitor_task and not conn._monitor_task.done():
@@ -444,6 +545,10 @@ class ConnectionManager:
     async def _reconnect(self, conn: _ManagedConnection) -> None:
         """Close the old session and open a fresh one."""
         logger.info("Reconnecting to '%s' (backoff=%.1fs) …", conn.name, conn._backoff)
+
+        # Tools are no longer known-listable while we're down: drop to
+        # "connected"/"disconnected" until a fresh connect re-confirms them.
+        conn._tools_ready = False
 
         # Close the old stack — this ends the previous ``async with client:``
         try:

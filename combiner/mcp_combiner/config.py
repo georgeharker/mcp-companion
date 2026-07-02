@@ -268,6 +268,11 @@ class ServerStatusInfo(BaseModel):
     """Authentication type: ``"oauth"``, ``"bearer"``, or ``None``."""
     shared_server: str | None = None
     """sharedServers key if this server has a managed process, else ``None``."""
+    state: str = "unknown"
+    """Runtime lifecycle state: ``"ready"``, ``"connected"`` (session up, tools
+    warming), ``"disconnected"``, ``"auth_failed"``, or ``"disabled"``. Overlaid
+    at report time from the ConnectionManager (config alone can't know it);
+    defaults to ``"unknown"`` for a bare config-only snapshot."""
 
 
 class HealthResponse(BaseModel):

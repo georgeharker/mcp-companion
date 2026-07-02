@@ -352,6 +352,126 @@ class TestToolsListSingleFlight:
         assert called == 1
 
 
+# ── per-server stale-tool hysteresis ───────────────────────────────
+
+
+class TestStaleServerTools:
+    """`_merge_stale_server_tools` keeps a transiently-absent server's tools.
+
+    Regression cover for the green/red "flapping": the advertised tool set is
+    derived, with no hysteresis, from whichever servers return tools in the
+    current fetch. Because any one server's reconnect clears the whole cache and
+    forces a refetch, a *second* server that is mid-reconnect at that moment
+    contributes zero tools and silently drops out (cross-server contamination).
+    Re-injecting its last-known slice within a grace window breaks that coupling.
+    """
+
+    def setup_method(self):
+        import mcp_combiner.server as srv
+
+        self._srv = srv
+        self._saved = (srv._combiner_config, srv._conn_manager)
+        srv._server_tool_cache.clear()
+        srv._server_tool_seen.clear()
+
+    def teardown_method(self):
+        srv = self._srv
+        srv._combiner_config, srv._conn_manager = self._saved
+        srv._server_tool_cache.clear()
+        srv._server_tool_seen.clear()
+
+    @staticmethod
+    def _tool(name: str):
+        from fastmcp.tools.function_tool import FunctionTool
+
+        return FunctionTool(
+            fn=lambda: None,
+            name=name,
+            description="",
+            parameters={"type": "object", "properties": {}},
+        )
+
+    def _config(self, **flags):
+        """A stand-in combiner config with servers alpha, beta.
+
+        flags: e.g. beta_disabled=True to mark beta disabled.
+        """
+        from types import SimpleNamespace
+
+        from mcp_combiner.config import ServerConfig
+
+        servers = {
+            "alpha": ServerConfig(name="alpha"),
+            "beta": ServerConfig(name="beta", disabled=flags.get("beta_disabled", False)),
+        }
+        return SimpleNamespace(servers=servers)
+
+    def _names(self, tools):
+        return sorted(str(t.name) for t in tools)
+
+    def test_reconnecting_peer_tools_survive(self):
+        """beta mid-reconnect (absent from fresh) keeps its tools after alpha reconnects."""
+        srv = self._srv
+        srv._combiner_config = self._config()
+        srv._conn_manager = None
+
+        both = [self._tool("alpha_one"), self._tool("beta_one"), self._tool("beta_two")]
+        # First fetch: both live — seeds the per-server cache.
+        srv._merge_stale_server_tools(both, now=1000.0)
+
+        # Second fetch a few seconds later: beta is mid-reconnect → only alpha's tool.
+        fresh = [self._tool("alpha_one")]
+        merged = srv._merge_stale_server_tools(fresh, now=1005.0)
+
+        assert self._names(merged) == ["alpha_one", "beta_one", "beta_two"], (
+            "beta's tools should be re-injected from cache while it reconnects"
+        )
+
+    def test_disabled_server_tools_dropped(self):
+        """A disabled server's stale tools are not re-served (and are evicted)."""
+        srv = self._srv
+        srv._combiner_config = self._config(beta_disabled=True)
+        srv._conn_manager = None
+
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+
+        merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
+        assert self._names(merged) == ["alpha_one"]
+        assert "beta" not in srv._server_tool_cache
+
+    def test_grace_window_expiry_drops_tools(self):
+        """Past STALE_TOOL_GRACE the stale slice is dropped and evicted."""
+        srv = self._srv
+        srv._combiner_config = self._config()
+        srv._conn_manager = None
+
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+
+        now = 1000.0 + srv.STALE_TOOL_GRACE + 1
+        merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=now)
+        assert self._names(merged) == ["alpha_one"]
+        assert "beta" not in srv._server_tool_cache
+
+    def test_auth_failed_server_tools_dropped(self):
+        """An auth-failed server's tools are not re-served even within grace."""
+        from unittest.mock import MagicMock
+
+        srv = self._srv
+        srv._combiner_config = self._config()
+        cm = MagicMock()
+        cm.is_auth_failed = lambda name: name == "beta"
+        srv._conn_manager = cm
+
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+
+        merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
+        assert self._names(merged) == ["alpha_one"]
+        assert "beta" not in srv._server_tool_cache
+
+
 # ── _pending_token_filters dict ────────────────────────────────────
 
 
