@@ -28,7 +28,11 @@ M.tools = {
             properties = {
                 path = { type = "string", description = "File path" },
                 start_line = { type = "integer", minimum = 1, default = 1, description = "1-based first line" },
-                end_line = { type = "integer", minimum = 1, description = "1-based last line, inclusive (default: last)" },
+                end_line = {
+                    type = "integer",
+                    minimum = 1,
+                    description = "1-based last line, inclusive (default: last)",
+                },
             },
             required = { "path" },
         },

@@ -81,7 +81,11 @@ M.tools = {
             properties = {
                 buffer = { type = "integer", description = "Buffer id (default: active file buffer)" },
                 start_line = { type = "integer", minimum = 1, default = 1, description = "1-based first line" },
-                end_line = { type = "integer", minimum = 1, description = "1-based last line, inclusive (default: last)" },
+                end_line = {
+                    type = "integer",
+                    minimum = 1,
+                    description = "1-based last line, inclusive (default: last)",
+                },
             },
         },
         -- Output is human-oriented numbered text, not structured — no outputSchema.
