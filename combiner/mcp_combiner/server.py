@@ -89,6 +89,22 @@ _server_tool_seen: dict[str, float] = {}
 # tools eventually disappear rather than lingering forever.
 STALE_TOOL_GRACE = 90.0  # seconds
 
+# Tools-ready state for stdio / sharedserver servers — those WITHOUT a persistent
+# HTTP connection tracked by ConnectionManager. This mirrors ConnectionManager's
+# ``_tools_ready`` so a mounted proxy gets the SAME started → ready tri-state: a
+# freshly mounted or restarted proxy is "started" (process/proxy up, tools not
+# yet confirmed) — NOT assumed ready — until a tools/list confirms its tools are
+# listable. Set True when the server appears in a fresh fetch
+# (_merge_stale_server_tools) or a priming list succeeds (signal_local_tools_ready);
+# dropped when the server is evicted from the slice cache (_merge_stale_server_tools).
+_local_tools_ready: dict[str, bool] = {}
+
+# How long to keep priming a just-restarted stdio/sharedserver proxy's tools/list
+# before giving up (the respawned process needs a moment to start serving).
+_LOCAL_TOOLS_READY_TIMEOUT = 30.0  # seconds
+_LOCAL_TOOLS_READY_ATTEMPT = 5.0  # per-attempt bound, so a hung list can't block
+
+
 # --- Session registry for ToolListChanged notifications ---
 # Weak references to all active ServerSessions connected to this combiner.
 # Populated by ToolProcessingMiddleware on each request; entries are
@@ -236,10 +252,15 @@ def build_server_status(
         # subprocess has crashed. No connection lifecycle tracks this, so the
         # failure mark is the down signal until a successful call clears it.
         state = "disconnected"
-    else:
-        # stdio / non-connection-managed server: no connect lifecycle — once
-        # mounted its tools are served directly, so treat it as ready.
+    elif _local_tools_ready.get(name):
+        # stdio / non-connection-managed server whose tools are confirmed
+        # listable (seen in a fetch, or a priming list succeeded).
         state = "ready"
+    else:
+        # Mounted/started but tools not yet confirmed — the same "connected"
+        # (warming) rung of the tri-state HTTP servers get before "ready". We do
+        # NOT assume ready just because it is mounted.
+        state = "connected"
     return info.model_copy(update={"state": state})
 
 
@@ -343,10 +364,12 @@ def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
     """
     per_fresh, _local = _partition_by_server(fresh)
 
-    # Every server that returned tools this fetch is live: refresh its slice.
+    # Every server that returned tools this fetch is live: refresh its slice and
+    # confirm it "ready" (tools listable) for the stdio/sharedserver tri-state.
     for server, slice_ in per_fresh.items():
         _server_tool_cache[server] = slice_
         _server_tool_seen[server] = now
+        _local_tools_ready[server] = True
 
     result = list(fresh)
     if _combiner_config is None:
@@ -359,8 +382,17 @@ def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
         srv = _combiner_config.servers.get(server)
         auth_failed = _conn_manager.is_auth_failed(server) if _conn_manager else False
         age = now - _server_tool_seen.get(server, 0.0)
+        # Keep re-serving a merely-absent server's tools within the grace window
+        # (transient reconnect — the flapping fix), EXCEPT once a tool call has
+        # actually failed against it (recorded in _failed_servers): that is the
+        # "remove on tool attempt" signal — a proven-dead upstream drops its tools
+        # now rather than lingering for the full grace.
         eligible = (
-            srv is not None and not srv.disabled and not auth_failed and age < STALE_TOOL_GRACE
+            srv is not None
+            and not srv.disabled
+            and not auth_failed
+            and server not in _failed_servers
+            and age < STALE_TOOL_GRACE
         )
         if eligible:
             stale = _server_tool_cache[server]
@@ -376,6 +408,7 @@ def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
             # Removed, disabled, auth-failed, or grace expired — let it drop.
             _server_tool_cache.pop(server, None)
             _server_tool_seen.pop(server, None)
+            _local_tools_ready.pop(server, None)
     return result
 
 
@@ -401,6 +434,48 @@ def invalidate_tool_cache() -> None:
     except RuntimeError:
         # No running event loop — skip notification (e.g. during tests)
         pass
+
+
+async def signal_local_tools_ready(
+    proxy: FastMCP,
+    name: str,
+    timeout: float = _LOCAL_TOOLS_READY_TIMEOUT,
+    interval: float = 1.0,
+) -> bool:
+    """Confirm a mounted stdio/sharedserver proxy can list tools, then mark it
+    ready and invalidate (broadcast ``tools/list_changed``).
+
+    The non-connection-managed analogue of
+    ``ConnectionManager._signal_tools_ready``: a just-respawned process is not
+    immediately serving, so we retry the proxy's ``tools/list`` until it returns
+    (its tool set — possibly changed — is now live) or we hit *timeout*. We do
+    NOT broadcast until it returns, so clients are never told to re-fetch into a
+    half-up server (which would re-list the stale or empty set). Returns True on
+    success; False on timeout (the server stays "started", no broadcast).
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            await asyncio.wait_for(
+                proxy.list_tools(run_middleware=False), timeout=_LOCAL_TOOLS_READY_ATTEMPT
+            )
+        except Exception as e:
+            if loop.time() >= deadline:
+                logger.warning(
+                    "restart: '%s' tools/list not ready within %.0fs — deferring "
+                    "invalidation (tools appear on the next successful fetch): %s",
+                    name,
+                    timeout,
+                    e,
+                )
+                return False
+            await asyncio.sleep(interval)
+            continue
+        _local_tools_ready[name] = True
+        logger.info("restart: '%s' tools ready — invalidating cache", name)
+        invalidate_tool_cache()
+        return True
 
 
 def _safe_json_clone(obj: object) -> Any:

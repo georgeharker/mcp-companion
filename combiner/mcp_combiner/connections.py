@@ -581,6 +581,19 @@ class ConnectionManager:
                     await self._reconnect(conn)
                     continue
 
+                # Connected but tools never confirmed listable — the session came
+                # up while the upstream was still warming, or a restart's initial
+                # prime failed. Re-prime so it reaches "ready" and fires
+                # on_tools_ready (which invalidates + broadcasts the now-current
+                # tool set). Without this the conn stays stuck at "connected"
+                # forever: the monitor otherwise only acts on a *drop*, so a
+                # sharedserver process restart whose first tools/list raced the
+                # respawn would never surface its (possibly changed) tools.
+                if not conn._tools_ready:
+                    logger.info("'%s' connected but tools not ready — re-priming", conn.name)
+                    await self._signal_tools_ready(conn)
+                    continue
+
                 # Lightweight health-check: MCP ping
                 try:
                     await asyncio.wait_for(client.ping(), timeout=10.0)

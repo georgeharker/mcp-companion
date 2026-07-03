@@ -83,6 +83,52 @@ class TestSignalToolsReady:
         await mgr._signal_tools_ready(_fake_conn("epsilon", SimpleNamespace(list_tools=list_tools)))
 
 
+class TestMonitorRePrime:
+    """The health-check monitor re-primes a connected-but-not-ready connection,
+    so a session that came up while the upstream was still warming (or whose
+    restart raced the respawn) eventually reaches 'ready' and fires
+    on_tools_ready — instead of staying stuck until a disconnect."""
+
+    async def test_monitor_reprimes_connected_but_not_ready(self, monkeypatch):
+        import asyncio
+
+        import mcp_combiner.connections as conns
+
+        # Spin the monitor fast; we cancel it as soon as it re-primes.
+        monkeypatch.setattr(conns, "_HEALTH_CHECK_INTERVAL", 0.0)
+
+        fired: list[str] = []
+        mgr = ConnectionManager(on_tools_ready=lambda name: fired.append(name))
+
+        async def list_tools():
+            return []
+
+        async def ping():
+            return None
+
+        client = SimpleNamespace(is_connected=lambda: True, list_tools=list_tools, ping=ping)
+        conn = SimpleNamespace(
+            name="a", _auth_failed=False, client_ref=[client], _tools_ready=False
+        )
+
+        task = asyncio.create_task(mgr._monitor(conn))
+        try:
+            for _ in range(200):
+                if conn._tools_ready:
+                    break
+                await asyncio.sleep(0.001)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Re-primed: reached ready and fired on_tools_ready (at least once).
+        assert conn._tools_ready is True
+        assert "a" in fired
+
+
 def _inject_conn(
     mgr: ConnectionManager,
     name: str,
@@ -155,13 +201,22 @@ class TestBuildServerStatus:
         cfg = self._config()
         assert build_server_status(cfg, ConnectionManager(), "disabled-server").state == "disabled"
 
-    def test_stdio_server_reports_ready(self):
-        """A stdio server has no connection lifecycle: mounted ⇒ ready."""
+    def test_stdio_server_tristate(self):
+        """A stdio server is 'connected' (started) until its tools are confirmed
+        listable, then 'ready' — the same tri-state HTTP servers get. Mounting
+        alone is NOT assumed ready."""
+        import mcp_combiner.server as srv
         from mcp_combiner.server import build_server_status
 
         cfg = self._config()
         # 'everything' is a stdio server in the fixture, not connection-managed.
-        assert build_server_status(cfg, ConnectionManager(), "everything").state == "ready"
+        srv._local_tools_ready.pop("everything", None)
+        try:
+            assert build_server_status(cfg, ConnectionManager(), "everything").state == "connected"
+            srv._local_tools_ready["everything"] = True
+            assert build_server_status(cfg, ConnectionManager(), "everything").state == "ready"
+        finally:
+            srv._local_tools_ready.pop("everything", None)
 
     def test_http_server_reflects_connection_lifecycle(self):
         from mcp_combiner.server import build_server_status
@@ -182,15 +237,17 @@ class TestBuildServerStatus:
 
         cfg = self._config()
         srv._failed_servers.pop("everything", None)
+        srv._local_tools_ready["everything"] = True
         try:
-            # Healthy stdio server → ready.
+            # Healthy, tools-confirmed stdio server → ready.
             assert build_server_status(cfg, ConnectionManager(), "everything").state == "ready"
-            # Crashed subprocess recorded → disconnected.
+            # Crashed subprocess recorded → disconnected (overrides ready).
             srv._failed_servers["everything"] = "ClosedResourceError: stdio pipe closed"
             got = build_server_status(cfg, ConnectionManager(), "everything").state
             assert got == "disconnected"
         finally:
             srv._failed_servers.pop("everything", None)
+            srv._local_tools_ready.pop("everything", None)
 
     def test_call_failure_overrides_optimistic_http_ready(self):
         """A recorded failure downgrades an otherwise-'ready' HTTP server."""

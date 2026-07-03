@@ -63,6 +63,7 @@ def register_meta_tools(
             from mcp_combiner.server import (
                 _create_server_proxy,
                 invalidate_tool_cache,
+                signal_local_tools_ready,
             )
 
             # Start the backing sharedserver first (use + health-poll), so the
@@ -81,7 +82,14 @@ def register_meta_tools(
 
             proxy = _create_server_proxy(config, server_name, srv)
             combiner.mount(proxy, namespace=server_name)
-            invalidate_tool_cache()
+            # Announce only once the server can list tools — never proactively.
+            # HTTP: connect() above already fired on_tools_ready (or the monitor
+            # will once it reconnects). Stdio/sharedserver: prime the proxy's
+            # tools/list, then broadcast when it returns.
+            if conn_manager.is_http_server(srv):
+                invalidate_tool_cache()
+            else:
+                await signal_local_tools_ready(proxy, server_name)
             logger.info("Dynamically mounted server: %s", server_name)
             return f"Server '{server_name}' enabled and mounted"
         except Exception as e:
@@ -175,8 +183,12 @@ def register_meta_tools(
 
         combiner.providers = [p for p in combiner.providers if not _provider_matches(p)]
 
-    async def _mount_server(server_name: str, srv: ServerConfig) -> None:
-        """Start, connect, and mount a server. Mirrors combiner__enable_server."""
+    async def _mount_server(server_name: str, srv: ServerConfig) -> FastMCP:
+        """Start, connect, and mount a server. Mirrors combiner__enable_server.
+
+        Returns the mounted proxy so callers can prime its tools/list (see
+        combiner__restart_server's tools-ready confirmation).
+        """
         from mcp_combiner.server import _create_server_proxy
 
         await ss_manager.ensure_started(server_name)
@@ -188,6 +200,7 @@ def register_meta_tools(
             await conn_manager.connect(config, server_name, srv)
         proxy = _create_server_proxy(config, server_name, srv)
         combiner.mount(proxy, namespace=server_name)
+        return proxy
 
     def _drop_providers(server_name: str) -> int:
         """Remove all mounted providers for *server_name*'s namespace.
@@ -239,7 +252,11 @@ def register_meta_tools(
                 "to bring it up instead of restarting"
             )
 
-        from mcp_combiner.server import clear_tool_cache, invalidate_tool_cache
+        from mcp_combiner.server import (
+            clear_tool_cache,
+            invalidate_tool_cache,
+            signal_local_tools_ready,
+        )
 
         # 1. Tear down the combiner-side connection + mounted providers. We do NOT
         #    call ss_manager.ensure_stopped here — that decrements the refcount
@@ -259,9 +276,14 @@ def register_meta_tools(
             logger.exception("restart: failed to restart backing process for '%s'", server_name)
             return f"Server '{server_name}': failed to restart backing process: {e}"
 
-        # 3. Re-establish the connection and remount the proxy.
+        # 3. Re-establish the connection and remount the proxy. A restart is
+        #    unified with any reconnect: we do NOT evict the pre-restart slice.
+        #    The grace window keeps serving the last-known tools during the
+        #    re-prime (no mid-restart flicker); the fresh set is published only
+        #    once the server is tools-ready (below), which swaps it in. If the
+        #    tool set changed, tools-ready carries the new set.
         try:
-            await _mount_server(server_name, srv)
+            proxy = await _mount_server(server_name, srv)
         except Exception as e:
             # The remount itself blew up — make sure no half-mounted, dead proxy
             # is left advertising tools, then notify clients to drop them.
@@ -270,23 +292,35 @@ def register_meta_tools(
             logger.exception("restart: failed to remount '%s'", server_name)
             return f"Server '{server_name}': backing process restarted but remount failed: {e}"
 
-        # 4. Announce the refreshed tool list — but only once the upstream is
-        #    actually reachable. For an HTTP server whose connection has not come
-        #    back up yet, _mount_server still succeeds with a *disconnected*
-        #    client (ConnectionManager.connect swallows the open failure). Telling
-        #    clients the tools are ready in that state sends them calling into a
-        #    dead proxy: ConnectionError → RetryMiddleware retries → "hanging".
-        #    So we clear our local cache but defer the tools/list_changed
-        #    notification to the reconnect monitor, which fires it via
-        #    on_tools_ready once the upstream's tools are genuinely listable.
-        http = conn_manager.is_http_server(srv)
-        connected = (not http) or conn_manager.is_connected(server_name)
-        if connected:
-            invalidate_tool_cache()
-            ready_note = ""
-        else:
+        # 4. Announce the refreshed tool list — but ONLY once the restarted server
+        #    can actually list its (possibly changed) tools. We never assume a
+        #    freshly mounted proxy is "ready".
+        if conn_manager.is_http_server(srv):
+            # HTTP has a connection lifecycle + health-check monitor, so we NEVER
+            # proactively broadcast on mere is_connected (connected != tools-ready).
+            # _mount_server's connect() re-primed tools/list and fired
+            # on_tools_ready → invalidate the moment the session came up ready; the
+            # monitor re-primes a still-warming or reconnecting upstream until it
+            # reaches ready and fires it. Here we only clear the local cache.
             clear_tool_cache()
-            ready_note = "; upstream still reconnecting — tools appear once it is live"
+            ready_note = (
+                ""
+                if conn_manager.is_connected(server_name)
+                else "; upstream still reconnecting — tools appear once it is live"
+            )
+        else:
+            # Stdio/sharedserver has NO connection monitor, so there is no
+            # corrective re-notification. Do not assume it is ready: clear
+            # silently, then prime the remounted proxy's tools/list and broadcast
+            # (invalidate) ONLY once it returns — the started → ready gate. This
+            # is what was missing; a proactive invalidate here races the respawn
+            # and re-lists the stale/empty set (issue: restart not surfacing new
+            # tools).
+            clear_tool_cache()
+            if await signal_local_tools_ready(proxy, server_name):
+                ready_note = ""
+            else:
+                ready_note = "; server not yet listable — tools appear once it is live"
 
         proc_note = "process restarted" if restarted_proc else "connection re-opened"
         summary = (

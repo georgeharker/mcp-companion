@@ -373,12 +373,14 @@ class TestStaleServerTools:
         self._saved = (srv._combiner_config, srv._conn_manager)
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
+        srv._local_tools_ready.clear()
 
     def teardown_method(self):
         srv = self._srv
         srv._combiner_config, srv._conn_manager = self._saved
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
+        srv._local_tools_ready.clear()
 
     @staticmethod
     def _tool(name: str):
@@ -470,6 +472,103 @@ class TestStaleServerTools:
         merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
         assert self._names(merged) == ["alpha_one"]
         assert "beta" not in srv._server_tool_cache
+
+    def test_failed_server_tools_dropped(self):
+        """Remove on tool attempt: a server with a recorded call failure is not
+        re-served, even inside the grace window (its stale slice is dropped)."""
+        srv = self._srv
+        srv._combiner_config = self._config()
+        srv._conn_manager = None
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+        srv._failed_servers["beta"] = "ConnectionError: dead"
+        try:
+            merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
+            assert self._names(merged) == ["alpha_one"]
+            assert "beta" not in srv._server_tool_cache
+        finally:
+            srv._failed_servers.pop("beta", None)
+
+    def test_present_server_marked_tools_ready(self):
+        """A server that returns tools in a fresh fetch is confirmed 'ready'."""
+        srv = self._srv
+        srv._combiner_config = self._config()
+        srv._conn_manager = None
+        assert srv._local_tools_ready.get("alpha") is None
+        srv._merge_stale_server_tools([self._tool("alpha_one")], now=1000.0)
+        assert srv._local_tools_ready.get("alpha") is True
+
+    def test_evicted_server_loses_ready(self):
+        """A dropped (disabled/expired) server also loses its ready flag."""
+        srv = self._srv
+        srv._combiner_config = self._config(beta_disabled=True)
+        srv._conn_manager = None
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+        srv._local_tools_ready["beta"] = True
+        srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
+        assert "beta" not in srv._local_tools_ready
+
+
+# ── stdio/sharedserver started → ready lifecycle ───────────────────
+
+
+class TestLocalToolsReady:
+    """`signal_local_tools_ready`: the stdio analogue of ConnectionManager's
+    tools-ready gate — broadcast only after the proxy's tools/list comes back."""
+
+    async def test_signal_primes_then_invalidates(self):
+        """Retries a not-yet-serving proxy; marks ready + invalidates only once
+        tools/list returns."""
+        from types import SimpleNamespace
+
+        import mcp_combiner.server as srv
+
+        srv._local_tools_ready.pop("beta", None)
+        calls: list[int] = []
+        state = {"n": 0}
+
+        async def list_tools(*, run_middleware: bool = True):
+            state["n"] += 1
+            if state["n"] < 3:
+                raise ConnectionError("still starting")
+            return []
+
+        proxy = SimpleNamespace(list_tools=list_tools)
+        orig = srv.invalidate_tool_cache
+        srv.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
+        try:
+            ok = await srv.signal_local_tools_ready(proxy, "beta", timeout=10.0, interval=0.0)
+            assert ok is True
+            assert srv._local_tools_ready.get("beta") is True
+            assert calls == [1]  # broadcast exactly once, after the list returned
+        finally:
+            srv.invalidate_tool_cache = orig  # type: ignore[assignment]
+            srv._local_tools_ready.pop("beta", None)
+
+    async def test_signal_timeout_does_not_invalidate(self):
+        """If the server never becomes listable, we never broadcast and it stays
+        'started' (not ready)."""
+        from types import SimpleNamespace
+
+        import mcp_combiner.server as srv
+
+        srv._local_tools_ready.pop("gamma", None)
+        calls: list[int] = []
+
+        async def list_tools(*, run_middleware: bool = True):
+            raise ConnectionError("never up")
+
+        proxy = SimpleNamespace(list_tools=list_tools)
+        orig = srv.invalidate_tool_cache
+        srv.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
+        try:
+            ok = await srv.signal_local_tools_ready(proxy, "gamma", timeout=0.05, interval=0.0)
+            assert ok is False
+            assert srv._local_tools_ready.get("gamma") is None
+            assert calls == []
+        finally:
+            srv.invalidate_tool_cache = orig  # type: ignore[assignment]
 
 
 # ── unconditional object-schema coercion (issue #7 safety net) ─────
