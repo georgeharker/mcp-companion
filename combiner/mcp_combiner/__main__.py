@@ -232,6 +232,8 @@ def create_app() -> Starlette:
 
     input_validation = _tristate("MCP_COMBINER_INPUT_VALIDATION")
     output_validation = _tristate("MCP_COMBINER_OUTPUT_VALIDATION")
+    stale_grace_env = os.environ.get("MCP_COMBINER_STALE_TOOL_GRACE")
+    stale_tool_grace = float(stale_grace_env) if stale_grace_env else None
 
     combiner, ss_manager = create_combiner(
         config_path,
@@ -241,6 +243,7 @@ def create_app() -> Starlette:
         schema_fixes=schema_fixes,
         input_validation=input_validation,
         output_validation=output_validation,
+        stale_tool_grace=stale_tool_grace,
         return_ss_manager=True,
     )
 
@@ -365,6 +368,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--stale-tool-grace",
+        dest="stale_tool_grace",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "How long a disconnected server keeps serving its last-known tools "
+            "before they are dropped (rides out a transient reconnect). Default "
+            "30s. Lower it to drop a killed server's tools sooner."
+        ),
+    )
+    parser.add_argument(
         "--log-file",
         metavar="PATH",
         default=None,
@@ -397,6 +412,8 @@ def main() -> None:
         os.environ["MCP_COMBINER_INPUT_VALIDATION"] = "1" if args.input_validation else "0"
     if args.output_validation is not None:
         os.environ["MCP_COMBINER_OUTPUT_VALIDATION"] = "1" if args.output_validation else "0"
+    if args.stale_tool_grace is not None:
+        os.environ["MCP_COMBINER_STALE_TOOL_GRACE"] = str(args.stale_tool_grace)
 
     # Resolve --log-level to a stdlib logging numeric level.
     # "trace" is treated as DEBUG since stdlib has no TRACE.

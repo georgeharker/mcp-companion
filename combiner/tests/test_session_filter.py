@@ -571,6 +571,22 @@ class TestLocalToolsReady:
             srv.invalidate_tool_cache = orig  # type: ignore[assignment]
 
 
+def test_stale_tool_grace_configurable():
+    """create_combiner(stale_tool_grace=…) overrides the grace; omitting it (None)
+    leaves the module default (30s) untouched."""
+    import mcp_combiner.server as srv
+
+    saved = srv.STALE_TOOL_GRACE
+    try:
+        srv.STALE_TOOL_GRACE = 30.0
+        srv.create_combiner(str(FIXTURES / "servers.json"))  # None → unchanged
+        assert srv.STALE_TOOL_GRACE == 30.0
+        srv.create_combiner(str(FIXTURES / "servers.json"), stale_tool_grace=7)
+        assert srv.STALE_TOOL_GRACE == 7.0
+    finally:
+        srv.STALE_TOOL_GRACE = saved
+
+
 # ── unconditional object-schema coercion (issue #7 safety net) ─────
 
 

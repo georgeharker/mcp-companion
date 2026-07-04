@@ -84,10 +84,12 @@ _server_tool_cache: dict[str, list[Tool]] = {}
 _server_tool_seen: dict[str, float] = {}
 
 # How long a reconnecting server's last-known tools stay advertised after it
-# stops appearing in fresh fetches. Long enough to ride out health-check
-# reconnects and quick dev restarts; short enough that a truly-wedged server's
-# tools eventually disappear rather than lingering forever.
-STALE_TOOL_GRACE = 90.0  # seconds
+# stops appearing in fresh fetches. Long enough to ride out a health-check
+# reconnect (the monitor interval is 30s and a real blip reconnects in seconds);
+# short enough that a killed/wedged server's tools disappear promptly rather than
+# lingering. Overridable via create_combiner(stale_tool_grace=…) /
+# --stale-tool-grace / combiner.stale_tool_grace.
+STALE_TOOL_GRACE = 30.0  # seconds (default)
 
 # Tools-ready state for stdio / sharedserver servers — those WITHOUT a persistent
 # HTTP connection tracked by ConnectionManager. This mirrors ConnectionManager's
@@ -1266,6 +1268,7 @@ def create_combiner(
     schema_fixes: frozenset[str] | None = ...,
     input_validation: bool | None = ...,
     output_validation: bool | None = ...,
+    stale_tool_grace: float | None = ...,
     return_ss_manager: Literal[True],
 ) -> tuple[FastMCP, SharedServerManager]: ...
 
@@ -1280,6 +1283,7 @@ def create_combiner(
     schema_fixes: frozenset[str] | None = ...,
     input_validation: bool | None = ...,
     output_validation: bool | None = ...,
+    stale_tool_grace: float | None = ...,
     return_ss_manager: Literal[False] = ...,
 ) -> FastMCP: ...
 
@@ -1293,6 +1297,7 @@ def create_combiner(
     schema_fixes: frozenset[str] | None = None,
     input_validation: bool | None = None,
     output_validation: bool | None = None,
+    stale_tool_grace: float | None = None,
     return_ss_manager: bool = False,
 ) -> FastMCP | tuple[FastMCP, SharedServerManager]:
     """Create the combiner FastMCP server from a config file.
@@ -1341,6 +1346,13 @@ def create_combiner(
     global _combiner_config
     global _conn_manager
     global _schema_fixes_global
+    global STALE_TOOL_GRACE
+
+    # Configurable stale-tool grace: how long a disconnected server keeps serving
+    # its last-known tools before they're dropped. Default STALE_TOOL_GRACE.
+    if stale_tool_grace is not None:
+        STALE_TOOL_GRACE = float(stale_tool_grace)
+        logger.info("Stale-tool grace set to %.0fs", STALE_TOOL_GRACE)
 
     # Replace the MCP SDK's per-call jsonschema.validate (which rebuilds the
     # validator + re-checks the meta-schema on every tool call) with a cached

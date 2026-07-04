@@ -140,6 +140,12 @@ local function _combiner_cmd()
     if ov ~= nil then
         table.insert(cmd, ov and "--output-validation" or "--no-output-validation")
     end
+    -- Stale-tool grace: how long a disconnected server keeps serving its tools.
+    local grace = _config.combiner.stale_tool_grace
+    if grace ~= nil then
+        table.insert(cmd, "--stale-tool-grace")
+        table.insert(cmd, tostring(grace))
+    end
     return cmd
 end
 

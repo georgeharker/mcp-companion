@@ -27,6 +27,10 @@ local M = {}
 ---   off — the upstream server already validated its structured output, so re-validating here is redundant
 ---   per-call work (measurably slow for large responses). true: force it on. Passed as
 ---   ``--output-validation`` / ``--no-output-validation``; omitted when nil.
+--- @field stale_tool_grace? number Seconds a disconnected server keeps serving its last-known tools before
+---   they are dropped, to ride out a transient reconnect (the health-check interval is 30s). nil = combiner
+---   default (30s). Lower it to drop a killed/wedged server's tools sooner; raise it to tolerate longer
+---   outages. Passed as ``--stale-tool-grace``; omitted when nil.
 --- @field log? MCPCompanion.CombinerLogConfig Combiner logging — same shape as the
 ---   top-level ``log`` table.  ``{ level = "info", file = true }`` by default.
 ---   ``file = true`` resolves to ``stdpath("log")/mcp-combiner-py.log``;
@@ -152,6 +156,10 @@ M.defaults = {
         -- documentation — a nil entry is absent from the table, so no flag is passed.
         input_validation = nil,
         output_validation = nil,
+        -- Seconds a disconnected server keeps serving its last-known tools before
+        -- they are dropped (rides out a transient reconnect). nil = combiner
+        -- default (30s); lower it to drop a killed server's tools sooner.
+        stale_tool_grace = nil,
     },
 
     native_servers = {
