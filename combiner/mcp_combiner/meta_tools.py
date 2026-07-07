@@ -8,6 +8,7 @@ from fastmcp import Context, FastMCP
 
 from mcp_combiner.config import CombinerConfig, ServerConfig, ServerStatusInfo
 from mcp_combiner.connections import ConnectionManager
+from mcp_combiner.mounts import drop_server_providers, mount_server_provider
 from mcp_combiner.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-combiner")
@@ -81,7 +82,7 @@ def register_meta_tools(
                     await conn_manager.connect(config, server_name, srv)
 
             proxy = _create_server_proxy(config, server_name, srv)
-            combiner.mount(proxy, namespace=server_name)
+            mount_server_provider(combiner, proxy, server_name)
             # Announce only once the server can list tools — never proactively.
             # HTTP: connect() above already fired on_tools_ready (or the monitor
             # will once it reconnects). Stdio/sharedserver: prime the proxy's
@@ -123,30 +124,12 @@ def register_meta_tools(
         # non-sharedserver servers.
         await ss_manager.ensure_stopped(server_name)
 
-        # Remove all providers whose namespace matches server_name.
-        # AggregateProvider wraps namespaced providers via wrap_transform(Namespace(...)).
-        # The wrapped provider's repr contains the namespace string, so we inspect it.
-        # We also match by checking the provider's _namespace attribute if it exists
-        # (set by some FastMCP wrapper types).
+        # Remove the providers this server's mount added (tracked by identity
+        # in the mount registry — see mcp_combiner.mounts).
         try:
             from mcp_combiner.server import invalidate_tool_cache
 
-            before = len(combiner.providers)
-
-            def _provider_matches(p: object) -> bool:
-                """Return True if provider belongs to server_name's namespace."""
-                # FastMCP wraps with Namespace transform — check repr for namespace tag
-                r = repr(p)
-                # NamespaceTransform repr includes the namespace string
-                if f"namespace='{server_name}'" in r or f'namespace="{server_name}"' in r:
-                    return True
-                # Fallback: check _namespace attribute
-                if getattr(p, "_namespace", None) == server_name:
-                    return True
-                return False
-
-            combiner.providers = [p for p in combiner.providers if not _provider_matches(p)]
-            removed = before - len(combiner.providers)
+            removed = drop_server_providers(combiner, server_name)
 
             invalidate_tool_cache()
             logger.info("Removed %d provider(s) for server '%s'", removed, server_name)
@@ -174,14 +157,7 @@ def register_meta_tools(
         if conn_manager.has_connection(server_name):
             await conn_manager.disconnect(server_name)
         await ss_manager.ensure_stopped(server_name)
-
-        def _provider_matches(p: object) -> bool:
-            r = repr(p)
-            if f"namespace='{server_name}'" in r or f'namespace="{server_name}"' in r:
-                return True
-            return getattr(p, "_namespace", None) == server_name
-
-        combiner.providers = [p for p in combiner.providers if not _provider_matches(p)]
+        drop_server_providers(combiner, server_name)
 
     async def _mount_server(server_name: str, srv: ServerConfig) -> FastMCP:
         """Start, connect, and mount a server. Mirrors combiner__enable_server.
@@ -199,24 +175,8 @@ def register_meta_tools(
                 conn_manager.register(config, server_name, srv)
             await conn_manager.connect(config, server_name, srv)
         proxy = _create_server_proxy(config, server_name, srv)
-        combiner.mount(proxy, namespace=server_name)
+        mount_server_provider(combiner, proxy, server_name)
         return proxy
-
-    def _drop_providers(server_name: str) -> int:
-        """Remove all mounted providers for *server_name*'s namespace.
-
-        Returns the number removed. Does not touch connections or processes.
-        """
-        before = len(combiner.providers)
-
-        def _matches(p: object) -> bool:
-            r = repr(p)
-            if f"namespace='{server_name}'" in r or f'namespace="{server_name}"' in r:
-                return True
-            return getattr(p, "_namespace", None) == server_name
-
-        combiner.providers = [p for p in combiner.providers if not _matches(p)]
-        return before - len(combiner.providers)
 
     @combiner.tool()
     async def combiner__restart_server(server_name: str) -> str:
@@ -266,7 +226,16 @@ def register_meta_tools(
                 await conn_manager.disconnect(server_name)
             except Exception:
                 logger.exception("restart: failed to disconnect '%s'", server_name)
-        removed = _drop_providers(server_name)
+        removed = drop_server_providers(combiner, server_name)
+        if removed == 0:
+            # An enabled server should have been mounted; removing nothing means
+            # the mount bookkeeping diverged from reality — exactly the asymmetry
+            # that let stale providers shadow the remount unnoticed.
+            logger.warning(
+                "restart: dropped 0 providers for enabled server '%s' — "
+                "mount bookkeeping may have diverged",
+                server_name,
+            )
 
         # 2. Hard-restart the backing process (no-op for non-sharedserver servers).
         restarted_proc = False
@@ -287,7 +256,7 @@ def register_meta_tools(
         except Exception as e:
             # The remount itself blew up — make sure no half-mounted, dead proxy
             # is left advertising tools, then notify clients to drop them.
-            _drop_providers(server_name)
+            drop_server_providers(combiner, server_name)
             invalidate_tool_cache()
             logger.exception("restart: failed to remount '%s'", server_name)
             return f"Server '{server_name}': backing process restarted but remount failed: {e}"

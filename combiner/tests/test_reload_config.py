@@ -16,6 +16,7 @@ import pytest
 import mcp_combiner.server as server_mod
 from mcp_combiner.config import CombinerConfig, ServerConfig
 from mcp_combiner.meta_tools import register_meta_tools
+from mcp_combiner.mounts import mount_server_provider
 
 
 class _FakeProvider:
@@ -133,8 +134,11 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     reload = combiner.tools["combiner__reload_config"]
     restart = combiner.tools["combiner__restart_server"]
 
-    # Pretend alpha is already mounted+connected from startup.
-    combiner.providers.append(_FakeProvider("alpha"))
+    # Pretend alpha is already mounted+connected from startup. Mount through
+    # the real bookkeeping helper — startup uses the same path, and seeding
+    # combiner.providers directly would bypass the mount registry (which is
+    # exactly how the dead repr-matcher bug stayed invisible in these tests).
+    mount_server_provider(combiner, object(), "alpha")
     conn.connected.add("alpha")
 
     return {
@@ -339,7 +343,7 @@ async def test_restart_stdio_primes_before_broadcast(
     srv._local_tools_ready["crib"] = True
 
     register_meta_tools(combiner, config, conn, ss)
-    combiner.providers.append(_FakeProvider("crib"))
+    mount_server_provider(combiner, object(), "crib")
 
     try:
         result = await combiner.tools["combiner__restart_server"]("crib")

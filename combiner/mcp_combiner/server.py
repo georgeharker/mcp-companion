@@ -45,6 +45,7 @@ from mcp_combiner.config import (
     _interpolate_str,  # noqa: PLC2701
 )
 from mcp_combiner.connections import AuthenticationError, ConnectionManager
+from mcp_combiner.mounts import mount_server_provider
 from mcp_combiner.schema import normalize_object_schema
 from mcp_combiner.sharedserver import SharedServerManager
 
@@ -1425,7 +1426,7 @@ def create_combiner(
 
             try:
                 proxy = _create_server_proxy(config, name, srv)
-                server.mount(proxy, namespace=name)
+                mount_server_provider(server, proxy, name)
                 logger.info("Mounted server: %s (%s)", name, srv.transport.value)
             except Exception:
                 logger.exception("Failed to mount server '%s'", name)
