@@ -514,58 +514,71 @@ class TestStaleServerTools:
 
 
 class TestLocalToolsReady:
-    """`signal_local_tools_ready`: the stdio analogue of ConnectionManager's
-    tools-ready gate — broadcast only after the proxy's tools/list comes back."""
+    """`prime_server_tools`: the started → ready transition — invoke tools/list
+    on the server's mounted provider; on answer, store the slice, mark ready,
+    and broadcast. On timeout: no store, no broadcast, stays 'started'."""
 
-    async def test_signal_primes_then_invalidates(self):
-        """Retries a not-yet-serving proxy; marks ready + invalidates only once
-        tools/list returns."""
+    @staticmethod
+    def _combiner_with_provider(name: str, list_tools) -> object:
+        """A minimal combiner whose mount registry maps *name* → one provider."""
         from types import SimpleNamespace
 
+        from mcp_combiner import mounts
+
+        combiner = SimpleNamespace(providers=[])
+        mounts._registry(combiner)[name] = [SimpleNamespace(list_tools=list_tools)]
+        return combiner
+
+    async def test_prime_retries_stores_then_invalidates(self):
+        """Retries a not-yet-serving server; stores the slice, marks ready, and
+        invalidates only once tools/list answers."""
         import mcp_combiner.server as srv
 
         srv._local_tools_ready.pop("beta", None)
         calls: list[int] = []
         state = {"n": 0}
 
-        async def list_tools(*, run_middleware: bool = True):
+        async def list_tools():
             state["n"] += 1
             if state["n"] < 3:
                 raise ConnectionError("still starting")
-            return []
+            return [TestStaleServerTools._tool("beta_one")]
 
-        proxy = SimpleNamespace(list_tools=list_tools)
+        combiner = self._combiner_with_provider("beta", list_tools)
         orig = srv.invalidate_tool_cache
         srv.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
         try:
-            ok = await srv.signal_local_tools_ready(proxy, "beta", timeout=10.0, interval=0.0)
+            ok = await srv.prime_server_tools(combiner, "beta", timeout=10.0, interval=0.0)
             assert ok is True
             assert srv._local_tools_ready.get("beta") is True
+            # The primed list IS the stored slice (namespaced provider shape).
+            assert [str(t.name) for t in srv._server_tool_cache["beta"]] == ["beta_one"]
             assert calls == [1]  # broadcast exactly once, after the list returned
         finally:
             srv.invalidate_tool_cache = orig  # type: ignore[assignment]
             srv._local_tools_ready.pop("beta", None)
+            srv._server_tool_cache.pop("beta", None)
+            srv._server_tool_seen.pop("beta", None)
 
-    async def test_signal_timeout_does_not_invalidate(self):
-        """If the server never becomes listable, we never broadcast and it stays
-        'started' (not ready)."""
-        from types import SimpleNamespace
-
+    async def test_prime_timeout_no_store_no_invalidate(self):
+        """If the server never answers tools/list, nothing is stored, nothing is
+        broadcast, and it stays 'started' (not ready)."""
         import mcp_combiner.server as srv
 
         srv._local_tools_ready.pop("gamma", None)
         calls: list[int] = []
 
-        async def list_tools(*, run_middleware: bool = True):
+        async def list_tools():
             raise ConnectionError("never up")
 
-        proxy = SimpleNamespace(list_tools=list_tools)
+        combiner = self._combiner_with_provider("gamma", list_tools)
         orig = srv.invalidate_tool_cache
         srv.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
         try:
-            ok = await srv.signal_local_tools_ready(proxy, "gamma", timeout=0.05, interval=0.0)
+            ok = await srv.prime_server_tools(combiner, "gamma", timeout=0.05, interval=0.0)
             assert ok is False
             assert srv._local_tools_ready.get("gamma") is None
+            assert "gamma" not in srv._server_tool_cache
             assert calls == []
         finally:
             srv.invalidate_tool_cache = orig  # type: ignore[assignment]

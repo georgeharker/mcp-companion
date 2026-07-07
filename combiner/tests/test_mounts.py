@@ -114,15 +114,25 @@ async def test_restart_leaves_one_live_provider(
     # Startup mount (same helper server.py's lifespan uses).
     mount_server_provider(combiner, _make_proxy(), "crib")
 
-    async with Client(combiner) as client:
-        result = await client.call_tool("combiner__restart_server", {"server_name": "crib"})
-        text = result.content[0].text
-        assert "restarted" in text
-        assert "1 provider(s) replaced" in text
+    try:
+        async with Client(combiner) as client:
+            result = await client.call_tool("combiner__restart_server", {"server_name": "crib"})
+            text = result.content[0].text
+            assert "restarted" in text
+            assert "1 provider(s) replaced" in text
 
-        assert len(combiner.providers) == base + 1
+            assert len(combiner.providers) == base + 1
 
-        # The proxied call resolves through the NEW proxy, not a stale one.
-        pong = await client.call_tool("crib_ping", {})
-        assert pong.content[0].text == "pong"
-    assert len(proxies) == 2  # startup proxy + restart's fresh proxy
+            # The restart's prime stored the namespaced slice (started → ready
+            # model: the tools/list answer IS the stored tool set).
+            assert [str(t.name) for t in server_mod._server_tool_cache["crib"]] == ["crib_ping"]
+            assert server_mod._local_tools_ready.get("crib") is True
+
+            # The proxied call resolves through the NEW proxy, not a stale one.
+            pong = await client.call_tool("crib_ping", {})
+            assert pong.content[0].text == "pong"
+        assert len(proxies) == 2  # startup proxy + restart's fresh proxy
+    finally:
+        server_mod._server_tool_cache.pop("crib", None)
+        server_mod._server_tool_seen.pop("crib", None)
+        server_mod._local_tools_ready.pop("crib", None)

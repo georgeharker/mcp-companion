@@ -64,7 +64,7 @@ def register_meta_tools(
             from mcp_combiner.server import (
                 _create_server_proxy,
                 invalidate_tool_cache,
-                signal_local_tools_ready,
+                prime_server_tools,
             )
 
             # Start the backing sharedserver first (use + health-poll), so the
@@ -85,12 +85,12 @@ def register_meta_tools(
             mount_server_provider(combiner, proxy, server_name)
             # Announce only once the server can list tools — never proactively.
             # HTTP: connect() above already fired on_tools_ready (or the monitor
-            # will once it reconnects). Stdio/sharedserver: prime the proxy's
-            # tools/list, then broadcast when it returns.
+            # will once it reconnects). Stdio/sharedserver: invoke the server's
+            # tools/list; the prime stores the slice and broadcasts on answer.
             if conn_manager.is_http_server(srv):
                 invalidate_tool_cache()
             else:
-                await signal_local_tools_ready(proxy, server_name)
+                await prime_server_tools(combiner, server_name)
             logger.info("Dynamically mounted server: %s", server_name)
             return f"Server '{server_name}' enabled and mounted"
         except Exception as e:
@@ -162,8 +162,8 @@ def register_meta_tools(
     async def _mount_server(server_name: str, srv: ServerConfig) -> FastMCP:
         """Start, connect, and mount a server. Mirrors combiner__enable_server.
 
-        Returns the mounted proxy so callers can prime its tools/list (see
-        combiner__restart_server's tools-ready confirmation).
+        Priming (tools/list → ready) is the caller's job, via
+        prime_server_tools — see combiner__restart_server's tools-ready gate.
         """
         from mcp_combiner.server import _create_server_proxy
 
@@ -215,7 +215,7 @@ def register_meta_tools(
         from mcp_combiner.server import (
             clear_tool_cache,
             invalidate_tool_cache,
-            signal_local_tools_ready,
+            prime_server_tools,
         )
 
         # 1. Tear down the combiner-side connection + mounted providers. We do NOT
@@ -252,7 +252,7 @@ def register_meta_tools(
         #    once the server is tools-ready (below), which swaps it in. If the
         #    tool set changed, tools-ready carries the new set.
         try:
-            proxy = await _mount_server(server_name, srv)
+            await _mount_server(server_name, srv)
         except Exception as e:
             # The remount itself blew up — make sure no half-mounted, dead proxy
             # is left advertising tools, then notify clients to drop them.
@@ -280,13 +280,13 @@ def register_meta_tools(
         else:
             # Stdio/sharedserver has NO connection monitor, so there is no
             # corrective re-notification. Do not assume it is ready: clear
-            # silently, then prime the remounted proxy's tools/list and broadcast
-            # (invalidate) ONLY once it returns — the started → ready gate. This
-            # is what was missing; a proactive invalidate here races the respawn
-            # and re-lists the stale/empty set (issue: restart not surfacing new
-            # tools).
+            # silently, then invoke the remounted server's tools/list — the prime
+            # stores the slice and broadcasts (invalidate) ONLY once it answers,
+            # the started → ready gate. A proactive invalidate here would race
+            # the respawn and re-list the stale/empty set (issue: restart not
+            # surfacing new tools).
             clear_tool_cache()
-            if await signal_local_tools_ready(proxy, server_name):
+            if await prime_server_tools(combiner, server_name):
                 ready_note = ""
             else:
                 ready_note = "; server not yet listable — tools appear once it is live"

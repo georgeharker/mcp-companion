@@ -74,6 +74,17 @@ def mount_server_provider(combiner: FastMCP, proxy: Any, server_name: str) -> No
     _registry(combiner).setdefault(server_name, []).extend(added)
 
 
+def get_server_providers(combiner: FastMCP, server_name: str) -> list[Any]:
+    """The providers currently mounted for *server_name* (read-only view).
+
+    A provider's ``list_tools()`` yields tools exactly as an aggregate fetch
+    sees them — namespaced by fastmcp's own transform — which makes it the
+    right handle for priming/storing a server's tool slice without
+    reimplementing the namespacing.
+    """
+    return list(_registry(combiner).get(server_name, []))
+
+
 def drop_server_providers(combiner: FastMCP, server_name: str) -> int:
     """Remove all providers mounted for *server_name*, by object identity.
 

@@ -23,6 +23,9 @@ class _FakeProvider:
     def __init__(self, namespace: str) -> None:
         self._namespace = namespace
 
+    async def list_tools(self) -> list[Any]:
+        return []
+
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return f"<FakeProvider namespace='{self._namespace}'>"
 
@@ -328,12 +331,14 @@ async def test_restart_stdio_primes_before_broadcast(
 
     order: list[str] = []
 
-    class _Proxy:
-        async def list_tools(self, *, run_middleware: bool = True) -> list[Any]:
-            order.append("list_tools")
-            return []
+    # The prime lists tools through the MOUNTED PROVIDER (mount registry), not
+    # the raw proxy — record the invocation there.
+    async def _list_tools(self: Any) -> list[Any]:
+        order.append("list_tools")
+        return []
 
-    monkeypatch.setattr(server_mod, "_create_server_proxy", lambda *a, **k: _Proxy())
+    monkeypatch.setattr(_FakeProvider, "list_tools", _list_tools)
+    monkeypatch.setattr(server_mod, "_create_server_proxy", lambda *a, **k: object())
     monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
     monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
 
