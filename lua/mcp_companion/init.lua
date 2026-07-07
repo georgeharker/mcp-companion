@@ -97,8 +97,9 @@ function M.setup(opts)
     })
 
     -- Combiner is started by CC extension setup (cc/init.lua) when CodeCompanion loads,
-    -- ensuring it's healthy before any ACP session is created.
-    -- Manual start available via :MCPStart command.
+    -- ensuring it's healthy before any ACP session is created. :MCPStatus also
+    -- connects on demand (combiner.ensure_started) so the status window works
+    -- before any chat exists.
 
     -- User commands
     vim.api.nvim_create_user_command("MCPStatus", function()

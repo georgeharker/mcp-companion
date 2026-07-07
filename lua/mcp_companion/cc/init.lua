@@ -780,23 +780,9 @@ end
 
 --- Called on ChatAdapter event so combiner starts warming up while UI loads.
 function M._start_combiner_async()
-    local state = require("mcp_companion.state")
-    local config = require("mcp_companion.config")
-
-    -- Already connected, healthy, or connecting
-    local combiner_status = state.get().combiner.status
-    if combiner_status == "connected" or combiner_status == "connecting" or combiner_status == "healthy" then
-        return
+    if require("mcp_companion.combiner").ensure_started() then
+        log.info("CC: starting combiner async on ChatAdapter event")
     end
-
-    -- No combiner config
-    if not config.get().combiner.config then
-        log.debug("CC: no combiner config, skipping combiner start")
-        return
-    end
-
-    log.info("CC: starting combiner async on ChatAdapter event")
-    require("mcp_companion.combiner").start()
 end
 
 --- Wait for combiner to be fully connected (tools registered).

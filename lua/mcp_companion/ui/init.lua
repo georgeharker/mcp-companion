@@ -432,6 +432,12 @@ function M.open()
 
     local config = require("mcp_companion.config").get()
 
+    -- No combiner connection yet (e.g. :MCPStatus before any chat has opened) —
+    -- bring up the editor's own connection so the window shows live data instead
+    -- of blank. Renders proceed immediately; the state subscription below
+    -- re-renders as the connection comes up.
+    require("mcp_companion.combiner").ensure_started()
+
     -- Create buffer
     _buf = vim.api.nvim_create_buf(false, true)
     vim.bo[_buf].buftype = "nofile"
