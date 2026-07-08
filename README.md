@@ -61,6 +61,25 @@ curl http://127.0.0.1:9741/health
 - Provides meta-tools (`combiner__status`, `combiner__enable_server`, `combiner__disable_server`)
 - Serves a `/health` endpoint with server status
 
+### Architecture
+
+<p align="center">
+  <img src="docs/assets/internals.svg" alt="Combiner internal architecture: entry point → wiring → management and request plane → domain → foundation, all state owned by CombinerRuntime; the mcp-combiner CLI is a pure client of the management plane; mockserver is the test instrument" width="820">
+</p>
+
+Internally the combiner is a one-way layered DAG: the serve entry point
+(`--mcp` → `__main__` · `asgi`) wires up `server`, which registers the
+**management & request plane** (`meta_tools`, the `/sessions*` REST routes,
+and the tools/list + tool-call middleware) over the **domain** modules
+(tool cache/hysteresis, proxy construction, status, schema fixes) and the
+**foundation** (persistent connections with self-healing, sharedserver
+process management, auth, the Neovim back-channel). All mutable state is
+owned by `runtime.CombinerRuntime` and mutated only through its methods.
+The `mcp-combiner` CLI is a pure client of the management plane; the
+`mockserver` module is the instrumentable test upstream. Full internal
+design notes live in
+[`docs/design.md`](https://github.com/georgeharker/mcp-companion/blob/main/docs/design.md).
+
 ### Control CLI
 
 `mcp-combiner` (without `--mcp`) is a control CLI for a running combiner —
