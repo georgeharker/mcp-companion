@@ -1,59 +1,59 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="880" height="640" viewBox="0 0 880 640" role="img" aria-label="Combiner internal architecture: entry point, wiring, management and request plane, domain, foundation — all state owned by CombinerRuntime; the mcp-combiner CLI is a pure client of the management plane; mockserver is the test instrument"><defs><linearGradient x1="0" y1="0" x2="0" y2="1" id="cardSheen"><stop offset="0" stop-color="#ffffff"/><stop offset="0.42" stop-color="#FAFBFC"/><stop offset="1" stop-color="#D6DAE1"/></linearGradient><linearGradient x1="0" y1="0" x2="0" y2="1" id="hubGrad"><stop offset="0" stop-color="#3A3B47"/><stop offset="1" stop-color="#141519"/></linearGradient><marker refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto" markerUnits="strokeWidth" viewBox="0 0 10 10" id="arrow"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#8636C3"/></marker></defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="700" viewBox="0 0 880 700" role="img" aria-label="Combiner internal architecture: entry point, wiring, management and request plane, domain, foundation — all state owned by CombinerRuntime; the mcp-combiner CLI is a pure client of the management plane; mockserver is the test instrument"><defs><linearGradient x1="0" y1="0" x2="0" y2="1" id="cardSheen"><stop offset="0" stop-color="#ffffff"/><stop offset="0.42" stop-color="#FAFBFC"/><stop offset="1" stop-color="#D6DAE1"/></linearGradient><linearGradient x1="0" y1="0" x2="0" y2="1" id="hubGrad"><stop offset="0" stop-color="#3A3B47"/><stop offset="1" stop-color="#141519"/></linearGradient><marker refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto" markerUnits="strokeWidth" viewBox="0 0 10 10" id="arrow"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#8636C3"/></marker></defs>
 <rect x="32" y="28" width="608" height="64" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
-<rect x="32" y="112" width="608" height="58" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
-<rect x="32" y="190" width="608" height="88" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
-<rect x="32" y="298" width="608" height="88" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
-<rect x="32" y="406" width="608" height="110" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
-<rect x="32" y="546" width="608" height="66" rx="18" fill="#F5EDFC" stroke="#8636C3" stroke-width="2.6"/>
-<rect x="664" y="190" width="184" height="88" rx="16" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
-<rect x="664" y="406" width="184" height="88" rx="16" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
+<rect x="32" y="126" width="608" height="58" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
+<rect x="32" y="218" width="608" height="88" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
+<rect x="32" y="340" width="608" height="88" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
+<rect x="32" y="462" width="608" height="110" rx="18" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
+<rect x="32" y="606" width="608" height="66" rx="18" fill="#F5EDFC" stroke="#8636C3" stroke-width="2.6"/>
+<rect x="672" y="218" width="184" height="88" rx="16" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
+<rect x="672" y="462" width="184" height="88" rx="16" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6"/>
 <rect x="176" y="54" width="320" height="28" rx="14" fill="url(#hubGrad)"/>
-<rect x="176" y="136" width="320" height="28" rx="14" fill="url(#hubGrad)"/>
-<rect x="162" y="228" width="110" height="30" rx="15" fill="url(#hubGrad)"/>
-<rect x="296" y="228" width="80" height="30" rx="15" fill="url(#hubGrad)"/>
-<rect x="400" y="228" width="110" height="30" rx="15" fill="url(#hubGrad)"/>
-<rect x="100" y="336" width="100" height="30" rx="15" fill="url(#hubGrad)"/>
-<rect x="222" y="336" width="126" height="30" rx="15" fill="url(#hubGrad)"/>
-<rect x="370" y="336" width="80" height="30" rx="15" fill="url(#hubGrad)"/>
-<rect x="472" y="336" width="100" height="30" rx="15" fill="url(#hubGrad)"/>
-<rect x="102" y="440" width="116" height="28" rx="14" fill="url(#hubGrad)"/>
-<rect x="242" y="440" width="124" height="28" rx="14" fill="url(#hubGrad)"/>
-<rect x="390" y="440" width="180" height="28" rx="14" fill="url(#hubGrad)"/>
-<rect x="200" y="476" width="64" height="28" rx="14" fill="url(#hubGrad)"/>
-<rect x="288" y="476" width="80" height="28" rx="14" fill="url(#hubGrad)"/>
-<rect x="392" y="476" width="84" height="28" rx="14" fill="url(#hubGrad)"/>
-<line x1="336" y1="92" x2="336" y2="108" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
-<line x1="336" y1="170" x2="336" y2="186" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
-<line x1="336" y1="278" x2="336" y2="294" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
-<line x1="336" y1="386" x2="336" y2="402" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
-<line x1="336" y1="516" x2="336" y2="542" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
-<line x1="664" y1="234" x2="648" y2="234" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
+<rect x="176" y="150" width="320" height="28" rx="14" fill="url(#hubGrad)"/>
+<rect x="162" y="256" width="110" height="30" rx="15" fill="url(#hubGrad)"/>
+<rect x="296" y="256" width="80" height="30" rx="15" fill="url(#hubGrad)"/>
+<rect x="400" y="256" width="110" height="30" rx="15" fill="url(#hubGrad)"/>
+<rect x="100" y="378" width="100" height="30" rx="15" fill="url(#hubGrad)"/>
+<rect x="222" y="378" width="126" height="30" rx="15" fill="url(#hubGrad)"/>
+<rect x="370" y="378" width="80" height="30" rx="15" fill="url(#hubGrad)"/>
+<rect x="472" y="378" width="100" height="30" rx="15" fill="url(#hubGrad)"/>
+<rect x="102" y="496" width="116" height="28" rx="14" fill="url(#hubGrad)"/>
+<rect x="242" y="496" width="124" height="28" rx="14" fill="url(#hubGrad)"/>
+<rect x="390" y="496" width="180" height="28" rx="14" fill="url(#hubGrad)"/>
+<rect x="200" y="532" width="64" height="28" rx="14" fill="url(#hubGrad)"/>
+<rect x="288" y="532" width="80" height="28" rx="14" fill="url(#hubGrad)"/>
+<rect x="392" y="532" width="84" height="28" rx="14" fill="url(#hubGrad)"/>
+<line x1="336" y1="96" x2="336" y2="121" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
+<line x1="336" y1="188" x2="336" y2="213" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
+<line x1="336" y1="310" x2="336" y2="335" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
+<line x1="336" y1="432" x2="336" y2="457" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
+<line x1="336" y1="576" x2="336" y2="601" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
+<line x1="668" y1="262" x2="646" y2="262" stroke="#8636C3" stroke-linecap="round" stroke-width="4" marker-end="url(#arrow)"/>
 <text x="50" y="48" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">ENTRY POINT</text>
-<text x="50" y="131" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">WIRING</text>
-<text x="50" y="212" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">MANAGEMENT &amp; REQUEST PLANE</text>
-<text x="50" y="320" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">DOMAIN</text>
-<text x="50" y="428" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">FOUNDATION</text>
+<text x="50" y="145" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">WIRING</text>
+<text x="50" y="240" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">MANAGEMENT &amp; REQUEST PLANE</text>
+<text x="50" y="362" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">DOMAIN</text>
+<text x="50" y="484" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="1.2" fill="#6E6E78">FOUNDATION</text>
 <text x="336" y="73" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">mcp-combiner --mcp  →  __main__ · asgi</text>
-<text x="336" y="155" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">server · create_combiner + lifespan</text>
-<text x="217" y="247" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">meta_tools</text>
-<text x="336" y="247" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">routes</text>
-<text x="455" y="247" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">middleware</text>
-<text x="150" y="355" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">toolcache</text>
-<text x="285" y="355" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">proxyfactory</text>
-<text x="410" y="355" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">status</text>
-<text x="522" y="355" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">schemafix</text>
-<text x="160" y="458" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">connections</text>
-<text x="304" y="458" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">sharedserver</text>
-<text x="480" y="458" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">nvim_proxy · channel</text>
-<text x="232" y="494" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">auth</text>
-<text x="328" y="494" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">config</text>
-<text x="434" y="494" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">mounts</text>
-<text x="336" y="574" font-family="Helvetica Neue, Arial, sans-serif" font-size="16" font-weight="700" fill="#1A1B22" text-anchor="middle">runtime · CombinerRuntime — all mutable state</text>
-<text x="336" y="596" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#6E6E78" text-anchor="middle">SessionRegistry + ToolCacheState · writes only via methods · boot id</text>
-<text x="756" y="226" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" font-weight="700" fill="#1A1B22" text-anchor="middle">mcp-combiner CLI</text>
-<text x="756" y="248" font-family="Source Code Pro, Menlo, monospace" font-size="11.5" fill="#6E6E78" text-anchor="middle">ctl.py — pure client</text>
-<text x="756" y="264" font-family="Source Code Pro, Menlo, monospace" font-size="11.5" fill="#6E6E78" text-anchor="middle">HTTP + MCP :9741</text>
-<text x="756" y="442" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" font-weight="700" fill="#1A1B22" text-anchor="middle">mockserver</text>
-<text x="756" y="464" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" fill="#6E6E78" text-anchor="middle">test instrument</text>
-<text x="756" y="480" font-family="Source Code Pro, Menlo, monospace" font-size="10.5" fill="#6E6E78" text-anchor="middle">stdio · http · sharedserver</text>
+<text x="336" y="169" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">server · create_combiner + lifespan</text>
+<text x="217" y="275" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">meta_tools</text>
+<text x="336" y="275" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">routes</text>
+<text x="455" y="275" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">middleware</text>
+<text x="150" y="397" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">toolcache</text>
+<text x="285" y="397" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">proxyfactory</text>
+<text x="410" y="397" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">status</text>
+<text x="522" y="397" font-family="Source Code Pro, Menlo, monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">schemafix</text>
+<text x="160" y="514" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">connections</text>
+<text x="304" y="514" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">sharedserver</text>
+<text x="480" y="514" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">nvim_proxy · channel</text>
+<text x="232" y="550" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">auth</text>
+<text x="328" y="550" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">config</text>
+<text x="434" y="550" font-family="Source Code Pro, Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">mounts</text>
+<text x="336" y="634" font-family="Helvetica Neue, Arial, sans-serif" font-size="16" font-weight="700" fill="#1A1B22" text-anchor="middle">runtime · CombinerRuntime — all mutable state</text>
+<text x="336" y="656" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#6E6E78" text-anchor="middle">SessionRegistry + ToolCacheState · writes only via methods · boot id</text>
+<text x="764" y="254" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" font-weight="700" fill="#1A1B22" text-anchor="middle">mcp-combiner CLI</text>
+<text x="764" y="276" font-family="Source Code Pro, Menlo, monospace" font-size="11.5" fill="#6E6E78" text-anchor="middle">ctl.py — pure client</text>
+<text x="764" y="292" font-family="Source Code Pro, Menlo, monospace" font-size="11.5" fill="#6E6E78" text-anchor="middle">HTTP + MCP :9741</text>
+<text x="764" y="498" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" font-weight="700" fill="#1A1B22" text-anchor="middle">mockserver</text>
+<text x="764" y="520" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" fill="#6E6E78" text-anchor="middle">test instrument</text>
+<text x="764" y="536" font-family="Source Code Pro, Menlo, monospace" font-size="10.5" fill="#6E6E78" text-anchor="middle">stdio · http · sharedserver</text>
 </svg>
