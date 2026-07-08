@@ -184,6 +184,59 @@ class TestMetaToolFilterIsolation:
             assert visible == [True, False, True]
 
 
+class TestControlChannelFilters:
+    """The Lua plugin's real operating pattern: a TOKENLESS control session
+    (the editor's singleton client on /mcp) manages filters for OTHER chats'
+    sessions, naming the target by chat token (REST route) or by the
+    ``chat_id`` meta-tool argument. Both naming paths currently miss the
+    target session's actual filter key (Q1 / Q1b)."""
+
+    @xfail_session_namespace_split
+    async def test_control_session_filters_chat_via_token_route(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner = await _start_stdio_combiner(procs, tmp_path)
+        tok = _token()
+        async with (
+            Client(combiner.mcp_url) as control,  # tokenless control channel
+            _header_client(combiner, tok) as chat,
+        ):
+            assert await _text(chat, "mockup_greet", {"who": "x"}) == "Hello, x!"
+            # Control channel is a different session — its own tools unaffected.
+            await _rest(combiner, "POST", f"/sessions/token/{tok}/filter", {"disable": "mockup"})
+
+            chat_names = {t.name for t in await chat.list_tools()}
+            assert not any(n.startswith("mockup_") for n in chat_names)
+            control_names = {t.name for t in await control.list_tools()}
+            assert "mockup_greet" in control_names
+
+    @xfail_session_namespace_split
+    async def test_control_session_filters_chat_via_meta_tool_chat_id(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """chat_id names the target chat when the CALLER is not that chat.
+        Currently the value is stored verbatim as the filter key, which never
+        matches the chat session's Context.session_id (Q1b)."""
+        combiner = await _start_stdio_combiner(procs, tmp_path)
+        tok = _token()
+        async with (
+            Client(combiner.mcp_url) as control,
+            _header_client(combiner, tok) as chat,
+        ):
+            assert await _text(chat, "mockup_greet", {"who": "x"}) == "Hello, x!"
+            out = json.loads(
+                await _text(
+                    control,
+                    "combiner__session_disable_server",
+                    {"server_name": "mockup", "chat_id": tok},
+                )
+            )
+            assert "mockup" in out["disabled_servers"]
+
+            chat_names = {t.name for t in await chat.list_tools()}
+            assert not any(n.startswith("mockup_") for n in chat_names)
+
+
 class TestTokenRouteFilters:
     """The REST /sessions/token/<t>/filter route — the Lua plugin's primary
     filter path. Bookkeeping works; APPLICATION is currently broken (Q1)."""
