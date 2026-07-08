@@ -58,7 +58,6 @@ exclude = [
     ".*_cache",
     "dist",
     "tests/__pycache__",
-    "test_simple_server.py",
 ]
 
 [tool.pytest.ini_options]
