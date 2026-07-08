@@ -1152,14 +1152,20 @@ function Client:_handle_sse_notification(msg)
     local state = require("mcp_companion.state")
 
     if msg.method == "notifications/tools/list_changed" then
-        self:request("tools/list", {}, function(err, result)
-            if not err and result then
-                self.tools = result.tools or {}
-                self:_update_server_state()
-                state.emit("tool_list_changed")
-                state.emit("servers_updated")
-                log.debug("SSE: tools refreshed (%d tools)", #self.tools)
-            end
+        -- The combiner broadcasts this exactly when a server's lifecycle
+        -- state flips (a prime completed, a server dropped) — re-fetch
+        -- /health first so _update_server_state merges the new state, not
+        -- the connect-time snapshot.
+        self:_refresh_server_health(function()
+            self:request("tools/list", {}, function(err, result)
+                if not err and result then
+                    self.tools = result.tools or {}
+                    self:_update_server_state()
+                    state.emit("tool_list_changed")
+                    state.emit("servers_updated")
+                    log.debug("SSE: tools refreshed (%d tools)", #self.tools)
+                end
+            end)
         end)
     elseif msg.method == "notifications/resources/list_changed" then
         self:request("resources/list", {}, function(err, result)
@@ -1430,7 +1436,13 @@ function Client:_start_polling(interval_ms)
             return
         end
         vim.schedule(function()
-            self:refresh_capabilities()
+            -- Refresh /health first so _update_server_state (run by the
+            -- capability refresh) merges current lifecycle states, not the
+            -- connect-time snapshot — otherwise a server that primed after
+            -- we connected reads "connecting" in MCPStatus forever.
+            self:_refresh_server_health(function()
+                self:refresh_capabilities()
+            end)
         end)
     end)
 

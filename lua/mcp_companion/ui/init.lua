@@ -710,6 +710,18 @@ function M._fetch_and_render()
     -- Initial render with cached/empty state
     M.render()
 
+    -- Actually refresh from the combiner: /health first (lifecycle states),
+    -- then capabilities (tool lists) — _update_server_state merges both and
+    -- the state subscription re-renders. Without this, "refresh" only
+    -- re-rendered the cached snapshot from connect time.
+    local combiner_mod = require("mcp_companion.combiner")
+    local client = combiner_mod.client
+    if client and client.connected then
+        client:_refresh_server_health(function()
+            client:refresh_capabilities()
+        end)
+    end
+
     -- If we have a source chat/CLI buffer, fetch live session status
     if _source_bufnr then
         local cc_ok, cc = pcall(require, "mcp_companion.cc")
