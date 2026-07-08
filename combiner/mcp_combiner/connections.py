@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -59,18 +60,27 @@ HttpClient = Client[StreamableHttpTransport | SSETransport]
 # ---------------------------------------------------------------------------
 # Reconnection tuning
 # ---------------------------------------------------------------------------
-_INITIAL_BACKOFF = 2.0  # seconds
-_MAX_BACKOFF = 60.0
+def _env_float(name: str, default: float) -> float:
+    """Timing knob override for tests (MCP_COMBINER_* env); defaults unchanged."""
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+_INITIAL_BACKOFF = _env_float("MCP_COMBINER_INITIAL_BACKOFF", 2.0)  # seconds
+_MAX_BACKOFF = _env_float("MCP_COMBINER_MAX_BACKOFF", 60.0)
 # Localhost/sharedserver upstreams cap much lower: dialing the loopback is
 # cheap, and a 60s back-off turns a quick server bounce into a minute of
 # "disconnected" after the process is already back up.
-_MAX_BACKOFF_LOCAL = 15.0
+_MAX_BACKOFF_LOCAL = _env_float("MCP_COMBINER_MAX_BACKOFF_LOCAL", 15.0)
 _BACKOFF_MULTIPLIER = 2.0
 # Consecutive failed re-opens on a sharedserver-backed upstream before the
 # monitor escalates from re-dialing to hard-restarting the backing process
 # (nothing else respawns a crashed process — re-dialing alone spins forever).
 _BACKING_RESTART_AFTER = 3
-_HEALTH_CHECK_INTERVAL = 30.0  # seconds between keepalive pings
+# Seconds between keepalive pings.
+_HEALTH_CHECK_INTERVAL = _env_float("MCP_COMBINER_HEALTH_INTERVAL", 30.0)
 _TOOLS_READY_TIMEOUT = 30.0  # seconds to await a just-connected upstream's first tools/list
 
 # How long the factory waits for an in-flight connect before giving up.

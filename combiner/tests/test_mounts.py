@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fakes import FakeConnManager, FakeSSManager
 from fastmcp import Client, FastMCP
-from test_reload_config import _FakeConnManager, _FakeSSManager
 
 import mcp_combiner.server as server_mod
 from mcp_combiner.config import CombinerConfig
@@ -95,8 +95,8 @@ async def test_restart_leaves_one_live_provider(
     config = CombinerConfig.load(str(cfg_path))
 
     combiner = FastMCP("combiner")
-    conn = _FakeConnManager()
-    ss = _FakeSSManager(sharedserver_backed={"crib"})
+    conn = FakeConnManager()
+    ss = FakeSSManager(sharedserver_backed={"crib"})
 
     proxies: list[FastMCP] = []
 
