@@ -191,55 +191,10 @@ module into focused modules with a one-way dependency DAG. Management (the
 control CLI) sits in a distinct band above the domain modules and below only
 the wiring:
 
-```mermaid
-graph TD
-    subgraph entry ["entry points"]
-        MAIN["__main__ (parse/dispatch)"]
-        CTL["ctl (control CLI — pure client)"]
-    end
-    subgraph wiring
-        ASGI["asgi (ServeOptions, token middleware, app factory)"]
-        SRV["server (create_combiner + lifespan)"]
-    end
-    subgraph management ["management plane"]
-        META["meta_tools (combiner__* tools)"]
-        ROUTES["routes (/health, /sessions*)"]
-    end
-    subgraph request ["request path"]
-        MW["middleware (ToolProcessingMiddleware)"]
-    end
-    subgraph domain
-        TC["toolcache (cache, hysteresis, prime)"]
-        PF["proxyfactory (proxies, isolate, OAuth primer)"]
-        ST["status (one status snapshot)"]
-        SF["schemafix (sanitize + named fixes)"]
-    end
-    subgraph foundation
-        CONN["connections (persistent upstreams, self-healing)"]
-        RT["runtime (CombinerRuntime: ALL mutable state)"]
-        CFG["config"]
-        AUTH["auth (OAuth 2.1)"]
-        MNT["mounts (provider registry)"]
-        SS["sharedserver (refcounted processes)"]
-        NV["nvim_proxy / nvim_channel (editor back-channel)"]
-    end
+<p align="center">
+  <img src="assets/internals.svg" alt="Combiner internal architecture: entry point → wiring → management and request plane → domain → foundation, all state owned by CombinerRuntime; the mcp-combiner CLI is a pure client of the management plane; mockserver is the test instrument" width="820">
+</p>
 
-    MAIN --> CTL
-    MAIN --> ASGI --> SRV
-    SRV --> META & ROUTES & MW & PF
-    META --> TC & PF & ST & MNT & SS
-    ROUTES --> ST & TC
-    MW --> TC & SF & NV
-    TC --> SF
-    PF --> CONN & AUTH
-    ST --> CONN
-    TC --> RT
-    MW --> RT
-    META --> RT
-    ROUTES --> RT
-    ASGI --> RT
-    CONN --> AUTH & CFG
-```
 
 Key properties:
 
