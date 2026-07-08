@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from mcp_combiner.connections import ConnectionManager
+from mcp_combiner.connections import (
+    _BACKING_RESTART_AFTER,
+    _MAX_BACKOFF_LOCAL,
+    ConnectionManager,
+    _is_local_upstream,
+)
 
 
 def _fake_conn(name: str, client: object) -> SimpleNamespace:
@@ -127,6 +132,182 @@ class TestMonitorRePrime:
         # Re-primed: reached ready and fired on_tools_ready (at least once).
         assert conn._tools_ready is True
         assert "a" in fired
+
+    async def test_monitor_reconnects_when_prime_fails_on_stale_session(self, monkeypatch):
+        """A session that claims is_connected() but can't serve tools/list (the
+        upstream restarted; the old session 404s everything) must fall through
+        to the ping and reconnect — not re-prime forever stuck at 'connected'."""
+        import asyncio
+
+        import mcp_combiner.connections as conns
+
+        monkeypatch.setattr(conns, "_HEALTH_CHECK_INTERVAL", 0.0)
+
+        mgr = ConnectionManager()
+
+        async def stale(*_a, **_kw):
+            raise RuntimeError("Session terminated")
+
+        client = SimpleNamespace(is_connected=lambda: True, list_tools=stale, ping=stale)
+        conn = SimpleNamespace(
+            name="a", _auth_failed=False, client_ref=[client], _tools_ready=False
+        )
+
+        reconnected = asyncio.Event()
+
+        async def fake_reconnect(_conn):
+            reconnected.set()
+
+        monkeypatch.setattr(mgr, "_reconnect", fake_reconnect)
+
+        task = asyncio.create_task(mgr._monitor(conn))
+        try:
+            await asyncio.wait_for(reconnected.wait(), timeout=2.0)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        assert reconnected.is_set()
+
+
+def _reconnect_conn(*, shared_server: str | None, url: str = "http://127.0.0.1:1/mcp"):
+    """Minimal stand-in for _ManagedConnection covering what _reconnect touches.
+
+    _backoff starts at 0 so the test never actually sleeps.
+    """
+    from contextlib import AsyncExitStack
+
+    return SimpleNamespace(
+        name="a",
+        srv=SimpleNamespace(shared_server=shared_server, url=url),
+        stack=AsyncExitStack(),
+        client_ref=[None],
+        _backoff=0.0,
+        _tools_ready=False,
+        _consec_failures=0,
+    )
+
+
+class TestReconnectBackingRestart:
+    """After _BACKING_RESTART_AFTER consecutive failed opens on a
+    sharedserver-backed upstream, _reconnect escalates to restart_backing —
+    re-dialing a dead process forever can never recover it."""
+
+    async def test_restarts_backing_after_threshold(self, monkeypatch):
+        restarts: list[str] = []
+
+        async def restart_backing(name: str) -> bool:
+            restarts.append(name)
+            return True
+
+        mgr = ConnectionManager(restart_backing=restart_backing)
+
+        async def failing_open(conn):
+            conn.client_ref[0] = None
+
+        monkeypatch.setattr(mgr, "_open", failing_open)
+        conn = _reconnect_conn(shared_server="crib")
+
+        for _ in range(_BACKING_RESTART_AFTER):
+            await mgr._reconnect(conn)
+        assert restarts == []  # threshold not yet reached going in
+
+        await mgr._reconnect(conn)
+        assert restarts == ["a"]
+        # Counter was reset by the escalation; the next reconnect doesn't
+        # immediately restart again.
+        await mgr._reconnect(conn)
+        assert restarts == ["a"]
+
+    async def test_no_restart_without_shared_server(self, monkeypatch):
+        restarts: list[str] = []
+
+        async def restart_backing(name: str) -> bool:
+            restarts.append(name)
+            return True
+
+        mgr = ConnectionManager(restart_backing=restart_backing)
+
+        async def failing_open(conn):
+            conn.client_ref[0] = None
+
+        monkeypatch.setattr(mgr, "_open", failing_open)
+        conn = _reconnect_conn(shared_server=None)
+
+        for _ in range(_BACKING_RESTART_AFTER * 2):
+            await mgr._reconnect(conn)
+        assert restarts == []
+
+    async def test_success_resets_failure_counter(self, monkeypatch):
+        restarts: list[str] = []
+
+        async def restart_backing(name: str) -> bool:
+            restarts.append(name)
+            return True
+
+        mgr = ConnectionManager(restart_backing=restart_backing)
+        conn = _reconnect_conn(shared_server="crib")
+
+        async def failing_open(c):
+            c.client_ref[0] = None
+
+        async def succeeding_open(c):
+            c.client_ref[0] = SimpleNamespace(is_connected=lambda: True)
+
+        monkeypatch.setattr(mgr, "_open", failing_open)
+        for _ in range(_BACKING_RESTART_AFTER - 1):
+            await mgr._reconnect(conn)
+
+        monkeypatch.setattr(mgr, "_open", succeeding_open)
+        await mgr._reconnect(conn)
+        assert conn._consec_failures == 0
+
+        # Failures after a success start counting from zero again.
+        monkeypatch.setattr(mgr, "_open", failing_open)
+        await mgr._reconnect(conn)
+        assert restarts == []
+
+
+class TestLocalBackoffCap:
+    def test_is_local_upstream(self):
+        assert _is_local_upstream(SimpleNamespace(shared_server="crib", url=None))
+        assert _is_local_upstream(
+            SimpleNamespace(shared_server=None, url="http://127.0.0.1:7732/mcp")
+        )
+        assert _is_local_upstream(
+            SimpleNamespace(shared_server=None, url="http://localhost:8002/mcp")
+        )
+        assert not _is_local_upstream(
+            SimpleNamespace(shared_server=None, url="https://mcp.clickup.com/mcp")
+        )
+        assert not _is_local_upstream(SimpleNamespace(shared_server=None, url=None))
+
+    async def test_local_backoff_capped(self, monkeypatch):
+        """A repeatedly-failing local upstream never backs off past
+        _MAX_BACKOFF_LOCAL — a bounced localhost process should be re-dialed
+        in seconds, not after the remote-grade 60s cap."""
+        mgr = ConnectionManager()
+
+        async def failing_open(conn):
+            conn.client_ref[0] = None
+
+        monkeypatch.setattr(mgr, "_open", failing_open)
+        conn = _reconnect_conn(shared_server=None, url="http://localhost:7732/mcp")
+        conn._backoff = 8.0
+
+        async def no_sleep(_delay):
+            return None
+
+        import mcp_combiner.connections as conns
+
+        monkeypatch.setattr(conns.asyncio, "sleep", no_sleep)
+
+        for _ in range(6):
+            await mgr._reconnect(conn)
+            assert conn._backoff <= _MAX_BACKOFF_LOCAL
 
 
 def _inject_conn(

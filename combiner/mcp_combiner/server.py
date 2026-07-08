@@ -1478,6 +1478,11 @@ def create_combiner(
         # Tools-ready is the correct trigger: the upstream's tools just proved
         # listable, so prime (store the slice) and broadcast — never earlier.
         on_tools_ready=_on_upstream_tools_ready,
+        # A sharedserver-backed upstream whose process died has nobody to
+        # respawn it — re-dialing alone spins forever. After repeated failed
+        # reconnects the monitor escalates to this hard restart (the same
+        # path combiner__restart_server takes manually).
+        restart_backing=ss_manager.restart,
     )
     _conn_manager = conn_manager
 
@@ -1502,19 +1507,26 @@ def create_combiner(
                     name,
                 )
 
-            # Pre-register HTTP/SSE servers for persistent connections. A
-            # non-OAuth isolated server manages its own per-chat sessions with no
-            # shared connection, so it is NOT registered. An OAuth isolated server
-            # IS registered: its persistent connection becomes the auth "primer"
-            # (eager flow + token refresh) whose auth the per-chat sessions share.
-            isolated_non_oauth = _effective_isolate(srv) and not _needs_oauth(srv)
-            if conn_manager.is_http_server(srv) and not isolated_non_oauth:
+            # Pre-register EVERY HTTP/SSE server for a persistent connection —
+            # including isolated ones. For an isolated server the persistent
+            # connection is a pure "primer": chats are NOT routed through it
+            # (the mounted proxy opens per-chat sessions), but it drives the
+            # whole lifecycle — the eager OAuth flow + token refresh (whose
+            # auth OAuth per-chat sessions share), the tools-ready prime, the
+            # health-check monitor, reconnect, and the backing-process restart
+            # escalation. Previously non-OAuth isolated servers were skipped
+            # here, which left them with NO lifecycle at all: nothing primed
+            # them at startup and nothing monitored them.
+            if conn_manager.is_http_server(srv):
                 conn_manager.register(config, name, srv)
 
             try:
                 proxy = _create_server_proxy(config, name, srv)
                 mount_server_provider(server, proxy, name)
                 logger.info("Mounted server: %s (%s)", name, srv.transport.value)
+                # Only stdio servers need the explicit startup prime below —
+                # every HTTP server (isolated included) now has a primer
+                # connection whose connect drives its tools-ready prime.
                 if not conn_manager.is_http_server(srv):
                     local_servers.append(name)
             except Exception:
@@ -1529,10 +1541,12 @@ def create_combiner(
         logger.info("Connection tasks started — combiner is ready")
 
         # Started → ready is not automatic: a mounted server sits at "started"
-        # until a tools/list invocation answers. HTTP servers get theirs from
-        # connect_all's connection probe (→ _on_upstream_tools_ready). Local
-        # stdio/sharedserver servers have no connection lifecycle, so kick off
-        # their primes here — same prime_server_tools path restart/enable use.
+        # until a tools/list invocation answers. Connection-managed HTTP
+        # servers get theirs from connect_all's connection probe
+        # (→ _on_upstream_tools_ready). Servers WITHOUT a persistent
+        # connection — stdio, and isolated non-OAuth HTTP — have no such
+        # lifecycle, so kick off their primes here, the same
+        # prime_server_tools path restart/enable use.
         for name in local_servers:
             spawn_prime(server, name)
 

@@ -34,7 +34,8 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Awaitable, Callable
+from urllib.parse import urlparse
 
 import httpx
 from fastmcp import Client
@@ -60,7 +61,15 @@ HttpClient = Client[StreamableHttpTransport | SSETransport]
 # ---------------------------------------------------------------------------
 _INITIAL_BACKOFF = 2.0  # seconds
 _MAX_BACKOFF = 60.0
+# Localhost/sharedserver upstreams cap much lower: dialing the loopback is
+# cheap, and a 60s back-off turns a quick server bounce into a minute of
+# "disconnected" after the process is already back up.
+_MAX_BACKOFF_LOCAL = 15.0
 _BACKOFF_MULTIPLIER = 2.0
+# Consecutive failed re-opens on a sharedserver-backed upstream before the
+# monitor escalates from re-dialing to hard-restarting the backing process
+# (nothing else respawns a crashed process — re-dialing alone spins forever).
+_BACKING_RESTART_AFTER = 3
 _HEALTH_CHECK_INTERVAL = 30.0  # seconds between keepalive pings
 _TOOLS_READY_TIMEOUT = 30.0  # seconds to await a just-connected upstream's first tools/list
 
@@ -115,6 +124,10 @@ class _ManagedConnection:
     # can be up while the tool set is still warming. Drives the lifecycle_state
     # "connected" → "ready" transition. Cleared on reconnect / call failure.
     _tools_ready: bool = field(default=False, repr=False)
+    # Consecutive failed _open attempts from the reconnect monitor. At
+    # _BACKING_RESTART_AFTER a sharedserver-backed upstream gets its backing
+    # process hard-restarted (see _reconnect). Reset on any successful open.
+    _consec_failures: int = field(default=0, repr=False)
 
 
 class ConnectionManager:
@@ -143,16 +156,25 @@ class ConnectionManager:
       only now will a refetch pick up the server's tools.  Invalidating on mere
       connection-open instead races the warm-up and can cache an incomplete tool
       set until the TTL expires minutes later.
+
+    An optional ``restart_backing(name) -> bool`` awaitable (normally
+    ``SharedServerManager.restart``) lets the reconnect monitor escalate: after
+    ``_BACKING_RESTART_AFTER`` consecutive failed re-opens on a server with a
+    ``shared_server``, the backing process is hard-restarted — the same path
+    ``combiner__restart_server`` takes manually. Without it a crashed backing
+    process is re-dialed forever, since nothing else respawns it.
     """
 
     def __init__(
         self,
         on_connection_success: Callable[[str], None] | None = None,
         on_tools_ready: Callable[[str], None] | None = None,
+        restart_backing: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._connections: dict[str, _ManagedConnection] = {}
         self._on_connection_success = on_connection_success
         self._on_tools_ready = on_tools_ready
+        self._restart_backing = restart_backing
         self._background_tasks: list[asyncio.Task[None]] = []
 
     # ------------------------------------------------------------------
@@ -543,7 +565,13 @@ class ConnectionManager:
         conn.client_ref[0] = None
 
     async def _reconnect(self, conn: _ManagedConnection) -> None:
-        """Close the old session and open a fresh one."""
+        """Close the old session and open a fresh one.
+
+        After ``_BACKING_RESTART_AFTER`` consecutive failed opens on a
+        sharedserver-backed upstream, escalates to hard-restarting the backing
+        process via ``restart_backing`` — re-dialing a port whose process is
+        dead can never succeed, and nothing else respawns it.
+        """
         logger.info("Reconnecting to '%s' (backoff=%.1fs) …", conn.name, conn._backoff)
 
         # Tools are no longer known-listable while we're down: drop to
@@ -558,12 +586,38 @@ class ConnectionManager:
         conn.client_ref[0] = None
         conn.stack = AsyncExitStack()
 
+        if (
+            conn._consec_failures >= _BACKING_RESTART_AFTER
+            and conn.srv.shared_server
+            and self._restart_backing is not None
+        ):
+            # Re-dialing has failed repeatedly — the backing process is likely
+            # dead (crashed, or orphan-squatting its port). Hard-restart it,
+            # the same path combiner__restart_server takes manually.
+            conn._consec_failures = 0
+            logger.warning(
+                "'%s' failed %d consecutive reconnects — restarting its backing process",
+                conn.name,
+                _BACKING_RESTART_AFTER,
+            )
+            try:
+                if await self._restart_backing(conn.name):
+                    # The restart health-polled the process up — dial soon, not
+                    # after the accumulated back-off.
+                    conn._backoff = _INITIAL_BACKOFF
+            except Exception:
+                logger.exception("Failed to restart backing process for '%s'", conn.name)
+
         await asyncio.sleep(conn._backoff)
         await self._open(conn)
 
         if conn.client_ref[0] is None:
             # Failed — increase back-off for next attempt
-            conn._backoff = min(conn._backoff * _BACKOFF_MULTIPLIER, _MAX_BACKOFF)
+            conn._consec_failures += 1
+            max_backoff = _MAX_BACKOFF_LOCAL if _is_local_upstream(conn.srv) else _MAX_BACKOFF
+            conn._backoff = min(conn._backoff * _BACKOFF_MULTIPLIER, max_backoff)
+        else:
+            conn._consec_failures = 0
 
     async def _monitor(self, conn: _ManagedConnection) -> None:
         """Background task: periodically verify the session is alive."""
@@ -592,7 +646,13 @@ class ConnectionManager:
                 if not conn._tools_ready:
                     logger.info("'%s' connected but tools not ready — re-priming", conn.name)
                     await self._signal_tools_ready(conn)
-                    continue
+                    if conn._tools_ready:
+                        continue
+                    # Prime failed while the session claims connected — fall
+                    # through to the ping. A stale session (upstream restarted;
+                    # the old session 404s every call) still reports
+                    # is_connected(), so without the ping this branch would
+                    # re-prime forever and never reconnect.
 
                 # Lightweight health-check: MCP ping
                 try:
@@ -665,6 +725,21 @@ def _log_auth_failure_details(name: str, srv: ServerConfig, exc: BaseException) 
             name,
             sent,
         )
+
+
+def _is_local_upstream(srv: ServerConfig) -> bool:
+    """True if *srv* is served from this machine (loopback URL or sharedserver).
+
+    Local upstreams get the tighter ``_MAX_BACKOFF_LOCAL`` reconnect cap:
+    dialing the loopback costs nothing, and a bounced local process should be
+    picked up in seconds, not after a 60s back-off.
+    """
+    if srv.shared_server:
+        return True
+    if not srv.url:
+        return False
+    host = urlparse(_interpolate_str(srv.url)).hostname or ""
+    return host in ("127.0.0.1", "localhost", "::1")
 
 
 def _is_auth_error(exc: BaseException) -> bool:
