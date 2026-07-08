@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import time
-import uuid
 import weakref
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -46,13 +45,20 @@ from mcp_combiner.config import (
 )
 from mcp_combiner.connections import AuthenticationError, ConnectionManager
 from mcp_combiner.mounts import mount_server_provider
+from mcp_combiner.runtime import RUNTIME
 from mcp_combiner.schema import normalize_object_schema
 from mcp_combiner.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-combiner")
 
+# NOTE (decomposition in progress): the mutable containers below are OWNED by
+# mcp_combiner.runtime.RUNTIME; the historical module-global names are aliases
+# to the same objects so existing cross-module imports keep observing the same
+# state. Scalars (reassigned via ``global``) migrate to RUNTIME attributes as
+# their code moves into the extracted modules.
+
 # Track failed servers to avoid repeated errors
-_failed_servers: dict[str, str] = {}  # server_name -> error message
+_failed_servers: dict[str, str] = RUNTIME.tools.failed_servers  # server_name -> error message
 
 # Persistent connection manager for HTTP/SSE upstreams
 _conn_manager: ConnectionManager | None = None
@@ -64,7 +70,7 @@ _combiner_instance: FastMCP | None = None
 
 # Keep strong references to background prime tasks (asyncio only holds weak
 # ones); the done-callback discards them.
-_prime_tasks: set[asyncio.Task[Any]] = set()
+_prime_tasks: set[asyncio.Task[Any]] = RUNTIME.prime_tasks
 
 # Timeout for individual upstream server queries during tools/list
 UPSTREAM_TOOL_LIST_TIMEOUT = 5.0  # seconds
@@ -90,8 +96,8 @@ _tool_cache_time: float = 0
 # Slices are only re-served for servers that are configured, not disabled, and
 # not auth-failed — a genuinely gone server (disabled/removed/auth-failed) is
 # dropped and evicted, so we never advertise tools that can't be called.
-_server_tool_cache: dict[str, list[Tool]] = {}
-_server_tool_seen: dict[str, float] = {}
+_server_tool_cache: dict[str, list[Tool]] = RUNTIME.tools.server_tools
+_server_tool_seen: dict[str, float] = RUNTIME.tools.server_seen
 
 # How long a reconnecting server's last-known tools stay advertised after it
 # stops appearing in fresh fetches. Long enough to ride out a health-check
@@ -109,7 +115,7 @@ STALE_TOOL_GRACE = 30.0  # seconds (default)
 # listable. Set True when the server appears in a fresh fetch
 # (_merge_stale_server_tools) or a priming list succeeds (prime_server_tools);
 # dropped when the server is evicted from the slice cache (_merge_stale_server_tools).
-_local_tools_ready: dict[str, bool] = {}
+_local_tools_ready: dict[str, bool] = RUNTIME.tools.local_tools_ready
 
 # How long to keep priming a just-restarted stdio/sharedserver proxy's tools/list
 # before giving up (the respawned process needs a moment to start serving).
@@ -121,34 +127,34 @@ _LOCAL_TOOLS_READY_ATTEMPT = 5.0  # per-attempt bound, so a hung list can't bloc
 # Weak references to all active ServerSessions connected to this combiner.
 # Populated by ToolProcessingMiddleware on each request; entries are
 # automatically removed when the session is garbage-collected.
-_active_sessions: weakref.WeakSet[ServerSession] = weakref.WeakSet()
+_active_sessions: weakref.WeakSet[ServerSession] = RUNTIME.sessions.active
 
 # Per-session server blocklist.
 # Maps a session ID string to the set of server names disabled for that session.
 # Entries are explicitly removed via the /sessions/{id}/filter DELETE endpoint
 # or by the meta-tools.  The REST API also supports external management by
 # session ID (used by the Neovim plugin for ACP session filtering).
-_session_disabled: dict[str, set[str]] = {}
+_session_disabled: dict[str, set[str]] = RUNTIME.sessions.disabled
 
 # Token registry: token -> combiner session_id.
 # The Neovim plugin generates a UUID token per chat and embeds it as the MCP
 # URL path (/mcp/<token>).  TokenRewriteMiddleware rewrites the path to /mcp
 # and records token -> mcp-session-id from the FastMCP response header.
 # GET /sessions/token/{token} lets the Lua side look up the combiner session_id.
-_token_sessions: dict[str, str] = {}
+_token_sessions: dict[str, str] = RUNTIME.sessions.token_sessions
 
 # Pending token filters: token -> set of disabled server names.
 # Stored when Lua POSTs a filter before the remote client has connected
 # (i.e. before the token is mapped to a session_id).  Applied immediately
 # by TokenRewriteMiddleware when the token is first seen.
-_pending_token_filters: dict[str, set[str]] = {}
+_pending_token_filters: dict[str, set[str]] = RUNTIME.sessions.pending_token_filters
 
 # Neovim back-channel routing (tables, virtual-tool injection, REST routes) lives
 # in mcp_combiner.nvim_proxy. server.py only calls its entry points.
 
 # Unique per-process id, surfaced via /health. A change signals a combiner restart
 # so clients re-register their Neovim instances and token bindings.
-_COMBINER_BOOT_ID = uuid.uuid4().hex
+_COMBINER_BOOT_ID = RUNTIME.boot_id
 
 
 # Named, individually-selectable schema fixes applied to every tool emitted from
@@ -168,7 +174,7 @@ _schema_fixes_global: frozenset[str] = frozenset()
 
 # Strong references to in-flight notification tasks so they aren't GC'd
 # before completion.
-_notification_tasks: set[asyncio.Task[None]] = set()
+_notification_tasks: set[asyncio.Task[None]] = RUNTIME.notification_tasks
 
 
 async def _notify_tool_list_changed() -> None:
@@ -1455,10 +1461,12 @@ def create_combiner(
 
     config = CombinerConfig.load(config_path)
     _combiner_config = config  # Store for tool filtering
+    RUNTIME.config = config
     # ``--normalize-schema`` is a back-compat alias for the anyof_type_hoist fix.
     _schema_fixes_global = frozenset(schema_fixes or ()) | (
         frozenset({"anyof_type_hoist"}) if normalize_schemas else frozenset()
     )
+    RUNTIME.schema_fixes = _schema_fixes_global
     if _schema_fixes_global:
         logger.info("Schema fixes enabled for tools/list: %s", sorted(_schema_fixes_global))
 
@@ -1485,6 +1493,8 @@ def create_combiner(
         restart_backing=ss_manager.restart,
     )
     _conn_manager = conn_manager
+    RUNTIME.conn_manager = conn_manager
+    RUNTIME.ss_manager = ss_manager
 
     @asynccontextmanager
     async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
@@ -1590,6 +1600,7 @@ def create_combiner(
 
     register_meta_tools(combiner, config, conn_manager, ss_manager)
     _combiner_instance = combiner
+    RUNTIME.combiner = combiner
 
     # Health endpoint
     @combiner.custom_route("/health", methods=["GET"])
