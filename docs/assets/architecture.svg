@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="800" height="440" viewBox="0 0 800 440" role="img" aria-label="MCP Combiner aggregates servers behind one HTTP endpoint, serving the Neovim plugin, OpenCode, and any HTTP client">
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="440" viewBox="0 0 800 440" role="img" aria-label="MCP Combiner aggregates servers behind one HTTP endpoint, serving the Neovim plugin, OpenCode, and the mcp-combiner CLI or any HTTP client">
   <defs>
     <marker id="ah" markerWidth="20" markerHeight="12" refX="18" refY="6" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L20,6 L0,12 Z" fill="#8636C3"/>
@@ -85,6 +85,6 @@
   <path d="M551,264 H729 A16,16 0 0 1 745,280 V356 A16,16 0 0 1 729,372 H551 A16,16 0 0 1 535,356 V280 A16,16 0 0 1 551,264 Z" fill="url(#cardSheen)" stroke="#1A1B22" stroke-width="2.6" filter="url(#ds)"/>
   <circle cx="640" cy="298" r="7" fill="url(#dotPink)" stroke="#000" stroke-opacity="0.18" stroke-width="0.9" filter="url(#dsDot)"/>
   <ellipse cx="638" cy="295.6" rx="2.9" ry="2.1" fill="#fff" opacity="0.55"/>
-  <text x="640" y="330" font-family="Helvetica Neue, Arial, sans-serif" font-weight="700" font-size="17" fill="#1A1B22" text-anchor="middle">Any HTTP client</text>
-  <text x="640" y="351" font-family="Source Code Pro, monospace" font-weight="400" font-size="13" fill="#6E6E78" text-anchor="middle">curl · scripts</text>
+  <text x="640" y="330" font-family="Helvetica Neue, Arial, sans-serif" font-weight="700" font-size="17" fill="#1A1B22" text-anchor="middle">CLI &amp; HTTP clients</text>
+  <text x="640" y="351" font-family="Source Code Pro, monospace" font-weight="400" font-size="13" fill="#6E6E78" text-anchor="middle">mcp-combiner · curl</text>
 </svg>

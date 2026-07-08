@@ -27,7 +27,7 @@ UI.
 ## Overview
 
 <p align="center">
-  <img src="docs/assets/architecture.svg" alt="MCP Combiner aggregates N MCP servers behind one HTTP endpoint (:9741), serving the Neovim plugin (CodeCompanion), OpenCode (ACP agent), and any HTTP client (curl, scripts)" width="760">
+  <img src="docs/assets/architecture.svg" alt="MCP Combiner aggregates N MCP servers behind one HTTP endpoint (:9741), serving the Neovim plugin (CodeCompanion), OpenCode (ACP agent), and the mcp-combiner CLI or any HTTP client" width="760">
 </p>
 
 ---
