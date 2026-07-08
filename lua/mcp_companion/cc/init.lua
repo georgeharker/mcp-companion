@@ -102,13 +102,20 @@ local function build_combiner_entry(agent_capabilities, token)
     --   * the token rides in the URL path /mcp/<token> and TokenRewriteMiddleware
     --     injects the header internally.
     --
-    -- `combiner.token_in_url` (default false) controls the HTTP branch:
-    --   false → /mcp + header only (cleaner; relies on the client forwarding headers)
+    -- `combiner.token_in_url` controls the HTTP branch (tri-state):
+    --   nil (default) → /mcp/<token> + header. ACP agents (e.g. Copilot CLI) often
+    --                   forward only the servers/tools they list and DROP custom HTTP
+    --                   headers, so header-only correlation silently fails and the
+    --                   injected combiner tools never surface. Defaulting the token
+    --                   into the URL for ACP is the robust choice; the header is still
+    --                   sent as the primary channel.
+    --   false → /mcp + header only (explicit opt-out; cleaner, relies on header forwarding)
     --   true  → /mcp/<token> + header (belt-and-braces; works for any HTTP client)
     -- The stdio (mcp-remote) branch ALWAYS uses /mcp/<token>: mcp-remote forwards
     -- neither headers nor env, so the URL is the only channel that can correlate.
     local caps = agent_capabilities and agent_capabilities.mcpCapabilities
-    local token_in_url = config.combiner.token_in_url == true -- default false (header-only)
+    -- nil/true → true; only an explicit `false` opts out of URL-embedded token for ACP.
+    local token_in_url = config.combiner.token_in_url ~= false
     local plain_url = string.format("http://%s:%d/mcp", host, port)
     local token_url = string.format("http://%s:%d/mcp/%s", host, port, token)
 
@@ -773,23 +780,9 @@ end
 
 --- Called on ChatAdapter event so combiner starts warming up while UI loads.
 function M._start_combiner_async()
-    local state = require("mcp_companion.state")
-    local config = require("mcp_companion.config")
-
-    -- Already connected, healthy, or connecting
-    local combiner_status = state.get().combiner.status
-    if combiner_status == "connected" or combiner_status == "connecting" or combiner_status == "healthy" then
-        return
+    if require("mcp_companion.combiner").ensure_started() then
+        log.info("CC: starting combiner async on ChatAdapter event")
     end
-
-    -- No combiner config
-    if not config.get().combiner.config then
-        log.debug("CC: no combiner config, skipping combiner start")
-        return
-    end
-
-    log.info("CC: starting combiner async on ChatAdapter event")
-    require("mcp_companion.combiner").start()
 end
 
 --- Wait for combiner to be fully connected (tools registered).

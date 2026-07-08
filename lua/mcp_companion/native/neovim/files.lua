@@ -27,11 +27,16 @@ M.tools = {
             type = "object",
             properties = {
                 path = { type = "string", description = "File path" },
-                start_line = { type = "integer", description = "1-based first line (default 1)" },
-                end_line = { type = "integer", description = "1-based last line, inclusive (default: last)" },
+                start_line = { type = "integer", minimum = 1, default = 1, description = "1-based first line" },
+                end_line = {
+                    type = "integer",
+                    minimum = 1,
+                    description = "1-based last line, inclusive (default: last)",
+                },
             },
             required = { "path" },
         },
+        -- Output is raw file text, not structured — no outputSchema.
         handler = function(args, _ctx)
             local lines, err = read_lines(args.path)
             if not lines then
@@ -54,8 +59,20 @@ M.tools = {
             },
             required = { "paths" },
         },
+        outputSchema = {
+            type = "object",
+            properties = {
+                files = {
+                    type = "object",
+                    description = "Map of path → file content (or an 'ERROR: …' string on failure).",
+                    additionalProperties = { type = "string" },
+                },
+            },
+            required = { "files" },
+        },
         handler = function(args, _ctx)
-            local out = {}
+            -- vim.empty_dict(): keep an all-failed/empty map encoded as {} not [].
+            local out = vim.empty_dict()
             for _, path in ipairs(args.paths or {}) do
                 local lines, err = read_lines(path)
                 out[path] = lines and table.concat(lines, "\n") or ("ERROR: " .. tostring(err))
@@ -73,9 +90,16 @@ M.tools = {
             properties = {
                 pattern = { type = "string", description = "Glob pattern, e.g. *.lua" },
                 path = { type = "string", description = "Directory to search (default cwd)" },
-                recursive = { type = "boolean", description = "Recurse into subdirectories (default true)" },
+                recursive = { type = "boolean", default = true, description = "Recurse into subdirectories" },
             },
             required = { "pattern" },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                matches = { type = "array", items = { type = "string" } },
+            },
+            required = { "matches" },
         },
         handler = function(args, _ctx)
             local dir = args.path or vim.fn.getcwd()
@@ -95,6 +119,25 @@ M.tools = {
             properties = {
                 path = { type = "string", description = "Directory (default cwd)" },
             },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                path = { type = "string" },
+                entries = {
+                    type = "array",
+                    items = {
+                        type = "object",
+                        properties = {
+                            name = { type = "string" },
+                            type = { type = "string", description = "e.g. file, directory, link" },
+                            size = { type = { "integer", "null" }, description = "bytes; null if unavailable" },
+                        },
+                        required = { "name", "type" },
+                    },
+                },
+            },
+            required = { "path", "entries" },
         },
         handler = function(args, _ctx)
             local dir = args.path or vim.fn.getcwd()
@@ -124,6 +167,14 @@ M.tools = {
                 content = { type = "string", description = "Full file content" },
             },
             required = { "path", "content" },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                path = { type = "string" },
+                bytes = { type = "integer", description = "bytes written" },
+            },
+            required = { "path", "bytes" },
         },
         handler = function(args, _ctx)
             if vim.fn.bufexists(args.path) == 1 and vim.fn.getbufvar(vim.fn.bufnr(args.path), "&modified") == 1 then
@@ -164,6 +215,14 @@ M.tools = {
             },
             required = { "path", "new_path" },
         },
+        outputSchema = {
+            type = "object",
+            properties = {
+                from = { type = "string" },
+                to = { type = "string" },
+            },
+            required = { "from", "to" },
+        },
         handler = function(args, _ctx)
             local ok, err = vim.uv.fs_rename(args.path, args.new_path)
             if not ok then
@@ -183,6 +242,14 @@ M.tools = {
                 paths = { type = "array", items = { type = "string" }, description = "Paths to delete" },
             },
             required = { "paths" },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                deleted = { type = "array", items = { type = "string" } },
+                failed = { type = "array", items = { type = "string" } },
+            },
+            required = { "deleted", "failed" },
         },
         handler = function(args, _ctx)
             local deleted, failed = {}, {}

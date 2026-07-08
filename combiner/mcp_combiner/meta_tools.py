@@ -8,6 +8,7 @@ from fastmcp import Context, FastMCP
 
 from mcp_combiner.config import CombinerConfig, ServerConfig, ServerStatusInfo
 from mcp_combiner.connections import ConnectionManager
+from mcp_combiner.mounts import drop_server_providers, mount_server_provider
 from mcp_combiner.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-combiner")
@@ -25,9 +26,14 @@ def register_meta_tools(
     def combiner__status() -> dict[str, ServerStatusInfo]:
         """Get status of all configured MCP servers.
 
-        Returns a dict of server names to their configuration and status.
+        Returns a dict of server names to their configuration and runtime
+        ``state`` (ready / connected / disconnected / auth_failed / disabled) —
+        the same lifecycle state the Neovim MCPStatus panel shows, via the
+        shared status builder.
         """
-        return {name: config.get_server_status(name) for name in config.servers}
+        from mcp_combiner.server import build_server_status
+
+        return {name: build_server_status(config, conn_manager, name) for name in config.servers}
 
     @combiner.tool()
     async def combiner__enable_server(server_name: str) -> str:
@@ -58,6 +64,7 @@ def register_meta_tools(
             from mcp_combiner.server import (
                 _create_server_proxy,
                 invalidate_tool_cache,
+                prime_server_tools,
             )
 
             # Start the backing sharedserver first (use + health-poll), so the
@@ -75,8 +82,15 @@ def register_meta_tools(
                     await conn_manager.connect(config, server_name, srv)
 
             proxy = _create_server_proxy(config, server_name, srv)
-            combiner.mount(proxy, namespace=server_name)
-            invalidate_tool_cache()
+            mount_server_provider(combiner, proxy, server_name)
+            # Announce only once the server can list tools — never proactively.
+            # HTTP: connect() above already fired on_tools_ready (or the monitor
+            # will once it reconnects). Stdio/sharedserver: invoke the server's
+            # tools/list; the prime stores the slice and broadcasts on answer.
+            if conn_manager.is_http_server(srv):
+                invalidate_tool_cache()
+            else:
+                await prime_server_tools(combiner, server_name)
             logger.info("Dynamically mounted server: %s", server_name)
             return f"Server '{server_name}' enabled and mounted"
         except Exception as e:
@@ -110,30 +124,12 @@ def register_meta_tools(
         # non-sharedserver servers.
         await ss_manager.ensure_stopped(server_name)
 
-        # Remove all providers whose namespace matches server_name.
-        # AggregateProvider wraps namespaced providers via wrap_transform(Namespace(...)).
-        # The wrapped provider's repr contains the namespace string, so we inspect it.
-        # We also match by checking the provider's _namespace attribute if it exists
-        # (set by some FastMCP wrapper types).
+        # Remove the providers this server's mount added (tracked by identity
+        # in the mount registry — see mcp_combiner.mounts).
         try:
             from mcp_combiner.server import invalidate_tool_cache
 
-            before = len(combiner.providers)
-
-            def _provider_matches(p: object) -> bool:
-                """Return True if provider belongs to server_name's namespace."""
-                # FastMCP wraps with Namespace transform — check repr for namespace tag
-                r = repr(p)
-                # NamespaceTransform repr includes the namespace string
-                if f"namespace='{server_name}'" in r or f'namespace="{server_name}"' in r:
-                    return True
-                # Fallback: check _namespace attribute
-                if getattr(p, "_namespace", None) == server_name:
-                    return True
-                return False
-
-            combiner.providers = [p for p in combiner.providers if not _provider_matches(p)]
-            removed = before - len(combiner.providers)
+            removed = drop_server_providers(combiner, server_name)
 
             invalidate_tool_cache()
             logger.info("Removed %d provider(s) for server '%s'", removed, server_name)
@@ -161,17 +157,14 @@ def register_meta_tools(
         if conn_manager.has_connection(server_name):
             await conn_manager.disconnect(server_name)
         await ss_manager.ensure_stopped(server_name)
+        drop_server_providers(combiner, server_name)
 
-        def _provider_matches(p: object) -> bool:
-            r = repr(p)
-            if f"namespace='{server_name}'" in r or f'namespace="{server_name}"' in r:
-                return True
-            return getattr(p, "_namespace", None) == server_name
+    async def _mount_server(server_name: str, srv: ServerConfig) -> FastMCP:
+        """Start, connect, and mount a server. Mirrors combiner__enable_server.
 
-        combiner.providers = [p for p in combiner.providers if not _provider_matches(p)]
-
-    async def _mount_server(server_name: str, srv: ServerConfig) -> None:
-        """Start, connect, and mount a server. Mirrors combiner__enable_server."""
+        Priming (tools/list → ready) is the caller's job, via
+        prime_server_tools — see combiner__restart_server's tools-ready gate.
+        """
         from mcp_combiner.server import _create_server_proxy
 
         await ss_manager.ensure_started(server_name)
@@ -182,23 +175,8 @@ def register_meta_tools(
                 conn_manager.register(config, server_name, srv)
             await conn_manager.connect(config, server_name, srv)
         proxy = _create_server_proxy(config, server_name, srv)
-        combiner.mount(proxy, namespace=server_name)
-
-    def _drop_providers(server_name: str) -> int:
-        """Remove all mounted providers for *server_name*'s namespace.
-
-        Returns the number removed. Does not touch connections or processes.
-        """
-        before = len(combiner.providers)
-
-        def _matches(p: object) -> bool:
-            r = repr(p)
-            if f"namespace='{server_name}'" in r or f'namespace="{server_name}"' in r:
-                return True
-            return getattr(p, "_namespace", None) == server_name
-
-        combiner.providers = [p for p in combiner.providers if not _matches(p)]
-        return before - len(combiner.providers)
+        mount_server_provider(combiner, proxy, server_name)
+        return proxy
 
     @combiner.tool()
     async def combiner__restart_server(server_name: str) -> str:
@@ -234,7 +212,11 @@ def register_meta_tools(
                 "to bring it up instead of restarting"
             )
 
-        from mcp_combiner.server import clear_tool_cache, invalidate_tool_cache
+        from mcp_combiner.server import (
+            clear_tool_cache,
+            invalidate_tool_cache,
+            prime_server_tools,
+        )
 
         # 1. Tear down the combiner-side connection + mounted providers. We do NOT
         #    call ss_manager.ensure_stopped here — that decrements the refcount
@@ -244,7 +226,16 @@ def register_meta_tools(
                 await conn_manager.disconnect(server_name)
             except Exception:
                 logger.exception("restart: failed to disconnect '%s'", server_name)
-        removed = _drop_providers(server_name)
+        removed = drop_server_providers(combiner, server_name)
+        if removed == 0:
+            # An enabled server should have been mounted; removing nothing means
+            # the mount bookkeeping diverged from reality — exactly the asymmetry
+            # that let stale providers shadow the remount unnoticed.
+            logger.warning(
+                "restart: dropped 0 providers for enabled server '%s' — "
+                "mount bookkeeping may have diverged",
+                server_name,
+            )
 
         # 2. Hard-restart the backing process (no-op for non-sharedserver servers).
         restarted_proc = False
@@ -254,34 +245,51 @@ def register_meta_tools(
             logger.exception("restart: failed to restart backing process for '%s'", server_name)
             return f"Server '{server_name}': failed to restart backing process: {e}"
 
-        # 3. Re-establish the connection and remount the proxy.
+        # 3. Re-establish the connection and remount the proxy. A restart is
+        #    unified with any reconnect: we do NOT evict the pre-restart slice.
+        #    The grace window keeps serving the last-known tools during the
+        #    re-prime (no mid-restart flicker); the fresh set is published only
+        #    once the server is tools-ready (below), which swaps it in. If the
+        #    tool set changed, tools-ready carries the new set.
         try:
             await _mount_server(server_name, srv)
         except Exception as e:
             # The remount itself blew up — make sure no half-mounted, dead proxy
             # is left advertising tools, then notify clients to drop them.
-            _drop_providers(server_name)
+            drop_server_providers(combiner, server_name)
             invalidate_tool_cache()
             logger.exception("restart: failed to remount '%s'", server_name)
             return f"Server '{server_name}': backing process restarted but remount failed: {e}"
 
-        # 4. Announce the refreshed tool list — but only once the upstream is
-        #    actually reachable. For an HTTP server whose connection has not come
-        #    back up yet, _mount_server still succeeds with a *disconnected*
-        #    client (ConnectionManager.connect swallows the open failure). Telling
-        #    clients the tools are ready in that state sends them calling into a
-        #    dead proxy: ConnectionError → RetryMiddleware retries → "hanging".
-        #    So we clear our local cache but defer the tools/list_changed
-        #    notification to the reconnect monitor, which fires it via
-        #    on_connected once the upstream is genuinely live.
-        http = conn_manager.is_http_server(srv)
-        connected = (not http) or conn_manager.is_connected(server_name)
-        if connected:
-            invalidate_tool_cache()
-            ready_note = ""
-        else:
+        # 4. Announce the refreshed tool list — but ONLY once the restarted server
+        #    can actually list its (possibly changed) tools. We never assume a
+        #    freshly mounted proxy is "ready".
+        if conn_manager.is_http_server(srv):
+            # HTTP has a connection lifecycle + health-check monitor, so we NEVER
+            # proactively broadcast on mere is_connected (connected != tools-ready).
+            # _mount_server's connect() re-primed tools/list and fired
+            # on_tools_ready → invalidate the moment the session came up ready; the
+            # monitor re-primes a still-warming or reconnecting upstream until it
+            # reaches ready and fires it. Here we only clear the local cache.
             clear_tool_cache()
-            ready_note = "; upstream still reconnecting — tools appear once it is live"
+            ready_note = (
+                ""
+                if conn_manager.is_connected(server_name)
+                else "; upstream still reconnecting — tools appear once it is live"
+            )
+        else:
+            # Stdio/sharedserver has NO connection monitor, so there is no
+            # corrective re-notification. Do not assume it is ready: clear
+            # silently, then invoke the remounted server's tools/list — the prime
+            # stores the slice and broadcasts (invalidate) ONLY once it answers,
+            # the started → ready gate. A proactive invalidate here would race
+            # the respawn and re-list the stale/empty set (issue: restart not
+            # surfacing new tools).
+            clear_tool_cache()
+            if await prime_server_tools(combiner, server_name):
+                ready_note = ""
+            else:
+                ready_note = "; server not yet listable — tools appear once it is live"
 
         proc_note = "process restarted" if restarted_proc else "connection re-opened"
         summary = (

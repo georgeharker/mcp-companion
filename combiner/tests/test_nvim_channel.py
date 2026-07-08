@@ -119,12 +119,12 @@ async def test_edit_round_trip_preserves_order(nvim_instance: str) -> None:
         a = mgr.call(
             "inst-1",
             "set_buffer_lines",
-            {"buffer": 1, "start": 1, "end": 1, "lines": ["one"]},
+            {"buffer": 1, "start_line": 1, "end_line": 1, "lines": ["one"]},
         )
         b = mgr.call(
             "inst-1",
             "set_buffer_lines",
-            {"buffer": 1, "start": 1, "end": 1, "lines": ["two"]},
+            {"buffer": 1, "start_line": 1, "end_line": 1, "lines": ["two"]},
         )
         await asyncio.gather(a, b)
         final = await mgr.call("inst-1", "read_buffer", {"buffer": 1})

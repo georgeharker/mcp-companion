@@ -140,6 +140,12 @@ local function _combiner_cmd()
     if ov ~= nil then
         table.insert(cmd, ov and "--output-validation" or "--no-output-validation")
     end
+    -- Stale-tool grace: how long a disconnected server keeps serving its tools.
+    local grace = _config.combiner.stale_tool_grace
+    if grace ~= nil then
+        table.insert(cmd, "--stale-tool-grace")
+        table.insert(cmd, tostring(grace))
+    end
     return cmd
 end
 
@@ -336,6 +342,30 @@ function M._create_client()
             end
         end
     end)
+end
+
+--- Idempotently bring up the editor's own combiner connection (the tokenless
+--- singleton client on /mcp — the "neovim" connection, as opposed to the
+--- per-chat token clients). No-op when already connected/connecting, or when
+--- no combiner config exists. Connecting also fires combiner_ready, which
+--- registers this instance on the /neovim path (native.channel.sync) so
+--- `neovim_*` tools route back here.
+--- @return boolean started Whether a start was actually kicked off
+function M.ensure_started()
+    if not _configured then
+        return false
+    end
+    local state = require("mcp_companion.state")
+    local status = state.get().combiner.status
+    if status == "connected" or status == "connecting" or status == "healthy" then
+        return false
+    end
+    if not _config.combiner.config then
+        log.debug("ensure_started: no combiner config, skipping")
+        return false
+    end
+    M.start()
+    return true
 end
 
 --- Create a lightweight per-chat MCP client for session mapping.

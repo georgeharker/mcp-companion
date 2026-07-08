@@ -11,6 +11,17 @@ local function buf_lines(buf)
     return vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 end
 
+-- Shared output sub-schema: {buffer, line, col} cursor-position result.
+local CURSOR_OUT = {
+    type = "object",
+    properties = {
+        buffer = { type = "integer" },
+        line = { type = "integer", description = "1-based" },
+        col = { type = "integer", description = "0-based" },
+    },
+    required = { "buffer", "line", "col" },
+}
+
 local M = {}
 
 M.tools = {
@@ -18,7 +29,30 @@ M.tools = {
         name = "list_buffers",
         tier = "read",
         description = "List open buffers with id, name, active/modified flags, filetype and line count.",
-        inputSchema = { type = "object", properties = {} },
+        -- vim.empty_dict() (not `{}`): an empty Lua table encodes to JSON `[]`,
+        -- which strict adapters (Copilot) reject where an object is required.
+        inputSchema = { type = "object", properties = vim.empty_dict() },
+        outputSchema = {
+            type = "object",
+            properties = {
+                buffers = {
+                    type = "array",
+                    items = {
+                        type = "object",
+                        properties = {
+                            id = { type = "integer" },
+                            name = { type = "string" },
+                            active = { type = "boolean" },
+                            modified = { type = "boolean" },
+                            filetype = { type = "string" },
+                            lines = { type = "integer" },
+                        },
+                        required = { "id", "name", "active", "modified", "filetype", "lines" },
+                    },
+                },
+            },
+            required = { "buffers" },
+        },
         handler = function(_args, ctx)
             local current = util.resolve_buf({}, ctx)
             local out = {}
@@ -46,10 +80,15 @@ M.tools = {
             type = "object",
             properties = {
                 buffer = { type = "integer", description = "Buffer id (default: active file buffer)" },
-                start_line = { type = "integer", description = "1-based first line (default 1)" },
-                end_line = { type = "integer", description = "1-based last line, inclusive (default: last)" },
+                start_line = { type = "integer", minimum = 1, default = 1, description = "1-based first line" },
+                end_line = {
+                    type = "integer",
+                    minimum = 1,
+                    description = "1-based last line, inclusive (default: last)",
+                },
             },
         },
+        -- Output is human-oriented numbered text, not structured — no outputSchema.
         handler = function(args, ctx)
             local buf = util.resolve_buf(args, ctx)
             local lines = buf_lines(buf)
@@ -70,7 +109,10 @@ M.tools = {
         tier = "read",
         description = "Get the cursor position {buffer, line (1-based), col (0-based)} in the "
             .. "user's code window (not a chat/tree window).",
-        inputSchema = { type = "object", properties = {} },
+        -- vim.empty_dict() (not `{}`): an empty Lua table encodes to JSON `[]`,
+        -- which strict adapters (Copilot) reject where an object is required.
+        inputSchema = { type = "object", properties = vim.empty_dict() },
+        outputSchema = CURSOR_OUT,
         handler = function(_args, _ctx)
             local win = winpick.code_win()
             if not win then
@@ -86,9 +128,32 @@ M.tools = {
         name = "get_selection",
         tier = "read",
         description = "Get the current/last visual selection {buffer, range, text}.",
-        inputSchema = { type = "object", properties = {} },
-        handler = function(_args, ctx)
-            local buf = util.resolve_buf({}, ctx)
+        inputSchema = {
+            type = "object",
+            properties = {
+                buffer = { type = "integer", description = "Buffer id (default: active file buffer)" },
+            },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                buffer = { type = "integer" },
+                range = {
+                    type = { "object", "null" },
+                    description = "null when there is no selection",
+                    properties = {
+                        start_line = { type = "integer" },
+                        start_col = { type = "integer" },
+                        end_line = { type = "integer" },
+                        end_col = { type = "integer" },
+                    },
+                },
+                text = { type = "string" },
+            },
+            required = { "buffer", "text" },
+        },
+        handler = function(args, ctx)
+            local buf = util.resolve_buf(args, ctx)
             local s = vim.api.nvim_buf_get_mark(buf, "<")
             local e = vim.api.nvim_buf_get_mark(buf, ">")
             if s[1] == 0 and e[1] == 0 then
@@ -113,9 +178,18 @@ M.tools = {
             type = "object",
             properties = {
                 path = { type = "string", description = "File path to open" },
-                line = { type = "integer", description = "1-based line to jump to" },
+                line = { type = "integer", minimum = 1, description = "1-based line to jump to" },
             },
             required = { "path" },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                buffer = { type = "integer" },
+                window = { type = "integer" },
+                path = { type = "string" },
+            },
+            required = { "buffer", "window", "path" },
         },
         handler = function(args, _ctx)
             if not args.path or args.path == "" then
@@ -138,10 +212,20 @@ M.tools = {
             type = "object",
             properties = {
                 buffer = { type = "integer", description = "Buffer id (default: active file buffer)" },
-                line = { type = "integer", description = "1-based line" },
-                col = { type = "integer", description = "0-based column (default 0)" },
+                line = { type = "integer", minimum = 1, description = "1-based line" },
+                col = { type = "integer", minimum = 0, default = 0, description = "0-based column" },
             },
             required = { "line" },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                buffer = { type = "integer" },
+                window = { type = "integer" },
+                line = { type = "integer" },
+                col = { type = "integer" },
+            },
+            required = { "buffer", "window", "line", "col" },
         },
         handler = function(args, ctx)
             local buf = util.resolve_buf(args, ctx)
@@ -180,19 +264,32 @@ M.tools = {
             type = "object",
             properties = {
                 buffer = { type = "integer", description = "Buffer id (default: active file buffer)" },
-                start = { type = "integer", description = "1-based first line to replace" },
-                ["end"] = { type = "integer", description = "1-based last line to replace, inclusive" },
+                start_line = { type = "integer", minimum = 1, description = "1-based first line to replace" },
+                end_line = { type = "integer", minimum = 1, description = "1-based last line to replace, inclusive" },
                 lines = { type = "array", items = { type = "string" }, description = "Replacement lines" },
             },
-            required = { "start", "end", "lines" },
+            required = { "start_line", "end_line", "lines" },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                buffer = { type = "integer" },
+                replaced = {
+                    type = "array",
+                    items = { type = "integer" },
+                    description = "[first, last] 1-based inclusive range actually replaced",
+                },
+                new_line_count = { type = "integer" },
+            },
+            required = { "buffer", "replaced", "new_line_count" },
         },
         handler = function(args, ctx)
             local buf = util.resolve_buf(args, ctx)
             local total = vim.api.nvim_buf_line_count(buf)
-            local s = math.max(1, args.start)
-            local e = math.min(total, args["end"])
+            local s = math.max(1, args.start_line)
+            local e = math.min(total, args.end_line)
             if e < s then
-                return util.err("invalid range: end < start")
+                return util.err("invalid range: end_line < start_line")
             end
             local ok, err = pcall(vim.api.nvim_buf_set_lines, buf, s - 1, e, false, args.lines)
             if not ok then
@@ -215,6 +312,20 @@ M.tools = {
                 diff = { type = "string", description = "One or more SEARCH/REPLACE blocks" },
             },
             required = { "diff" },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                buffer = { type = "integer" },
+                blocks = { type = "integer", description = "SEARCH/REPLACE blocks parsed" },
+                applied = { type = "integer", description = "blocks whose SEARCH matched and was replaced" },
+                unmatched = {
+                    type = "array",
+                    items = { type = "integer" },
+                    description = "1-based indices of blocks whose SEARCH did not match",
+                },
+            },
+            required = { "buffer", "blocks", "applied", "unmatched" },
         },
         handler = function(args, ctx)
             local buf = args.buffer
@@ -264,6 +375,14 @@ M.tools = {
             properties = {
                 buffer = { type = "integer", description = "Buffer id (default: active file buffer)" },
             },
+        },
+        outputSchema = {
+            type = "object",
+            properties = {
+                buffer = { type = "integer" },
+                saved = { type = "boolean" },
+            },
+            required = { "buffer", "saved" },
         },
         handler = function(args, ctx)
             local buf = util.resolve_buf(args, ctx)

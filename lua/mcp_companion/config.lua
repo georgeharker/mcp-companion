@@ -27,6 +27,10 @@ local M = {}
 ---   off — the upstream server already validated its structured output, so re-validating here is redundant
 ---   per-call work (measurably slow for large responses). true: force it on. Passed as
 ---   ``--output-validation`` / ``--no-output-validation``; omitted when nil.
+--- @field stale_tool_grace? number Seconds a disconnected server keeps serving its last-known tools before
+---   they are dropped, to ride out a transient reconnect (the health-check interval is 30s). nil = combiner
+---   default (30s). Lower it to drop a killed/wedged server's tools sooner; raise it to tolerate longer
+---   outages. Passed as ``--stale-tool-grace``; omitted when nil.
 --- @field log? MCPCompanion.CombinerLogConfig Combiner logging — same shape as the
 ---   top-level ``log`` table.  ``{ level = "info", file = true }`` by default.
 ---   ``file = true`` resolves to ``stdpath("log")/mcp-combiner-py.log``;
@@ -37,7 +41,7 @@ local M = {}
 --- @class MCPCompanion.CombinerLogConfig
 --- @field level? "trace"|"debug"|"info"|"warn"|"error" Default "info".
 --- @field file? boolean|string Default true (= default path).
---- @field token_in_url? boolean For HTTP ACP agents, also embed the session token in the URL path (/mcp/<token>) in addition to the X-MCP-Combiner-Session header. Default false (header-only; cleaner URLs, per ACP spec, relies on the agent forwarding the header). Set true for belt-and-braces — robust for any client, including ACP agents that don't forward custom HTTP headers. The stdio/mcp-remote fallback always uses the URL regardless of this flag.
+--- @field token_in_url? boolean For HTTP ACP agents, also embed the session token in the URL path (/mcp/<token>) in addition to the X-MCP-Combiner-Session header. Tri-state, default nil = auto: ON for ACP agents (many drop custom HTTP headers, which silently breaks header-only correlation so injected tools never surface), OFF for mcp-companion's own header-forwarding HTTP-adapter client. Set true for belt-and-braces everywhere; set false to force header-only everywhere (cleaner URLs, per ACP spec — relies on the agent forwarding the header). The stdio/mcp-remote fallback always uses the URL regardless of this flag.
 ---   If tools fail in a specific agent, try enabling this and please report at
 ---   https://github.com/georgeharker/mcp-companion/issues with the agent name.
 
@@ -136,9 +140,14 @@ M.defaults = {
             file = true, -- true = default path, string = path, false = disabled
         },
         -- HTTP ACP agents: also put the token in the URL path, not just the header.
-        -- false = header-only (cleaner; the default); true = belt-and-braces (robust).
+        -- Tri-state:
+        --   nil (default) → auto: ON for ACP agents (many drop custom HTTP headers,
+        --                   which silently breaks header-only correlation), OFF for
+        --                   mcp-companion's own header-forwarding HTTP-adapter client.
+        --   true          → belt-and-braces everywhere (robust for any HTTP client).
+        --   false         → header-only everywhere (cleaner URLs; opt out of the ACP auto).
         -- The stdio/mcp-remote fallback always uses the URL regardless of this flag.
-        token_in_url = false,
+        token_in_url = nil,
         -- Tri-state control of the combiner's JSON-schema (re)validation of proxied
         -- tool calls. nil (default) leaves the combiner default; false forces off;
         -- true forces on. The upstream server already validates, so the meaningful
@@ -147,6 +156,10 @@ M.defaults = {
         -- documentation — a nil entry is absent from the table, so no flag is passed.
         input_validation = nil,
         output_validation = nil,
+        -- Seconds a disconnected server keeps serving its last-known tools before
+        -- they are dropped (rides out a transient reconnect). nil = combiner
+        -- default (30s); lower it to drop a killed server's tools sooner.
+        stale_tool_grace = nil,
     },
 
     native_servers = {

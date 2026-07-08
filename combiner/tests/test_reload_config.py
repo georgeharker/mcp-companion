@@ -16,11 +16,15 @@ import pytest
 import mcp_combiner.server as server_mod
 from mcp_combiner.config import CombinerConfig, ServerConfig
 from mcp_combiner.meta_tools import register_meta_tools
+from mcp_combiner.mounts import mount_server_provider
 
 
 class _FakeProvider:
     def __init__(self, namespace: str) -> None:
         self._namespace = namespace
+
+    async def list_tools(self) -> list[Any]:
+        return []
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return f"<FakeProvider namespace='{self._namespace}'>"
@@ -133,8 +137,11 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     reload = combiner.tools["combiner__reload_config"]
     restart = combiner.tools["combiner__restart_server"]
 
-    # Pretend alpha is already mounted+connected from startup.
-    combiner.providers.append(_FakeProvider("alpha"))
+    # Pretend alpha is already mounted+connected from startup. Mount through
+    # the real bookkeeping helper — startup uses the same path, and seeding
+    # combiner.providers directly would bypass the mount registry (which is
+    # exactly how the dead repr-matcher bug stayed invisible in these tests).
+    mount_server_provider(combiner, object(), "alpha")
     conn.connected.add("alpha")
 
     return {
@@ -246,7 +253,13 @@ async def test_restart_sharedserver_backed(harness: dict[str, Any]) -> None:
     assert ("stop", "alpha") not in ss_calls
     # Provider remounted exactly once.
     assert _namespaces(harness["combiner"]) == {"alpha"}
-    assert harness["invalidated"]["count"] == 1
+    # HTTP: restart never proactively broadcasts. It clears the cache silently;
+    # the tools/list_changed broadcast is driven by connect()'s on_tools_ready
+    # (real ConnectionManager, not simulated by this fake), or the monitor's
+    # re-prime once tools are genuinely listable.
+    assert harness["invalidated"]["count"] == 0
+    assert harness["cleared"]["count"] == 1
+    assert "reconnecting" not in result  # is_connected → ready note empty
 
 
 async def test_restart_non_sharedserver_reopens_connection(harness: dict[str, Any]) -> None:
@@ -266,9 +279,10 @@ async def test_restart_non_sharedserver_reopens_connection(harness: dict[str, An
     assert ("disconnect", "beta") in harness["conn"].calls
     assert ("connect", "beta") in harness["conn"].calls
     assert "beta" in _namespaces(harness["combiner"])
-    # Connection came back up → clients are told the tools are ready.
-    assert harness["invalidated"]["count"] == 1
-    assert harness["cleared"]["count"] == 0
+    # HTTP restart clears silently and defers the broadcast to connect()'s
+    # on_tools_ready / the monitor re-prime (not modeled by the fake conn manager).
+    assert harness["invalidated"]["count"] == 0
+    assert harness["cleared"]["count"] == 1
 
 
 async def test_restart_http_down_defers_notification(
@@ -296,3 +310,58 @@ async def test_restart_http_down_defers_notification(
     assert harness["invalidated"]["count"] == 0
     assert harness["cleared"]["count"] == 1
     assert "reconnecting" in result
+
+
+async def test_restart_stdio_primes_before_broadcast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stdio/sharedserver restart must NOT broadcast until the remounted proxy
+    lists tools (the started → ready gate). Restart is unified with a reconnect:
+    the pre-restart slice is NOT evicted — the grace window keeps serving it until
+    the fresh set is published on tools-ready."""
+    import mcp_combiner.server as srv
+
+    cfg_path = tmp_path / "servers.json"
+    _write(cfg_path, {"crib": {"command": "true"}})  # stdio server (no monitor)
+    config = CombinerConfig.load(str(cfg_path))
+
+    combiner = _FakeCombiner()
+    conn = _FakeConnManager()
+    ss = _FakeSSManager(sharedserver_backed={"crib"})
+
+    order: list[str] = []
+
+    # The prime lists tools through the MOUNTED PROVIDER (mount registry), not
+    # the raw proxy — record the invocation there.
+    async def _list_tools(self: Any) -> list[Any]:
+        order.append("list_tools")
+        return []
+
+    monkeypatch.setattr(_FakeProvider, "list_tools", _list_tools)
+    monkeypatch.setattr(server_mod, "_create_server_proxy", lambda *a, **k: object())
+    monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
+    monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
+
+    # Pre-restart: crib had a cached slice and read "ready".
+    srv._server_tool_cache["crib"] = []
+    srv._server_tool_seen["crib"] = 1.0
+    srv._local_tools_ready["crib"] = True
+
+    register_meta_tools(combiner, config, conn, ss)
+    mount_server_provider(combiner, object(), "crib")
+
+    try:
+        result = await combiner.tools["combiner__restart_server"]("crib")
+        assert "restarted" in result
+        # Broadcast happens strictly AFTER the proxy lists tools — never before.
+        assert order.index("list_tools") < order.index("invalidate")
+        # Cache cleared silently before the ready-gated broadcast.
+        assert order.index("clear") < order.index("list_tools")
+        # Re-confirmed ready. Unified with reconnect: the slice is NOT evicted —
+        # it is kept (grace) and refreshed by the fresh fetch after tools-ready.
+        assert srv._local_tools_ready.get("crib") is True
+        assert "crib" in srv._server_tool_cache
+    finally:
+        srv._local_tools_ready.pop("crib", None)
+        srv._server_tool_cache.pop("crib", None)
+        srv._server_tool_seen.pop("crib", None)

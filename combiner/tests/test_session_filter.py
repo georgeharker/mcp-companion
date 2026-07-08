@@ -352,6 +352,554 @@ class TestToolsListSingleFlight:
         assert called == 1
 
 
+# ── per-server stale-tool hysteresis ───────────────────────────────
+
+
+class TestStaleServerTools:
+    """`_merge_stale_server_tools` keeps a transiently-absent server's tools.
+
+    Regression cover for the green/red "flapping": the advertised tool set is
+    derived, with no hysteresis, from whichever servers return tools in the
+    current fetch. Because any one server's reconnect clears the whole cache and
+    forces a refetch, a *second* server that is mid-reconnect at that moment
+    contributes zero tools and silently drops out (cross-server contamination).
+    Re-injecting its last-known slice within a grace window breaks that coupling.
+    """
+
+    def setup_method(self):
+        import mcp_combiner.server as srv
+
+        self._srv = srv
+        self._saved = (srv._combiner_config, srv._conn_manager)
+        srv._server_tool_cache.clear()
+        srv._server_tool_seen.clear()
+        srv._local_tools_ready.clear()
+
+    def teardown_method(self):
+        srv = self._srv
+        srv._combiner_config, srv._conn_manager = self._saved
+        srv._server_tool_cache.clear()
+        srv._server_tool_seen.clear()
+        srv._local_tools_ready.clear()
+
+    @staticmethod
+    def _tool(name: str):
+        from fastmcp.tools.function_tool import FunctionTool
+
+        return FunctionTool(
+            fn=lambda: None,
+            name=name,
+            description="",
+            parameters={"type": "object", "properties": {}},
+        )
+
+    def _config(self, **flags):
+        """A stand-in combiner config with servers alpha, beta.
+
+        flags: e.g. beta_disabled=True to mark beta disabled.
+        """
+        from types import SimpleNamespace
+
+        from mcp_combiner.config import ServerConfig
+
+        servers = {
+            "alpha": ServerConfig(name="alpha"),
+            "beta": ServerConfig(name="beta", disabled=flags.get("beta_disabled", False)),
+        }
+        return SimpleNamespace(servers=servers)
+
+    def _names(self, tools):
+        return sorted(str(t.name) for t in tools)
+
+    def test_reconnecting_peer_tools_survive(self):
+        """beta mid-reconnect (absent from fresh) keeps its tools after alpha reconnects."""
+        srv = self._srv
+        srv._combiner_config = self._config()
+        srv._conn_manager = None
+
+        both = [self._tool("alpha_one"), self._tool("beta_one"), self._tool("beta_two")]
+        # First fetch: both live — seeds the per-server cache.
+        srv._merge_stale_server_tools(both, now=1000.0)
+
+        # Second fetch a few seconds later: beta is mid-reconnect → only alpha's tool.
+        fresh = [self._tool("alpha_one")]
+        merged = srv._merge_stale_server_tools(fresh, now=1005.0)
+
+        assert self._names(merged) == ["alpha_one", "beta_one", "beta_two"], (
+            "beta's tools should be re-injected from cache while it reconnects"
+        )
+
+    def test_disabled_server_tools_dropped(self):
+        """A disabled server's stale tools are not re-served (and are evicted)."""
+        srv = self._srv
+        srv._combiner_config = self._config(beta_disabled=True)
+        srv._conn_manager = None
+
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+
+        merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
+        assert self._names(merged) == ["alpha_one"]
+        assert "beta" not in srv._server_tool_cache
+
+    def test_grace_window_expiry_drops_tools(self):
+        """Past STALE_TOOL_GRACE the stale slice is dropped and evicted."""
+        srv = self._srv
+        srv._combiner_config = self._config()
+        srv._conn_manager = None
+
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+
+        now = 1000.0 + srv.STALE_TOOL_GRACE + 1
+        merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=now)
+        assert self._names(merged) == ["alpha_one"]
+        assert "beta" not in srv._server_tool_cache
+
+    def test_auth_failed_server_tools_dropped(self):
+        """An auth-failed server's tools are not re-served even within grace."""
+        from unittest.mock import MagicMock
+
+        srv = self._srv
+        srv._combiner_config = self._config()
+        cm = MagicMock()
+        cm.is_auth_failed = lambda name: name == "beta"
+        srv._conn_manager = cm
+
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+
+        merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
+        assert self._names(merged) == ["alpha_one"]
+        assert "beta" not in srv._server_tool_cache
+
+    def test_failed_server_tools_dropped(self):
+        """Remove on tool attempt: a server with a recorded call failure is not
+        re-served, even inside the grace window (its stale slice is dropped)."""
+        srv = self._srv
+        srv._combiner_config = self._config()
+        srv._conn_manager = None
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+        srv._failed_servers["beta"] = "ConnectionError: dead"
+        try:
+            merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
+            assert self._names(merged) == ["alpha_one"]
+            assert "beta" not in srv._server_tool_cache
+        finally:
+            srv._failed_servers.pop("beta", None)
+
+    def test_present_server_marked_tools_ready(self):
+        """A server that returns tools in a fresh fetch is confirmed 'ready'."""
+        srv = self._srv
+        srv._combiner_config = self._config()
+        srv._conn_manager = None
+        assert srv._local_tools_ready.get("alpha") is None
+        srv._merge_stale_server_tools([self._tool("alpha_one")], now=1000.0)
+        assert srv._local_tools_ready.get("alpha") is True
+
+    def test_evicted_server_loses_ready(self):
+        """A dropped (disabled/expired) server also loses its ready flag."""
+        srv = self._srv
+        srv._combiner_config = self._config(beta_disabled=True)
+        srv._conn_manager = None
+        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
+        srv._server_tool_seen["beta"] = 1000.0
+        srv._local_tools_ready["beta"] = True
+        srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
+        assert "beta" not in srv._local_tools_ready
+
+
+# ── stdio/sharedserver started → ready lifecycle ───────────────────
+
+
+class TestLocalToolsReady:
+    """`prime_server_tools`: the started → ready transition — invoke tools/list
+    on the server's mounted provider; on answer, store the slice, mark ready,
+    and broadcast. On timeout: no store, no broadcast, stays 'started'."""
+
+    @staticmethod
+    def _combiner_with_provider(name: str, list_tools) -> object:
+        """A minimal combiner whose mount registry maps *name* → one provider."""
+        from types import SimpleNamespace
+
+        from mcp_combiner import mounts
+
+        combiner = SimpleNamespace(providers=[])
+        mounts._registry(combiner)[name] = [SimpleNamespace(list_tools=list_tools)]
+        return combiner
+
+    async def test_prime_retries_stores_then_invalidates(self):
+        """Retries a not-yet-serving server; stores the slice, marks ready, and
+        invalidates only once tools/list answers."""
+        import mcp_combiner.server as srv
+
+        srv._local_tools_ready.pop("beta", None)
+        calls: list[int] = []
+        state = {"n": 0}
+
+        async def list_tools():
+            state["n"] += 1
+            if state["n"] < 3:
+                raise ConnectionError("still starting")
+            return [TestStaleServerTools._tool("beta_one")]
+
+        combiner = self._combiner_with_provider("beta", list_tools)
+        orig = srv.invalidate_tool_cache
+        srv.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
+        try:
+            ok = await srv.prime_server_tools(combiner, "beta", timeout=10.0, interval=0.0)
+            assert ok is True
+            assert srv._local_tools_ready.get("beta") is True
+            # The primed list IS the stored slice (namespaced provider shape).
+            assert [str(t.name) for t in srv._server_tool_cache["beta"]] == ["beta_one"]
+            assert calls == [1]  # broadcast exactly once, after the list returned
+        finally:
+            srv.invalidate_tool_cache = orig  # type: ignore[assignment]
+            srv._local_tools_ready.pop("beta", None)
+            srv._server_tool_cache.pop("beta", None)
+            srv._server_tool_seen.pop("beta", None)
+
+    async def test_prime_timeout_no_store_no_invalidate(self):
+        """If the server never answers tools/list, nothing is stored, nothing is
+        broadcast, and it stays 'started' (not ready)."""
+        import mcp_combiner.server as srv
+
+        srv._local_tools_ready.pop("gamma", None)
+        calls: list[int] = []
+
+        async def list_tools():
+            raise ConnectionError("never up")
+
+        combiner = self._combiner_with_provider("gamma", list_tools)
+        orig = srv.invalidate_tool_cache
+        srv.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
+        try:
+            ok = await srv.prime_server_tools(combiner, "gamma", timeout=0.05, interval=0.0)
+            assert ok is False
+            assert srv._local_tools_ready.get("gamma") is None
+            assert "gamma" not in srv._server_tool_cache
+            assert calls == []
+        finally:
+            srv.invalidate_tool_cache = orig  # type: ignore[assignment]
+
+
+def test_stale_tool_grace_configurable():
+    """create_combiner(stale_tool_grace=…) overrides the grace; omitting it (None)
+    leaves the module default (30s) untouched."""
+    import mcp_combiner.server as srv
+
+    saved = srv.STALE_TOOL_GRACE
+    try:
+        srv.STALE_TOOL_GRACE = 30.0
+        srv.create_combiner(str(FIXTURES / "servers.json"))  # None → unchanged
+        assert srv.STALE_TOOL_GRACE == 30.0
+        srv.create_combiner(str(FIXTURES / "servers.json"), stale_tool_grace=7)
+        assert srv.STALE_TOOL_GRACE == 7.0
+    finally:
+        srv.STALE_TOOL_GRACE = saved
+
+
+# ── unconditional object-schema coercion (issue #7 safety net) ─────
+
+
+class TestCoerceObjectSchemas:
+    """`_coerce_object_schemas` guarantees an object-shaped inputSchema.
+
+    Belt-and-braces for issue #7: a blank / missing-``type`` / non-dict
+    ``properties`` schema (an empty Lua table serializes to ``[]``, which strict
+    adapters like Copilot reject) is coerced to ``{"type":"object",
+    "properties":{}}`` on the FINAL tools/list — independent of the opt-in
+    ``schema_fixes`` path, and covering the appended neovim virtual tools.
+    """
+
+    @staticmethod
+    def _tool(name: str, params):
+        from fastmcp.tools.function_tool import FunctionTool
+
+        return FunctionTool(fn=lambda: None, name=name, description="", parameters=params)
+
+    def test_missing_type_and_properties_coerced(self):
+        import mcp_combiner.server as srv
+
+        (out,) = srv._coerce_object_schemas([self._tool("neovim_get_cursor", {})])
+        assert out.parameters == {"type": "object", "properties": {}}
+
+    def test_missing_properties_filled(self):
+        import mcp_combiner.server as srv
+
+        (out,) = srv._coerce_object_schemas([self._tool("t", {"type": "object"})])
+        assert out.parameters == {"type": "object", "properties": {}}
+
+    def test_valid_schema_passed_through_unchanged(self):
+        import mcp_combiner.server as srv
+
+        good = self._tool("t", {"type": "object", "properties": {"x": {"type": "string"}}})
+        (out,) = srv._coerce_object_schemas([good])
+        assert out is good  # not rebuilt
+
+    def test_dispatch_fn_preserved_on_rebuild(self):
+        """Rebuild must preserve fn so neovim virtual-tool dispatch still works."""
+        import mcp_combiner.server as srv
+
+        t = self._tool("neovim_x", {})
+        (out,) = srv._coerce_object_schemas([t])
+        assert out.fn is t.fn
+
+    def test_string_required_wrapped_in_array(self):
+        """A bare-string `required` is coerced to a single-element array."""
+        import mcp_combiner.server as srv
+
+        t = self._tool("t", {"type": "object", "properties": {}, "required": "buffer"})
+        (out,) = srv._coerce_object_schemas([t])
+        assert out.parameters["required"] == ["buffer"]
+
+    def test_uncoercible_required_dropped(self):
+        """A non-list, non-string `required` (e.g. a number) is dropped."""
+        import mcp_combiner.server as srv
+
+        t = self._tool("t", {"type": "object", "properties": {}, "required": 5})
+        (out,) = srv._coerce_object_schemas([t])
+        assert "required" not in out.parameters
+
+    def test_valid_required_preserved(self):
+        """A list `required` is valid and passes through untouched (not rebuilt)."""
+        import mcp_combiner.server as srv
+
+        good = self._tool("t", {"type": "object", "properties": {}, "required": ["x"]})
+        (out,) = srv._coerce_object_schemas([good])
+        assert out is good
+        assert out.parameters["required"] == ["x"]
+
+
+class TestFinalizeSchemas:
+    """`_finalize_schemas` is the SINGLE egress cleanup: global schema_fixes + coerce.
+
+    Regression cover for issue #7's root cause — neovim virtual tools used to be
+    appended after the cleanup and so never saw ``schema_fixes``. Now every tool
+    (upstream and neovim-named) goes through the same egress function.
+    """
+
+    @staticmethod
+    def _tool(name: str, params):
+        from fastmcp.tools.function_tool import FunctionTool
+
+        return FunctionTool(fn=lambda: None, name=name, description="", parameters=params)
+
+    def test_schema_fixes_reach_a_neovim_named_tool(self):
+        """anyof_type_hoist (which coerce never does) is applied to a neovim tool."""
+        import mcp_combiner.server as srv
+
+        saved = srv._schema_fixes_global
+        srv._schema_fixes_global = frozenset({"anyof_type_hoist"})
+        try:
+            t = self._tool(
+                "neovim_x",
+                {"type": "array", "anyOf": [{"items": {"type": "string"}}, {"type": "null"}]},
+            )
+            (out,) = srv._finalize_schemas([t])
+            # Parent 'array' type was hoisted into the first anyOf item — proof the
+            # global schema_fix ran on a neovim-named tool at egress.
+            assert out.parameters["anyOf"][0] == {"type": "array", "items": {"type": "string"}}
+        finally:
+            srv._schema_fixes_global = saved
+
+    def test_idempotent_across_repeat_calls(self):
+        import mcp_combiner.server as srv
+
+        saved = srv._schema_fixes_global
+        srv._schema_fixes_global = frozenset({"empty_object"})
+        try:
+            once = srv._finalize_schemas([self._tool("neovim_x", {})])
+            twice = srv._finalize_schemas(once)
+            assert once[0].parameters == twice[0].parameters == {"type": "object", "properties": {}}
+        finally:
+            srv._schema_fixes_global = saved
+
+    def test_coerce_still_runs_with_no_schema_fixes(self):
+        import mcp_combiner.server as srv
+
+        saved = srv._schema_fixes_global
+        srv._schema_fixes_global = frozenset()
+        try:
+            (out,) = srv._finalize_schemas([self._tool("neovim_x", {})])
+            assert out.parameters == {"type": "object", "properties": {}}
+        finally:
+            srv._schema_fixes_global = saved
+
+
+class TestBuildNvimTools:
+    """`_build_nvim_tools` coerces a manifest schema to a valid object.
+
+    The Lua side serializes an empty table to `[]`; this is the combiner-side
+    guarantee that a neovim manifest schema of `[]` (or `{}`) still yields an
+    object-shaped tool. Complements the Lua `schema.normalize` unit test.
+    """
+
+    def test_list_schema_yields_object_tool(self):
+        from mcp_combiner.nvim_proxy import _build_nvim_tools
+
+        manifest = {"neovim": {"tools": [{"name": "get_cursor", "inputSchema": []}]}}
+        by_name = {str(t.name): t for t in _build_nvim_tools(manifest)}
+        params = by_name["neovim_get_cursor"].parameters
+        assert params["type"] == "object"
+        assert isinstance(params["properties"], dict)
+        # The routing arg is injected into a proper properties object.
+        assert "nvim_instance" in params["properties"]
+
+
+class TestOnListToolsIntegration:
+    """End-to-end through the real middleware: on_list_tools → append_nvim_tools
+    → _finalize_schemas.
+
+    Guards the exact wiring issue #7 broke — a neovim virtual tool with a
+    malformed manifest schema must come out clean *on the wire*, and the append
+    path must not be able to bypass schema cleanup.
+    """
+
+    def setup_method(self):
+        import mcp_combiner.nvim_proxy as nvim_proxy
+        import mcp_combiner.server as srv
+
+        srv._tool_cache = None
+        srv._tool_cache_time = 0
+        srv._server_tool_cache.clear()
+        srv._server_tool_seen.clear()
+        srv.ToolProcessingMiddleware._inflight = None
+        self._saved_channel = nvim_proxy._nvim_channel
+        self._saved_fixes = srv._schema_fixes_global
+
+    def teardown_method(self):
+        import mcp_combiner.nvim_proxy as nvim_proxy
+        import mcp_combiner.server as srv
+
+        nvim_proxy._nvim_channel = self._saved_channel
+        srv._schema_fixes_global = self._saved_fixes
+        srv._tool_cache = None
+        srv.ToolProcessingMiddleware._inflight = None
+
+    @staticmethod
+    def _inject_manifest(tools):
+        import mcp_combiner.nvim_proxy as nvim_proxy
+        from mcp_combiner.nvim_channel import NvimChannelManager
+
+        ch = NvimChannelManager()
+        ch._manifest = {"neovim": {"tools": tools, "resources": []}}
+        nvim_proxy._nvim_channel = ch
+
+    async def _list(self):
+        import mcp_combiner.server as srv
+
+        mw = srv.ToolProcessingMiddleware()
+        ctx = MagicMock()
+        ctx.fastmcp_context = None
+
+        async def call_next(_ctx):
+            return []  # no upstream tools; isolate the neovim path
+
+        tools = await mw.on_list_tools(ctx, call_next)
+        return {str(t.name): t for t in tools}
+
+    async def test_neovim_string_required_wrapped_on_the_wire(self):
+        """A neovim tool's string `required` is only fixable at egress — proves
+        _finalize_schemas runs on the appended neovim tools (the #7 wiring)."""
+        self._inject_manifest(
+            [
+                {
+                    "name": "set_cursor",
+                    "description": "x",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"line": {"type": "integer"}},
+                        "required": "line",
+                    },
+                }
+            ]
+        )
+        by_name = await self._list()
+        assert "neovim_set_cursor" in by_name
+        # _build_nvim_tools does NOT touch `required`; only egress cleanup does.
+        assert by_name["neovim_set_cursor"].parameters["required"] == ["line"]
+
+    async def test_neovim_list_schema_becomes_object_on_the_wire(self):
+        self._inject_manifest([{"name": "list_buffers", "description": "x", "inputSchema": []}])
+        by_name = await self._list()
+        params = by_name["neovim_list_buffers"].parameters
+        assert params["type"] == "object"
+        assert isinstance(params["properties"], dict)
+
+
+class TestOutputSchemaPlumbing:
+    """outputSchema is advertised end-to-end, structuredContent is forwarded, and
+    a params fix must not drop the declared output schema."""
+
+    @staticmethod
+    def _out():
+        return {
+            "type": "object",
+            "properties": {"buffer": {"type": "integer"}},
+            "required": ["buffer"],
+        }
+
+    def test_build_nvim_tools_carries_output_schema(self):
+        from mcp_combiner.nvim_proxy import _build_nvim_tools
+
+        manifest = {
+            "neovim": {
+                "tools": [
+                    {
+                        "name": "get_cursor",
+                        "inputSchema": {"type": "object", "properties": {}},
+                        "outputSchema": self._out(),
+                    },
+                    {"name": "read_buffer", "inputSchema": {"type": "object", "properties": {}}},
+                ]
+            }
+        }
+        by = {str(t.name): t for t in _build_nvim_tools(manifest)}
+        assert by["neovim_get_cursor"].output_schema == self._out()
+        assert by["neovim_read_buffer"].output_schema is None  # text-only tool
+
+    def test_dispatch_forwards_structured_content(self):
+        from mcp_combiner.nvim_proxy import _dispatch_result_to_tool_result
+
+        res = _dispatch_result_to_tool_result(
+            {
+                "content": [{"type": "text", "text": '{"buffer":3}'}],
+                "structuredContent": {"buffer": 3},
+            },
+            "neovim_get_cursor",
+        )
+        assert res.structured_content == {"buffer": 3}
+
+    def test_dispatch_text_only_has_no_structured(self):
+        from mcp_combiner.nvim_proxy import _dispatch_result_to_tool_result
+
+        res = _dispatch_result_to_tool_result(
+            {"content": [{"type": "text", "text": "hi"}]}, "neovim_x"
+        )
+        assert res.structured_content is None
+
+    def test_normalize_preserves_output_schema_on_rebuild(self):
+        """A schema_fix that rebuilds the tool must keep its output_schema."""
+        from fastmcp.tools.function_tool import FunctionTool
+
+        import mcp_combiner.server as srv
+
+        # Missing `properties` → empty_object fix changes params → tool is rebuilt.
+        t = FunctionTool(
+            fn=lambda: None,
+            name="neovim_x",
+            description="",
+            parameters={"type": "object"},
+            output_schema=self._out(),
+        )
+        fixed = srv._normalize_tool_schema(t, frozenset({"empty_object"}))
+        assert fixed is not t  # actually rebuilt (params changed)
+        assert fixed.parameters.get("properties") == {}  # fix applied
+        assert fixed.output_schema == self._out()  # ...and output schema survived
+
+
 # ── _pending_token_filters dict ────────────────────────────────────
 
 

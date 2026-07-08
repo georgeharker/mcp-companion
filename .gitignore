@@ -15,5 +15,7 @@ _quarto-deploy.yml
 **/.mypy_cache/
 **/.pytest_cache/
 **/.ruff_cache/
+**/.coverage
 /combiner/dist/
 *.egg-info/
+.DS_Store
