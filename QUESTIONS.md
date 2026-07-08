@@ -1,0 +1,79 @@
+# Open questions / suspected bugs found during test-harness work
+
+Per our working agreement: behavior that looks wrong is documented here and
+discussed before any fix — it may encode learnings. Nothing below has been
+changed in code; e2e tests pin the current behavior with `xfail(strict=True)`
+where it looks broken, so an eventual fix flips them loudly.
+
+## Q1 — Session-ID namespace split: token-route filters silently never apply
+
+**Found by:** `tests/test_session_independence.py` (e2e, 2026-07-08).
+
+**Symptom:** `POST /sessions/token/<token>/filter {"disable": "mockup"}`
+returns success and records the filter, but the session's `tools/list` still
+contains the server's tools and calls are not blocked. The same filter applied
+through the meta-tool `combiner__session_disable_server` works.
+
+**Mechanics — there are two session-id namespaces in play:**
+
+1. **HTTP `mcp-session-id`** (32-hex, e.g. `2b17a6c51c46…`) — assigned by the
+   MCP SDK's streamable-HTTP transport, returned as a response header.
+   `TokenRewriteMiddleware` (`__main__.py:120-152`) maps `token → this id` in
+   `_token_sessions`, and pending token filters are applied into
+   `_session_disabled[this id]` (`__main__.py:133-137`).
+
+2. **fastmcp `Context.session_id`** (dashed UUID, e.g. `e5fcd58a-…`) — in
+   fastmcp 3.4.2, `Context.session_id` returns a cached
+   `session._fastmcp_state_prefix` if present; otherwise it tries the
+   *request* header `mcp-session-id`, else **generates `uuid4()` and caches
+   it**. On the `initialize` request the client has no session header yet, and
+   the combiner's `ToolProcessingMiddleware.on_request` (`server.py:881-896`)
+   reads `ctx.session_id` during initialize (for `record_session_token`), so
+   the generated dashed UUID gets cached and wins for the whole session
+   lifetime. `_apply_session_filter` / `on_call_tool` / the session meta-tools
+   /`/sessions` listing / `_notify_session_by_id` all key on THIS id.
+
+**Consequences (verified e2e):**
+- Filters via `/sessions/token/<t>/filter` (the Lua plugin's primary path for
+  per-chat ACP/CLI/HTTP filters, `cc/init.lua:847`, `session_commands.lua:110`)
+  land in namespace 1 and are **never read** → per-chat `allowed_servers`
+  filters are likely silently inert in production on fastmcp 3.4.x.
+- Pending token filters (set before first connect) are likewise applied into
+  namespace 1 → inert.
+- `GET /sessions/token/<t>` reports namespace-1 ids that don't appear in
+  `GET /sessions` (namespace 2) — the two REST views cannot be joined.
+- `_notify_session_by_id` (server.py:193) compares `_fastmcp_state_prefix`
+  (namespace 2) — token-route calls pass namespace-1 ids → notifies nobody.
+- Meta-tools (`combiner__session_{disable,enable,status}_server`) work — they
+  key on `ctx.session_id` end to end. The Lua fallback path therefore works.
+
+**Suspected origin:** fastmcp version drift — same class as the mounts
+repr-sniffing bug. If an earlier fastmcp resolved `ctx.session_id` from the
+HTTP header (or nothing touched `session_id` during initialize so the header
+was seen first), both namespaces coincided and the token route worked.
+
+**Candidate fixes (to discuss, NOT applied):**
+- (a) In `TokenRewriteMiddleware`, stop trusting the response header; instead
+  resolve token → fastmcp session id at the FastMCP layer (e.g. extend
+  `record_session_token`, which already sees both the header token and
+  `ctx.session_id`, to also fill `_token_sessions`). The middleware's response
+  -header mapping becomes a fallback or is dropped.
+- (b) Force namespace unification: have `on_request` set
+  `session._fastmcp_state_prefix` to the transport's real `mcp-session-id`
+  when available, before anything else touches `ctx.session_id`.
+- (c) Key everything by token instead of session id internally.
+
+**Question for George:** which namespace should be canonical? (a) is the
+least invasive and keeps the header-correlation learnings intact; (b) makes
+ids match what clients see on the wire but changes every existing key at
+runtime; (c) is the biggest refactor. Also: do we believe per-chat filters
+have been inert in production, or is there a code path I've missed that keeps
+them working? (`test_session_filter.py` passes only because its TestClient
+harness fabricates consistent ids.)
+
+## Q2 — (minor) `/sessions` listing id fallback
+
+`list_sessions` (`server.py:1624`) falls back to `str(id(session))` when
+`_fastmcp_state_prefix` is missing — a memory address that matches nothing
+else and changes across GC. Probably fine as a debug view, but worth deciding
+whether the route should instead surface the transport session id.
