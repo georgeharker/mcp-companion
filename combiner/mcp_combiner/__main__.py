@@ -15,8 +15,8 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response
 
+from mcp_combiner.schemafix import SCHEMA_FIXES
 from mcp_combiner.server import (
-    SCHEMA_FIXES,
     _pending_token_filters,
     _token_sessions,
     create_combiner,

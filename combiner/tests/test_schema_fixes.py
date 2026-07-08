@@ -1,6 +1,6 @@
-"""Tests for the named tool-schema fixes (server._apply_schema_fixes)."""
+"""Tests for the named tool-schema fixes (schemafix._apply_schema_fixes)."""
 
-from mcp_combiner.server import (
+from mcp_combiner.schemafix import (
     SCHEMA_FIXES,
     _apply_object_fixes,
     _apply_schema_fixes,

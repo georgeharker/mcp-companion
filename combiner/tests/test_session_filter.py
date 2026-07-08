@@ -620,19 +620,19 @@ class TestCoerceObjectSchemas:
         return FunctionTool(fn=lambda: None, name=name, description="", parameters=params)
 
     def test_missing_type_and_properties_coerced(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         (out,) = srv._coerce_object_schemas([self._tool("neovim_get_cursor", {})])
         assert out.parameters == {"type": "object", "properties": {}}
 
     def test_missing_properties_filled(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         (out,) = srv._coerce_object_schemas([self._tool("t", {"type": "object"})])
         assert out.parameters == {"type": "object", "properties": {}}
 
     def test_valid_schema_passed_through_unchanged(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         good = self._tool("t", {"type": "object", "properties": {"x": {"type": "string"}}})
         (out,) = srv._coerce_object_schemas([good])
@@ -640,7 +640,7 @@ class TestCoerceObjectSchemas:
 
     def test_dispatch_fn_preserved_on_rebuild(self):
         """Rebuild must preserve fn so neovim virtual-tool dispatch still works."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         t = self._tool("neovim_x", {})
         (out,) = srv._coerce_object_schemas([t])
@@ -648,7 +648,7 @@ class TestCoerceObjectSchemas:
 
     def test_string_required_wrapped_in_array(self):
         """A bare-string `required` is coerced to a single-element array."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         t = self._tool("t", {"type": "object", "properties": {}, "required": "buffer"})
         (out,) = srv._coerce_object_schemas([t])
@@ -656,7 +656,7 @@ class TestCoerceObjectSchemas:
 
     def test_uncoercible_required_dropped(self):
         """A non-list, non-string `required` (e.g. a number) is dropped."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         t = self._tool("t", {"type": "object", "properties": {}, "required": 5})
         (out,) = srv._coerce_object_schemas([t])
@@ -664,7 +664,7 @@ class TestCoerceObjectSchemas:
 
     def test_valid_required_preserved(self):
         """A list `required` is valid and passes through untouched (not rebuilt)."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         good = self._tool("t", {"type": "object", "properties": {}, "required": ["x"]})
         (out,) = srv._coerce_object_schemas([good])
@@ -688,10 +688,11 @@ class TestFinalizeSchemas:
 
     def test_schema_fixes_reach_a_neovim_named_tool(self):
         """anyof_type_hoist (which coerce never does) is applied to a neovim tool."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
+        from mcp_combiner.runtime import RUNTIME
 
-        saved = srv._schema_fixes_global
-        srv._schema_fixes_global = frozenset({"anyof_type_hoist"})
+        saved = RUNTIME.schema_fixes
+        RUNTIME.schema_fixes = frozenset({"anyof_type_hoist"})
         try:
             t = self._tool(
                 "neovim_x",
@@ -702,30 +703,32 @@ class TestFinalizeSchemas:
             # global schema_fix ran on a neovim-named tool at egress.
             assert out.parameters["anyOf"][0] == {"type": "array", "items": {"type": "string"}}
         finally:
-            srv._schema_fixes_global = saved
+            RUNTIME.schema_fixes = saved
 
     def test_idempotent_across_repeat_calls(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
+        from mcp_combiner.runtime import RUNTIME
 
-        saved = srv._schema_fixes_global
-        srv._schema_fixes_global = frozenset({"empty_object"})
+        saved = RUNTIME.schema_fixes
+        RUNTIME.schema_fixes = frozenset({"empty_object"})
         try:
             once = srv._finalize_schemas([self._tool("neovim_x", {})])
             twice = srv._finalize_schemas(once)
             assert once[0].parameters == twice[0].parameters == {"type": "object", "properties": {}}
         finally:
-            srv._schema_fixes_global = saved
+            RUNTIME.schema_fixes = saved
 
     def test_coerce_still_runs_with_no_schema_fixes(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
+        from mcp_combiner.runtime import RUNTIME
 
-        saved = srv._schema_fixes_global
-        srv._schema_fixes_global = frozenset()
+        saved = RUNTIME.schema_fixes
+        RUNTIME.schema_fixes = frozenset()
         try:
             (out,) = srv._finalize_schemas([self._tool("neovim_x", {})])
             assert out.parameters == {"type": "object", "properties": {}}
         finally:
-            srv._schema_fixes_global = saved
+            RUNTIME.schema_fixes = saved
 
 
 class TestBuildNvimTools:
@@ -766,15 +769,18 @@ class TestOnListToolsIntegration:
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
         srv.ToolProcessingMiddleware._inflight = None
+        from mcp_combiner.runtime import RUNTIME
+
         self._saved_channel = nvim_proxy._nvim_channel
-        self._saved_fixes = srv._schema_fixes_global
+        self._saved_fixes = RUNTIME.schema_fixes
 
     def teardown_method(self):
         import mcp_combiner.nvim_proxy as nvim_proxy
         import mcp_combiner.server as srv
+        from mcp_combiner.runtime import RUNTIME
 
         nvim_proxy._nvim_channel = self._saved_channel
-        srv._schema_fixes_global = self._saved_fixes
+        RUNTIME.schema_fixes = self._saved_fixes
         srv._tool_cache = None
         srv.ToolProcessingMiddleware._inflight = None
 
@@ -884,7 +890,7 @@ class TestOutputSchemaPlumbing:
         """A schema_fix that rebuilds the tool must keep its output_schema."""
         from fastmcp.tools.function_tool import FunctionTool
 
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         # Missing `properties` → empty_object fix changes params → tool is rebuilt.
         t = FunctionTool(
