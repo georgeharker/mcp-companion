@@ -1,193 +1,28 @@
-"""CLI entry point for mcp-combiner."""
+"""CLI entry point for mcp-combiner.
+
+``mcp-combiner <command>`` is a control CLI for a running combiner
+(status/enable/disable/restart/reload/session/call/tools — see ctl.py);
+``mcp-combiner --mcp --config …`` runs the combiner server itself (the
+historical bare invocation, which still works with a deprecation warning).
+"""
+
+from __future__ import annotations
 
 import argparse
 import atexit
 import logging
-import os
-import re
 import signal
 import sys
 import types
 
 import uvicorn
-from starlette.applications import Starlette
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request as StarletteRequest
-from starlette.responses import Response
 
+from mcp_combiner import ctl
+from mcp_combiner.asgi import ServeOptions, create_app
 from mcp_combiner.schemafix import SCHEMA_FIXES
-from mcp_combiner.server import (
-    _pending_token_filters,
-    _token_sessions,
-    create_combiner,
-)
 from mcp_combiner.sharedserver import cleanup as cleanup_sharedservers
-from mcp_combiner.sharedserver import register_for_cleanup
 
 logger = logging.getLogger(__name__)
-
-_mcp_log = logging.getLogger("mcp-combiner.requests")
-
-# Header name the Neovim plugin sets on ACP-injected mcpServers entries.
-_ACP_TOKEN_HEADER = "x-mcp-combiner-session"
-
-# UUID pattern: validates tokens from both header and URL path.
-_TOKEN_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-
-# Match /mcp/<uuid>[/...] in the URL path.
-_MCP_TOKEN_PATH_RE = re.compile(
-    r"^/mcp/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(/.*)?$"
-)
-
-
-class TokenRewriteMiddleware(BaseHTTPMiddleware):
-    """Map token -> MCP session-id and apply pending filters on connect.
-
-    Accepts the token from two sources:
-      1. URL path: /mcp/<token>[/...] — rewrites to /mcp so FastMCP sees a plain request.
-      2. HTTP header: X-MCP-Combiner-Session — fallback.
-
-    On first request carrying a token, records token->session_id from the response
-    header.  If a pending filter was stored via POST /sessions/token/<token>/filter
-    before the client connected, it is applied immediately.
-    """
-
-    async def dispatch(
-        self, request: StarletteRequest, call_next: RequestResponseEndpoint
-    ) -> Response:
-        path = request.url.path
-
-        # --- Source 1: token in URL path ---
-        url_token: str | None = None
-        path_match = _MCP_TOKEN_PATH_RE.match(path)
-        if path_match:
-            url_token = path_match.group(1)
-            remainder = path_match.group(2) or ""
-            new_path = f"/mcp{remainder}"
-            logger.info(
-                "Token in URL path: token=%s  %s -> %s",
-                url_token,
-                path,
-                new_path,
-            )
-            # Mutate scope in-place; BaseHTTPMiddleware passes the same scope dict
-            # to call_next so FastMCP receives the rewritten path.
-            request.scope["path"] = new_path
-            request.scope["raw_path"] = new_path.encode()
-            # Re-surface the URL token as a header so the FastMCP-layer
-            # middleware can build the session_id -> token reverse map (it only
-            # sees context.session_id, never the URL — see
-            # ToolProcessingMiddleware.on_request in server.py).
-            #
-            # WHY this is needed: header-sending clients (Claude Code, OpenCode,
-            # the documented ACP entry) already send X-MCP-Combiner-Session, so for
-            # them this is a redundant no-op. But URL-only transports — notably
-            # the stdio `mcp-remote` fallback, which forwards neither env nor
-            # headers, only the URL — would otherwise never get the token to the
-            # FastMCP layer, breaking neovim_* routing for that session. This
-            # injection makes /mcp/<token> a self-sufficient correlation channel.
-            # Replace any existing value so URL wins over a stale header.
-            hdr = _ACP_TOKEN_HEADER.encode()
-            headers = [(k, v) for (k, v) in request.scope["headers"] if k.lower() != hdr]
-            headers.append((hdr, url_token.encode()))
-            request.scope["headers"] = headers
-
-        # --- Source 2: token in header ---
-        header_token: str | None = request.headers.get(_ACP_TOKEN_HEADER)
-        if header_token and not _TOKEN_RE.match(header_token):
-            header_token = None
-
-        token = url_token or header_token
-
-        if token is None:
-            return await call_next(request)
-
-        already_mapped = token in _token_sessions
-        if not already_mapped:
-            logger.info(
-                "Token not yet mapped: token=%s  source=%s  method=%s",
-                token,
-                "url" if url_token else "header",
-                request.method,
-            )
-        else:
-            logger.debug(
-                "Token already mapped: token=%s  session=%s",
-                token,
-                _token_sessions[token],
-            )
-
-        response = await call_next(request)
-
-        if not already_mapped:
-            sid = response.headers.get("mcp-session-id")
-            if sid:
-                _token_sessions[token] = sid
-                logger.info(
-                    "Token mapped: token=%s  session=%s  source=%s",
-                    token,
-                    sid,
-                    "url" if url_token else "header",
-                )
-                # Apply any pending filter that was stored before the client connected
-                pending = _pending_token_filters.pop(token, None)
-                if pending:
-                    from mcp_combiner.server import _session_disabled
-
-                    _session_disabled[sid] = pending
-                    logger.info(
-                        "Pending token filter applied: token=%s  session=%s  disabled=%s",
-                        token,
-                        sid,
-                        sorted(pending),
-                    )
-            else:
-                logger.debug(
-                    "Token seen but no mcp-session-id in response: token=%s  status=%d  source=%s",
-                    token,
-                    response.status_code,
-                    "url" if url_token else "header",
-                )
-
-        return response
-
-
-class MCPRequestLogMiddleware(BaseHTTPMiddleware):
-    """Log /mcp requests: debug-level detail on every request, warnings on non-2xx."""
-
-    async def dispatch(
-        self, request: StarletteRequest, call_next: RequestResponseEndpoint
-    ) -> Response:
-        path = request.url.path
-        is_mcp = path == "/mcp" or path.startswith("/mcp/")
-        if is_mcp and _mcp_log.isEnabledFor(logging.DEBUG):
-            session_id = request.headers.get("mcp-session-id", "-")
-            acp_token_hdr = request.headers.get(_ACP_TOKEN_HEADER, "-")
-            user_agent = request.headers.get("user-agent", "-")
-            accept = request.headers.get("accept", "-")
-            _mcp_log.debug(
-                "%s %s  session=%s  acp-token-hdr=%s  ua=%s  accept=%s  all_headers=%s",
-                request.method,
-                path,
-                session_id,
-                acp_token_hdr,
-                user_agent,
-                accept,
-                dict(request.headers),
-            )
-        response = await call_next(request)
-        if is_mcp and response.status_code >= 400:
-            session_id = request.headers.get("mcp-session-id", "-")
-            user_agent = request.headers.get("user-agent", "-")
-            _mcp_log.warning(
-                "%s %s  => %d  session=%s  ua=%s",
-                request.method,
-                path,
-                response.status_code,
-                session_id,
-                user_agent,
-            )
-        return response
 
 
 def _signal_handler(signum: int, frame: types.FrameType | None) -> None:
@@ -206,73 +41,17 @@ def _signal_handler(signum: int, frame: types.FrameType | None) -> None:
     sys.exit(0)
 
 
-def create_app() -> Starlette:
-    """Factory function for creating the combiner ASGI app.
-
-    Reads config from environment variables set by main().
-    """
-    config_path = os.environ["MCP_COMBINER_CONFIG"]
-    oauth_cache_str = os.environ.get("MCP_COMBINER_OAUTH_CACHE")
-    oauth_cache_tokens: bool | None = None
-    if oauth_cache_str == "True":
-        oauth_cache_tokens = True
-    elif oauth_cache_str == "False":
-        oauth_cache_tokens = False
-    oauth_token_dir = os.environ.get("MCP_COMBINER_OAUTH_TOKEN_DIR")
-    normalize_schemas = os.environ.get("MCP_COMBINER_NORMALIZE_SCHEMA") == "1"
-    schema_fixes_env = os.environ.get("MCP_COMBINER_SCHEMA_FIXES")
-    schema_fixes = (
-        frozenset(f for f in schema_fixes_env.split(",") if f) if schema_fixes_env else None
-    )
-
-    def _tristate(name: str) -> bool | None:
-        """Read a tri-state flag from env: '1' → True, '0' → False, unset → None."""
-        v = os.environ.get(name)
-        return None if v is None else v == "1"
-
-    input_validation = _tristate("MCP_COMBINER_INPUT_VALIDATION")
-    output_validation = _tristate("MCP_COMBINER_OUTPUT_VALIDATION")
-    stale_grace_env = os.environ.get("MCP_COMBINER_STALE_TOOL_GRACE")
-    stale_tool_grace = float(stale_grace_env) if stale_grace_env else None
-
-    combiner, ss_manager = create_combiner(
-        config_path,
-        oauth_cache_tokens=oauth_cache_tokens,
-        oauth_token_dir=oauth_token_dir,
-        normalize_schemas=normalize_schemas,
-        schema_fixes=schema_fixes,
-        input_validation=input_validation,
-        output_validation=output_validation,
-        stale_tool_grace=stale_tool_grace,
-        return_ss_manager=True,
-    )
-
-    # Register manager for cleanup on exit
-    register_for_cleanup(ss_manager)
-
-    # Use streamable HTTP with stateful mode.
-    # Stateless mode doesn't support GET for SSE streams, which OpenCode needs.
-    app = combiner.http_app(
-        path="/mcp",
-        stateless_http=False,
-    )
-    app.add_middleware(MCPRequestLogMiddleware)
-    # TokenRewriteMiddleware is outermost (last-added in Starlette = outermost).
-    # It extracts the ACP token from /mcp/<token> URL paths and rewrites to /mcp
-    # before the log middleware and FastMCP see the request.
-    app.add_middleware(TokenRewriteMiddleware)
-    return app
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="mcp-combiner",
-        description="MCP combiner — aggregates multiple MCP servers behind one endpoint",
+def _add_serve_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Run the combiner MCP server (serve mode). Without this flag, "
+        "mcp-combiner is a control CLI — see the subcommands.",
     )
     parser.add_argument(
         "--config",
-        required=True,
-        help="Path to servers.json config file",
+        default=None,
+        help="Path to servers.json config file (serve mode)",
     )
     parser.add_argument(
         "--port",
@@ -317,13 +96,7 @@ def main() -> None:
         "--normalize-schema",
         dest="normalize_schema",
         action="store_true",
-        default=False,
-        help=(
-            "Normalize tool JSON schemas to fix providers (e.g. moonshot-ai/kimi) "
-            "that reject schemas where 'type' and 'anyOf' coexist at the same level. "
-            "Applied to every tools/list response at cache-fill time. "
-            "Back-compat alias for `--schema-fix anyof_type_hoist`."
-        ),
+        help="Back-compat alias for --schema-fix anyof_type_hoist",
     )
     parser.add_argument(
         "--schema-fix",
@@ -333,10 +106,10 @@ def main() -> None:
         default=None,
         metavar="FIX",
         help=(
-            "Enable a named schema fix on every tools/list response (repeatable). "
+            "Enable a named tool-schema fix (repeatable). "
             "Choices: " + ", ".join(SCHEMA_FIXES) + ". "
-            "anyof_type_hoist fixes type+anyOf coexistence (moonshot-ai/kimi); "
-            "empty_object fills a missing type/properties so an object schema never "
+            "anyof_type_hoist hoists a sibling 'type' into anyOf items "
+            "(Moonshot/Kimi); empty_object fills missing type/properties so {} never "
             "serializes to [] (Copilot/Joplin); drop_invalid_required drops a "
             "non-list 'required'. Off by default."
         ),
@@ -396,25 +169,8 @@ def main() -> None:
         ),
     )
 
-    args = parser.parse_args()
 
-    # Set env vars for app factory
-    os.environ["MCP_COMBINER_CONFIG"] = args.config
-    if args.oauth_cache is not None:
-        os.environ["MCP_COMBINER_OAUTH_CACHE"] = str(args.oauth_cache)
-    if args.oauth_token_dir:
-        os.environ["MCP_COMBINER_OAUTH_TOKEN_DIR"] = args.oauth_token_dir
-    if args.normalize_schema:
-        os.environ["MCP_COMBINER_NORMALIZE_SCHEMA"] = "1"
-    if args.schema_fix:
-        os.environ["MCP_COMBINER_SCHEMA_FIXES"] = ",".join(args.schema_fix)
-    if args.input_validation is not None:
-        os.environ["MCP_COMBINER_INPUT_VALIDATION"] = "1" if args.input_validation else "0"
-    if args.output_validation is not None:
-        os.environ["MCP_COMBINER_OUTPUT_VALIDATION"] = "1" if args.output_validation else "0"
-    if args.stale_tool_grace is not None:
-        os.environ["MCP_COMBINER_STALE_TOOL_GRACE"] = str(args.stale_tool_grace)
-
+def _setup_logging(log_level: str, log_file: str | None) -> None:
     # Resolve --log-level to a stdlib logging numeric level.
     # "trace" is treated as DEBUG since stdlib has no TRACE.
     _level_map = {
@@ -424,7 +180,7 @@ def main() -> None:
         "warn": logging.WARNING,
         "error": logging.ERROR,
     }
-    level = _level_map[args.log_level]
+    level = _level_map[log_level]
 
     # Stderr handler on the combiner logger.  Without this only WARNING+ would
     # appear because Python's root logger defaults to WARNING.
@@ -440,10 +196,10 @@ def main() -> None:
     # Configure file logging if requested.  File handler always runs at the
     # requested level (decoupled from the file's presence so you can pick
     # INFO+file or DEBUG+stderr-only independently).
-    if args.log_file:
+    if log_file:
         import pathlib
 
-        log_path = pathlib.Path(args.log_file)
+        log_path = pathlib.Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_path)
         file_handler.setLevel(level)
@@ -456,7 +212,7 @@ def main() -> None:
         # propagate=False on combiner_logger means the root handler won't see
         # its messages — attach explicitly.
         combiner_logger.addHandler(file_handler)
-        logger.info("Logging to %s at level %s", log_path, args.log_level)
+        logger.info("Logging to %s at level %s", log_path, log_level)
     else:
         # No file — still apply level globally so DEBUG-on-stderr works.
         logging.getLogger().setLevel(level)
@@ -465,6 +221,25 @@ def main() -> None:
     if level <= logging.DEBUG:
         for name in ("httpx", "httpcore", "mcp.client.auth", "fastmcp.client.auth"):
             logging.getLogger(name).setLevel(logging.DEBUG)
+
+
+def _serve(args: argparse.Namespace) -> None:
+    options = ServeOptions(
+        config=args.config,
+        host=args.host,
+        port=args.port,
+        oauth_cache=args.oauth_cache,
+        oauth_token_dir=args.oauth_token_dir,
+        normalize_schema=args.normalize_schema,
+        schema_fixes=args.schema_fix or [],
+        input_validation=args.input_validation,
+        output_validation=args.output_validation,
+        stale_tool_grace=args.stale_tool_grace,
+        log_file=args.log_file,
+        log_level=args.log_level,
+    )
+
+    _setup_logging(options.log_level, options.log_file)
 
     # Register cleanup handlers. uvicorn temporarily swaps these out while it
     # serves, but restores them and re-raises the captured signal back to us on
@@ -475,11 +250,11 @@ def main() -> None:
     signal.signal(signal.SIGINT, _signal_handler)
 
     # Single worker - async handles concurrency
-    app = create_app()
+    app = create_app(options)
     uvicorn.run(
         app,
-        host=args.host,
-        port=args.port,
+        host=options.host,
+        port=options.port,
         log_level="info",
         # Bound the graceful-shutdown drain. The combiner holds long-lived MCP
         # streamable-http / SSE connections that never close on their own, so the
@@ -493,6 +268,44 @@ def main() -> None:
         # uvicorn ourselves via http_app(), so we must set it ourselves.)
         timeout_graceful_shutdown=2,
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="mcp-combiner",
+        description=(
+            "MCP combiner — control CLI for a running combiner, and (with --mcp) "
+            "the combiner server itself, aggregating multiple MCP servers behind "
+            "one endpoint"
+        ),
+    )
+    _add_serve_args(parser)
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+    ctl.add_ctl_parsers(subparsers)
+
+    args = parser.parse_args()
+
+    # Control subcommand → ctl.
+    if args.command:
+        sys.exit(ctl.run(args))
+
+    # Serve mode: --mcp, or the historical bare `--config …` invocation.
+    if args.config:
+        if not args.mcp:
+            print(
+                "warning: running the combiner server without --mcp is deprecated; "
+                "bare `mcp-combiner` is now the control CLI. Add --mcp to this "
+                "invocation (launcher configs: command args gain one '--mcp').",
+                file=sys.stderr,
+            )
+        _serve(args)
+        return
+
+    if args.mcp:
+        parser.error("serve mode (--mcp) requires --config")
+
+    parser.print_help()
+    sys.exit(2)
 
 
 if __name__ == "__main__":

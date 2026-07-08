@@ -291,6 +291,7 @@ class ProcFactory:
             sys.executable,
             "-m",
             "mcp_combiner",
+            "--mcp",
             "--config",
             str(config_path),
             "--port",

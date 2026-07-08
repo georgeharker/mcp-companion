@@ -97,6 +97,7 @@ local function _combiner_cmd()
         cmd = { _config.combiner.python_cmd, "-m", "mcp_combiner" }
     end
     vim.list_extend(cmd, {
+        "--mcp",
         "--config",
         _config.combiner.config,
         "--port",
