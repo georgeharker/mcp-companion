@@ -42,6 +42,13 @@ def _signal_handler(signum: int, frame: types.FrameType | None) -> None:
 
 
 def _add_serve_args(parser: argparse.ArgumentParser) -> None:
+    from mcp_combiner import __version__
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     parser.add_argument(
         "--mcp",
         action="store_true",
