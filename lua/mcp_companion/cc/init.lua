@@ -92,9 +92,6 @@ local function build_combiner_entry(agent_capabilities, token)
         return nil
     end
 
-    local host = config.combiner.host or "127.0.0.1"
-    local port = config.combiner.port or 9741
-
     -- Token correlation. The combiner's single correlation key is the
     -- X-MCP-Combiner-Session *header* (read in nvim_proxy.record_session_token /
     -- the per-chat filter). It can be populated two ways:
@@ -116,8 +113,9 @@ local function build_combiner_entry(agent_capabilities, token)
     local caps = agent_capabilities and agent_capabilities.mcpCapabilities
     -- nil/true → true; only an explicit `false` opts out of URL-embedded token for ACP.
     local token_in_url = config.combiner.token_in_url ~= false
-    local plain_url = string.format("http://%s:%d/mcp", host, port)
-    local token_url = string.format("http://%s:%d/mcp/%s", host, port, token)
+    local base = require("mcp_companion.config").combiner_url()
+    local plain_url = base .. "/mcp"
+    local token_url = base .. "/mcp/" .. token
 
     if caps and caps.http then
         local combiner_url = token_in_url and token_url or plain_url
@@ -709,10 +707,7 @@ function M._cli_inject_combiner_env(create_args)
         end
     end)
 
-    local cfg = require("mcp_companion.config").get()
-    local host = cfg.combiner.host or "127.0.0.1"
-    local port = cfg.combiner.port or 9741
-    local token_url = string.format("http://%s:%d/mcp/%s", host, port, token)
+    local token_url = require("mcp_companion.config").combiner_url() .. "/mcp/" .. token
 
     -- Wrap as `env VAR=<url> <cmd> <args…>` — scoped to this spawn only.
     local orig_cmd, orig_args = agent.cmd, agent.args
@@ -865,45 +860,24 @@ function M._apply_token_filter(chat)
         return
     end
 
-    local cfg = require("mcp_companion.config").get()
-    local host = cfg.combiner.host or "127.0.0.1"
-    local port = cfg.combiner.port or 9741
-    local http = require("mcp_companion.http")
-    local body = vim.json.encode({ allowed_servers = allowed })
-
-    http.request({
-        url = string.format("http://%s:%d/sessions/token/%s/filter", host, port, token),
-        method = "post",
-        headers = { ["Content-Type"] = "application/json" },
-        body = body,
-        timeout = 5000,
-        callback = function(r)
-            if r.status == 200 then
-                local r_ok, r_data = pcall(vim.json.decode, r.body)
-                local disabled_list = r_ok and r_data and r_data.disabled_servers or {}
-                local pending = r_ok and r_data and r_data.pending
-                log.info(
-                    "CC: session filter %s (token=%s allowed=%s disabled=%s)",
-                    pending and "stored as pending" or "applied",
-                    token,
-                    allowed and table.concat(allowed, ", ") or "all",
-                    table.concat(disabled_list, ", ")
-                )
-                vim.schedule(function()
-                    local sc_ok, sc = pcall(require, "mcp_companion.cc.session_commands")
-                    if sc_ok and sc.set_session_state and chat.bufnr then
-                        local disabled_map = {}
-                        for _, name in ipairs(disabled_list) do
-                            disabled_map[name] = true
-                        end
-                        sc.set_session_state(chat.bufnr, disabled_map)
-                    end
-                end)
-            else
-                log.warn("CC: session filter failed (status %s): %s", r.status, r.body or "")
-            end
-        end,
-    })
+    local sessions = require("mcp_companion.combiner.sessions")
+    sessions.set_filter(token, { allowed_servers = allowed }, function(err, data)
+        if err then
+            log.warn("CC: session filter failed: %s", err)
+            return
+        end
+        log.info(
+            "CC: session filter %s (token=%s allowed=%s disabled=%s)",
+            data.pending and "stored as pending" or "applied",
+            token,
+            allowed and table.concat(allowed, ", ") or "all",
+            table.concat(data.disabled_servers or {}, ", ")
+        )
+        local sc_ok, sc = pcall(require, "mcp_companion.cc.session_commands")
+        if sc_ok and sc.set_session_state and chat.bufnr then
+            sc.set_session_state(chat.bufnr, sessions.disabled_set(data))
+        end
+    end)
 end
 
 --- Resolve the chat session's MCP token (works for both HTTP and ACP chats).
@@ -941,50 +915,26 @@ function M._save_project_config(chat, format, force, done)
         return
     end
 
-    local cfg = require("mcp_companion.config").get()
-    local host = cfg.combiner.host or "127.0.0.1"
-    local port = cfg.combiner.port or 9741
-    local http = require("mcp_companion.http")
+    require("mcp_companion.combiner.sessions").get_filter(token, function(err, data)
+        if err then
+            done("combiner filter lookup failed: " .. err, nil)
+            return
+        end
+        local disabled = data.disabled_servers or {}
 
-    http.request({
-        url = string.format("http://%s:%d/sessions/token/%s/filter", host, port, token),
-        method = "get",
-        timeout = 5000,
-        callback = function(r)
-            if r.status ~= 200 then
-                done(string.format("combiner filter lookup failed (status %s): %s", r.status, r.body or ""), nil)
-                return
-            end
-            local ok_decode, data = pcall(vim.json.decode, r.body)
-            if not ok_decode or type(data) ~= "table" then
-                done("combiner returned malformed JSON", nil)
-                return
-            end
-            local disabled = data.disabled_servers or {}
+        -- Canonical known-server list (excluding the internal combiner
+        -- pseudo-server, which is never user-toggleable).
+        local known = require("mcp_companion.ops").server_names()
 
-            -- Compute the canonical known-server list (excluding the internal
-            -- combiner pseudo-server, which is never user-toggleable).
-            local state = require("mcp_companion.state")
-            local servers = state.field("servers") or {}
-            local known = {}
-            for _, srv in ipairs(servers) do
-                if srv.name and srv.name ~= "_combiner" then
-                    table.insert(known, srv.name)
-                end
-            end
-
-            local project = require("mcp_companion.project")
-            vim.schedule(function()
-                local result = project.save({
-                    disabled = disabled,
-                    known_servers = known,
-                    format = format,
-                    force = force,
-                })
-                done(nil, result)
-            end)
-        end,
-    })
+        local project = require("mcp_companion.project")
+        local result = project.save({
+            disabled = disabled,
+            known_servers = known,
+            format = format,
+            force = force,
+        })
+        done(nil, result)
+    end)
 end
 
 --- High-level wrapper: invoke ``_save_project_config`` with vim.ui.select-based
@@ -1097,19 +1047,9 @@ function M._cleanup_session_filter(chat)
         require("mcp_companion.native.channel").unbind(token)
     end)
 
-    local cfg = require("mcp_companion.config").get()
-    local host = cfg.combiner.host or "127.0.0.1"
-    local port = cfg.combiner.port or 9741
-    local http = require("mcp_companion.http")
-
-    http.request({
-        url = string.format("http://%s:%d/sessions/token/%s/filter", host, port, token),
-        method = "delete",
-        timeout = 3000,
-        callback = function(r)
-            log.debug("CC: session filter removed (token=%s status=%s)", token, r.status)
-        end,
-    })
+    require("mcp_companion.combiner.sessions").clear_filter(token, function(err)
+        log.debug("CC: session filter removed (token=%s err=%s)", token, tostring(err))
+    end)
 end
 
 function M._register_all()

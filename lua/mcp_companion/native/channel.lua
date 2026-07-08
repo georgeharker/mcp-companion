@@ -38,7 +38,7 @@ local _REG_BACKOFF_MS = 1000
 --- @return string base URL of the combiner, e.g. http://127.0.0.1:9741
 local function combiner_base()
     local cfg = require("mcp_companion.config").get()
-    return string.format("http://%s:%d", cfg.combiner.host or "127.0.0.1", cfg.combiner.port or 9741)
+    return require("mcp_companion.config").combiner_url()
 end
 
 --- @return boolean whether the native neovim server is enabled

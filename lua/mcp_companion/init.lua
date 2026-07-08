@@ -108,7 +108,7 @@ function M.setup(opts)
     end, { desc = "Toggle MCP Companion status window" })
 
     vim.api.nvim_create_user_command("MCPRestart", function(args)
-        combiner.restart({ force = args.bang })
+        require("mcp_companion.ops").restart_combiner({ force = args.bang })
     end, { bang = true, desc = "Restart MCP combiner (use ! to force when other clients attached)" })
 
     vim.api.nvim_create_user_command("MCPInstall", function(args)
@@ -134,49 +134,17 @@ function M.setup(opts)
             vim.notify("[mcp-companion] Usage: :MCPRestartServer <server_name>", vim.log.levels.WARN)
             return
         end
-        local client = combiner.client
-        if not client or not client.connected then
-            vim.notify("[mcp-companion] Combiner not connected", vim.log.levels.WARN)
-            return
-        end
-        vim.notify(string.format("[mcp-companion] Restarting %s...", server_name), vim.log.levels.INFO)
-        client:restart_server(server_name, function(err, result)
-            if err then
-                vim.notify(string.format("[mcp-companion] Restart failed: %s", tostring(err)), vim.log.levels.ERROR)
-            else
-                vim.notify(string.format("[mcp-companion] %s", result or "done"), vim.log.levels.INFO)
-            end
-        end)
+        require("mcp_companion.ops").restart_server(server_name)
     end, {
         nargs = 1,
         desc = "Restart a single MCP server (stops + respawns its backing process; no full combiner restart)",
         complete = function()
-            local srv_state = require("mcp_companion.state")
-            local servers = srv_state.field("servers") or {}
-            local names = {}
-            for _, srv in ipairs(servers) do
-                if srv.name ~= "_combiner" then
-                    table.insert(names, srv.name)
-                end
-            end
-            return names
+            return require("mcp_companion.ops").server_names()
         end,
     })
 
     vim.api.nvim_create_user_command("MCPReload", function()
-        local client = combiner.client
-        if not client or not client.connected then
-            vim.notify("[mcp-companion] Combiner not connected", vim.log.levels.WARN)
-            return
-        end
-        vim.notify("[mcp-companion] Reloading combiner config...", vim.log.levels.INFO)
-        client:reload_config(function(err, result)
-            if err then
-                vim.notify(string.format("[mcp-companion] Reload failed: %s", tostring(err)), vim.log.levels.ERROR)
-            else
-                vim.notify(string.format("[mcp-companion] %s", result or "config reloaded"), vim.log.levels.INFO)
-            end
-        end)
+        require("mcp_companion.ops").reload_config()
     end, { desc = "Reload the combiner config file and apply server changes (no restart)" })
 
     vim.api.nvim_create_user_command("MCPLog", function()
@@ -194,33 +162,12 @@ function M.setup(opts)
             vim.notify("[mcp-companion] Usage: :MCPToggleServer <server_name>", vim.log.levels.WARN)
             return
         end
-        local client = combiner.client
-        if not client or not client.connected then
-            vim.notify("[mcp-companion] Combiner not connected", vim.log.levels.WARN)
-            return
-        end
-        vim.notify(string.format("[mcp-companion] Toggling %s...", server_name), vim.log.levels.INFO)
-        client:toggle_server(server_name, function(err, result)
-            if err then
-                vim.notify(string.format("[mcp-companion] Toggle failed: %s", tostring(err)), vim.log.levels.ERROR)
-            else
-                vim.notify(string.format("[mcp-companion] %s", result or "done"), vim.log.levels.INFO)
-            end
-        end)
+        require("mcp_companion.ops").toggle_server(server_name)
     end, {
         nargs = 1,
         desc = "Toggle an MCP server enabled/disabled",
         complete = function()
-            -- Complete with known server names from state
-            local srv_state = require("mcp_companion.state")
-            local servers = srv_state.field("servers") or {}
-            local names = {}
-            for _, srv in ipairs(servers) do
-                if srv.name ~= "_combiner" then
-                    table.insert(names, srv.name)
-                end
-            end
-            return names
+            return require("mcp_companion.ops").server_names()
         end,
     })
 

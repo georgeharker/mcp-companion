@@ -31,6 +31,24 @@ local function _fingerprint(servers)
     return tostring(#names) .. ":" .. table.concat(names, ",")
 end
 
+--- Extract a plain-text payload from an MCP tool result (content blocks).
+--- @param result table MCP result { content = {...}, isError? }
+--- @return string
+local function _result_to_text(result)
+    local content = result and result.content or {}
+    local parts = {}
+    for _, block in ipairs(content) do
+        if block.type == "text" then
+            table.insert(parts, block.text)
+        elseif block.type == "image" then
+            table.insert(parts, "[Image: " .. (block.mimeType or "unknown") .. "]")
+        elseif block.type == "resource" then
+            table.insert(parts, "[Resource: " .. (block.resource and block.resource.uri or "unknown") .. "]")
+        end
+    end
+    return table.concat(parts, "\n")
+end
+
 --- Build the cmds handler for a combiner tool.
 --- CC calls cmds[i](self, action, cmd_opts) where self is the CodeCompanion.Tools
 --- object (self.chat is the active CC chat). action is the parsed tool input from
@@ -63,46 +81,12 @@ local function _make_combiner_cmd(singleton_client, namespaced_name, display_nam
                     if err then
                         cmd_opts.output_cb({ status = "error", data = tostring(err) })
                     else
-                        -- MCP tool results have a content array of content blocks
-                        local content = result and result.content or {}
-                        local text_parts = {}
-                        for _, block in ipairs(content) do
-                            if block.type == "text" then
-                                table.insert(text_parts, block.text)
-                            elseif block.type == "image" then
-                                table.insert(text_parts, "[Image: " .. (block.mimeType or "unknown") .. "]")
-                            elseif block.type == "resource" then
-                                table.insert(
-                                    text_parts,
-                                    "[Resource: " .. (block.resource and block.resource.uri or "unknown") .. "]"
-                                )
-                            end
-                        end
-                        local output = table.concat(text_parts, "\n")
-                        cmd_opts.output_cb({ status = "success", data = output })
+                        cmd_opts.output_cb({ status = "success", data = _result_to_text(result) })
                     end
                 end)
             end)
         end)
     end
-end
-
---- Extract a plain-text payload from an MCP tool result (content blocks).
---- @param result table MCP result { content = {...}, isError? }
---- @return string
-local function _result_to_text(result)
-    local content = result and result.content or {}
-    local parts = {}
-    for _, block in ipairs(content) do
-        if block.type == "text" then
-            table.insert(parts, block.text)
-        elseif block.type == "image" then
-            table.insert(parts, "[Image: " .. (block.mimeType or "unknown") .. "]")
-        elseif block.type == "resource" then
-            table.insert(parts, "[Resource: " .. (block.resource and block.resource.uri or "unknown") .. "]")
-        end
-    end
-    return table.concat(parts, "\n")
 end
 
 --- Build the cmds handler for a native (in-process) tool.

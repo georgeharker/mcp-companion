@@ -15,6 +15,7 @@ cd "$(dirname "$0")/.."
 SELF_CONTAINED=(
     test_schema
     test_native
+    test_ops
     test_project
     test_cc_resolve_session
     test_acp_tools_filter
