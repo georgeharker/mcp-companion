@@ -15,6 +15,7 @@ import pytest
 from fakes import FakeCombiner, FakeConnManager, FakeProvider, FakeSSManager
 
 import mcp_combiner.server as server_mod
+import mcp_combiner.toolcache as toolcache_mod
 from mcp_combiner.config import CombinerConfig, ServerConfig
 from mcp_combiner.meta_tools import register_meta_tools
 from mcp_combiner.mounts import mount_server_provider
@@ -263,6 +264,8 @@ async def test_restart_stdio_primes_before_broadcast(
     monkeypatch.setattr(server_mod, "_create_server_proxy", lambda *a, **k: object())
     monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
     monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
+    monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
+    monkeypatch.setattr(toolcache_mod, "clear_tool_cache", lambda: order.append("clear"))
 
     # Pre-restart: crib had a cached slice and read "ready".
     srv._server_tool_cache["crib"] = []

@@ -4,25 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import weakref
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, ClassVar, Literal, overload
+from typing import Any, Literal, overload
 
 import httpx
-import mcp.types as mt
 from fastmcp import Client, FastMCP
-from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server import create_proxy
-from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.middleware.error_handling import (
     ErrorHandlingMiddleware,
     RetryMiddleware,
 )
 from fastmcp.server.providers.proxy import FastMCPProxy
 from fastmcp.tools import Tool
-from fastmcp.tools.tool import ToolResult
 from mcp.server.session import ServerSession
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -30,8 +25,6 @@ from starlette.responses import JSONResponse
 from mcp_combiner import nvim_proxy
 from mcp_combiner.auth import (
     build_auth,
-    clear_oauth_cache,
-    is_stale_client_error,
 )
 from mcp_combiner.config import (
     CombinerConfig,
@@ -43,12 +36,42 @@ from mcp_combiner.config import (
     _interpolate_str,  # noqa: PLC2701
 )
 from mcp_combiner.connections import AuthenticationError, ConnectionManager
+from mcp_combiner.middleware import ToolProcessingMiddleware  # noqa: F401 (re-export)
 from mcp_combiner.mounts import mount_server_provider
 from mcp_combiner.runtime import RUNTIME
-from mcp_combiner.schemafix import _finalize_schemas, _sanitize_tools
 from mcp_combiner.sharedserver import SharedServerManager
+from mcp_combiner.toolcache import (  # noqa: F401 (re-exports for meta_tools/tests)
+    UPSTREAM_TOOL_LIST_TIMEOUT,
+    _filter_tools,
+    _find_server_for_tool,
+    _is_transport_dead,
+    _matches_filter,
+    _merge_stale_server_tools,
+    _notify_session_by_id,
+    _notify_tool_list_changed,
+    _on_upstream_tools_ready,
+    _partition_by_server,
+    clear_tool_cache,
+    invalidate_tool_cache,
+    prime_server_tools,
+    spawn_prime,
+)
 
 logger = logging.getLogger("mcp-combiner")
+
+# Explicit re-export surface: names that historically lived in server.py and
+# are imported from here by meta_tools (lazily) and the tests. Their homes are
+# now toolcache.py / middleware.py; the bindings above keep this module a
+# stable import point during the decomposition.
+__all__ = [
+    "ToolProcessingMiddleware",
+    "build_server_status",
+    "clear_tool_cache",
+    "create_combiner",
+    "invalidate_tool_cache",
+    "prime_server_tools",
+    "spawn_prime",
+]
 
 # NOTE (decomposition in progress): the mutable containers below are OWNED by
 # mcp_combiner.runtime.RUNTIME; the historical module-global names are aliases
@@ -71,14 +94,6 @@ _combiner_instance: FastMCP | None = None
 # ones); the done-callback discards them.
 _prime_tasks: set[asyncio.Task[Any]] = RUNTIME.prime_tasks
 
-# Timeout for individual upstream server queries during tools/list
-UPSTREAM_TOOL_LIST_TIMEOUT = 5.0  # seconds
-
-
-# Global tool cache - shared across middleware instances
-_tool_cache: list[Tool] | None = None
-_tool_cache_time: float = 0
-
 # Per-server "last-known-good" tool slices, keyed by server name, plus the
 # wall-clock time each slice was last seen live. These let a server's tools
 # survive a *transient* upstream drop (health-check reconnect, a dev restart)
@@ -98,14 +113,6 @@ _tool_cache_time: float = 0
 _server_tool_cache: dict[str, list[Tool]] = RUNTIME.tools.server_tools
 _server_tool_seen: dict[str, float] = RUNTIME.tools.server_seen
 
-# How long a reconnecting server's last-known tools stay advertised after it
-# stops appearing in fresh fetches. Long enough to ride out a health-check
-# reconnect (the monitor interval is 30s and a real blip reconnects in seconds);
-# short enough that a killed/wedged server's tools disappear promptly rather than
-# lingering. Overridable via create_combiner(stale_tool_grace=…) /
-# --stale-tool-grace / combiner.stale_tool_grace.
-STALE_TOOL_GRACE = 30.0  # seconds (default)
-
 # Tools-ready state for stdio / sharedserver servers — those WITHOUT a persistent
 # HTTP connection tracked by ConnectionManager. This mirrors ConnectionManager's
 # ``_tools_ready`` so a mounted proxy gets the SAME started → ready tri-state: a
@@ -115,11 +122,6 @@ STALE_TOOL_GRACE = 30.0  # seconds (default)
 # (_merge_stale_server_tools) or a priming list succeeds (prime_server_tools);
 # dropped when the server is evicted from the slice cache (_merge_stale_server_tools).
 _local_tools_ready: dict[str, bool] = RUNTIME.tools.local_tools_ready
-
-# How long to keep priming a just-restarted stdio/sharedserver proxy's tools/list
-# before giving up (the respawned process needs a moment to start serving).
-_LOCAL_TOOLS_READY_TIMEOUT = 30.0  # seconds
-_LOCAL_TOOLS_READY_ATTEMPT = 5.0  # per-attempt bound, so a hung list can't block
 
 
 # --- Session registry for ToolListChanged notifications ---
@@ -161,68 +163,8 @@ _COMBINER_BOOT_ID = RUNTIME.boot_id
 _notification_tasks: set[asyncio.Task[None]] = RUNTIME.notification_tasks
 
 
-async def _notify_tool_list_changed() -> None:
-    """Send ``notifications/tools/list_changed`` to every active MCP session.
-
-    Exceptions from individual sessions (e.g. client already disconnected)
-    are logged and swallowed so one bad session never blocks the rest.
-    """
-    sessions = list(_active_sessions)
-    if not sessions:
-        logger.debug("No active sessions to notify of tool list change")
-        return
-
-    logger.info("Notifying %d active session(s) of tool list change", len(sessions))
-    for session in sessions:
-        try:
-            await session.send_tool_list_changed()
-        except Exception:
-            logger.debug("Failed to notify session of tool list change", exc_info=True)
-
-
-async def _notify_session_by_id(session_id: str) -> None:
-    """Send ``notifications/tools/list_changed`` to a specific session by ID."""
-    for session in list(_active_sessions):
-        try:
-            sid = getattr(session, "_fastmcp_state_prefix", None) or str(id(session))
-            if sid == session_id:
-                await session.send_tool_list_changed()
-                return
-        except Exception:
-            logger.debug("Failed to notify session %s", session_id, exc_info=True)
-
-
 # Global config reference for tool filtering
 _combiner_config: CombinerConfig | None = None
-
-
-def _matches_filter(tool_name: str, patterns: list[str]) -> bool:
-    """Check if a tool name matches any of the glob patterns."""
-    import fnmatch
-
-    for pattern in patterns:
-        if fnmatch.fnmatch(tool_name, pattern):
-            return True
-    return False
-
-
-def _find_server_for_tool(tool_name: str) -> tuple[str | None, str]:
-    """Find which server a tool belongs to based on its name prefix.
-
-    Returns (server_name, local_tool_name) or (None, tool_name) if no match.
-    FastMCP namespaces tools as "servername_toolname" with single underscore.
-    """
-    if _combiner_config is None:
-        return None, tool_name
-
-    # Check each server name to see if the tool starts with it
-    for server_name in _combiner_config.servers:
-        prefix = server_name + "_"
-        if tool_name.startswith(prefix):
-            local_name = tool_name[len(prefix) :]
-            return server_name, local_name
-
-    return None, tool_name
 
 
 def build_server_status(
@@ -264,610 +206,6 @@ def build_server_status(
         # NOT assume ready just because it is mounted.
         state = "connected"
     return info.model_copy(update={"state": state})
-
-
-def _is_transport_dead(exc: BaseException) -> bool:
-    """True if *exc* signals the upstream process/transport is gone.
-
-    Distinguishes a dead server (crashed stdio subprocess, broken pipe, closed
-    stream, dropped connection) from an ordinary tool-level error. A dead
-    transport marks the server down in ``_failed_servers``; a tool error does
-    not. Matches anyio's stream-closed exceptions by name to avoid importing it.
-    """
-    if isinstance(exc, (ConnectionError, BrokenPipeError, TimeoutError, EOFError, OSError)):
-        return True
-    return type(exc).__name__ in (
-        "ClosedResourceError",
-        "BrokenResourceError",
-        "EndOfStream",
-        "ProcessLookupError",
-    )
-
-
-def _filter_tools(tools: list[Tool]) -> list[Tool]:
-    """Filter tools based on server-specific tool_filter patterns."""
-    if _combiner_config is None:
-        return tools
-
-    filtered: list[Tool] = []
-    for tool in tools:
-        name = str(tool.name) if tool.name else ""
-
-        server_name, local_name = _find_server_for_tool(name)
-
-        if server_name is None:
-            # Combiner tools (no server prefix) - always include
-            filtered.append(tool)
-            continue
-
-        # Get server config
-        srv = _combiner_config.servers.get(server_name)
-        if srv is None or not srv.tool_filter:
-            # No filter configured - include all tools from this server
-            filtered.append(tool)
-        elif _matches_filter(local_name, srv.tool_filter):
-            # Matches filter - include
-            filtered.append(tool)
-        # else: doesn't match filter - exclude
-
-    return filtered
-
-
-def clear_tool_cache() -> None:
-    """Clear the cached tool list + schema validators WITHOUT notifying clients.
-
-    Use this when the tool set may have changed but the new upstream is not yet
-    ready to serve calls. Clearing locally stops us serving stale entries, while
-    *not* sending ``tools/list_changed`` keeps clients from re-fetching and then
-    calling into a proxy whose connection is still down (which would surface as
-    retries/"hanging"). The reconnect monitor fires the notification via
-    ``on_tools_ready`` once the upstream's tools are actually listable.
-    """
-    global _tool_cache, _tool_cache_time
-    _tool_cache = None
-    _tool_cache_time = 0
-    # Drop cached JSON-schema validators so a reload or newly-connected server
-    # never validates a tool call against a stale schema.
-    from mcp_combiner import fastvalidate
-
-    fastvalidate.clear_cache()
-    logger.info("Tool cache cleared")
-
-
-def _partition_by_server(tools: list[Tool]) -> tuple[dict[str, list[Tool]], list[Tool]]:
-    """Split *tools* into per-server slices and a "local" bucket.
-
-    The local bucket holds tools with no server prefix — the combiner's own
-    meta-tools and the virtual ``neovim_*`` tools — which are always fresh and
-    never subject to stale re-injection.
-    """
-    per: dict[str, list[Tool]] = {}
-    local: list[Tool] = []
-    for t in tools:
-        server, _ = _find_server_for_tool(str(t.name) if t.name else "")
-        if server is None:
-            local.append(t)
-        else:
-            per.setdefault(server, []).append(t)
-    return per, local
-
-
-def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
-    """Re-inject last-known-good tools for servers that are only transiently absent.
-
-    Refreshes the per-server slice cache for every server present in *fresh*,
-    then appends the cached slice for any *known* server that dropped out of
-    this fetch while merely reconnecting — within ``STALE_TOOL_GRACE``. Servers
-    that are removed from config, disabled, auth-failed, or past the grace
-    window are dropped and evicted, so we never advertise uncallable tools.
-
-    This is the hysteresis that stops one server's reconnect (which clears the
-    whole cache) from blanking another server that happens to be mid-reconnect.
-    """
-    per_fresh, _local = _partition_by_server(fresh)
-
-    # Every server that returned tools this fetch is live: refresh its slice and
-    # confirm it "ready" (tools listable) for the stdio/sharedserver tri-state.
-    for server, slice_ in per_fresh.items():
-        _server_tool_cache[server] = slice_
-        _server_tool_seen[server] = now
-        _local_tools_ready[server] = True
-
-    result = list(fresh)
-    if _combiner_config is None:
-        return result
-
-    present = set(per_fresh)
-    for server in list(_server_tool_cache):
-        if server in present:
-            continue
-        srv = _combiner_config.servers.get(server)
-        auth_failed = _conn_manager.is_auth_failed(server) if _conn_manager else False
-        age = now - _server_tool_seen.get(server, 0.0)
-        # Keep re-serving a merely-absent server's tools within the grace window
-        # (transient reconnect — the flapping fix), EXCEPT once a tool call has
-        # actually failed against it (recorded in _failed_servers): that is the
-        # "remove on tool attempt" signal — a proven-dead upstream drops its tools
-        # now rather than lingering for the full grace.
-        eligible = (
-            srv is not None
-            and not srv.disabled
-            and not auth_failed
-            and server not in _failed_servers
-            and age < STALE_TOOL_GRACE
-        )
-        if eligible:
-            stale = _server_tool_cache[server]
-            result.extend(stale)
-            logger.info(
-                "tools/list: server '%s' absent (reconnecting) — serving %d "
-                "last-known-good tool(s), %.0fs stale",
-                server,
-                len(stale),
-                age,
-            )
-        else:
-            # Removed, disabled, auth-failed, or grace expired — let it drop.
-            _server_tool_cache.pop(server, None)
-            _server_tool_seen.pop(server, None)
-            _local_tools_ready.pop(server, None)
-    return result
-
-
-def invalidate_tool_cache() -> None:
-    """Invalidate the tool cache, forcing a refresh on next tools/list.
-
-    Also sends ``notifications/tools/list_changed`` to all connected MCP
-    clients so they re-fetch the tool list immediately. Only call this once the
-    affected upstream is actually reachable — see ``clear_tool_cache`` for the
-    silent variant to use while a connection is still coming up.
-    """
-    clear_tool_cache()
-
-    # Fire-and-forget notification to all connected sessions.
-    # We schedule this as a task because invalidate_tool_cache() is called
-    # from sync contexts (e.g. ConnectionManager.on_tools_ready callback).
-    # The task is stored in _notification_tasks to prevent GC before completion.
-    try:
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(_notify_tool_list_changed())
-        _notification_tasks.add(task)
-        task.add_done_callback(_notification_tasks.discard)
-    except RuntimeError:
-        # No running event loop — skip notification (e.g. during tests)
-        pass
-
-
-async def prime_server_tools(
-    combiner: FastMCP,
-    name: str,
-    timeout: float = _LOCAL_TOOLS_READY_TIMEOUT,
-    interval: float = 1.0,
-) -> bool:
-    """Invoke ``tools/list`` on *name*'s mounted provider(s); on answer, store
-    the slice, mark the server ready, and broadcast the change.
-
-    This is the started → ready transition for a single server, and it is NOT
-    automatic — a mounted server sits at "started" until something calls this
-    (startup, enable, restart, or the HTTP connection's tools-ready callback).
-    A just-(re)spawned process is not immediately serving, so we retry until
-    *timeout*.
-
-    Listing goes through the mounted provider (see mounts.get_server_providers),
-    so the returned tools carry fastmcp's own namespacing — the exact shape an
-    aggregate fetch produces. On success the slice is sanitized + filtered and
-    stored in the per-server cache (so the tools are already known, not just
-    known-to-exist), THEN the tool cache is invalidated, which broadcasts
-    ``tools/list_changed``. Nothing is broadcast before the list returns, so
-    clients are never told to re-fetch into a half-up server. Returns True on
-    success; False on timeout (the server stays started-not-ready, no
-    broadcast).
-    """
-    from mcp_combiner.mounts import get_server_providers
-
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while True:
-        providers = get_server_providers(combiner, name)
-        if not providers:
-            logger.warning("prime: '%s' has no mounted providers — nothing to list", name)
-            return False
-
-        async def _list_all(provs: list[Any]) -> list[Tool]:
-            out: list[Tool] = []
-            for provider in provs:
-                out.extend(await provider.list_tools())
-            return out
-
-        try:
-            raw = await asyncio.wait_for(_list_all(providers), timeout=_LOCAL_TOOLS_READY_ATTEMPT)
-        except Exception as e:
-            if loop.time() >= deadline:
-                logger.warning(
-                    "prime: '%s' tools/list did not answer within %.0fs — deferring "
-                    "(tools appear on the next successful fetch): %s",
-                    name,
-                    timeout,
-                    e,
-                )
-                return False
-            await asyncio.sleep(interval)
-            continue
-
-        filtered = _filter_tools(_sanitize_tools(raw))
-        _server_tool_cache[name] = filtered
-        _server_tool_seen[name] = time.time()
-        _local_tools_ready[name] = True
-        logger.info(
-            "prime: '%s' listed %d tool(s) — slice stored, invalidating cache",
-            name,
-            len(filtered),
-        )
-        invalidate_tool_cache()
-        return True
-
-
-def spawn_prime(combiner: FastMCP, name: str) -> asyncio.Task[bool]:
-    """Run prime_server_tools in the background, keeping a strong task ref."""
-    task = asyncio.get_running_loop().create_task(prime_server_tools(combiner, name))
-    _prime_tasks.add(task)
-    task.add_done_callback(_prime_tasks.discard)
-    return task
-
-
-def _on_upstream_tools_ready(name: str) -> None:
-    """ConnectionManager tools-ready callback: prime, store, then broadcast.
-
-    The connection's own probe just confirmed the upstream answers tools/list,
-    so run the shared prime — it re-lists through the mounted provider (warm
-    connection), stores the namespaced slice, and invalidates. This keeps HTTP
-    and stdio on ONE started → ready path. If the prime can't run (combiner not
-    up yet, no loop) or fails, fall back to the bare invalidation the callback
-    used to do — the probe did confirm listability, so announcing is safe.
-    """
-    combiner = _combiner_instance
-    if combiner is None:
-        invalidate_tool_cache()
-        return
-
-    async def _prime_or_announce() -> None:
-        if not await prime_server_tools(combiner, name):
-            invalidate_tool_cache()
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        invalidate_tool_cache()
-        return
-    task = loop.create_task(_prime_or_announce())
-    _prime_tasks.add(task)
-    task.add_done_callback(_prime_tasks.discard)
-
-
-class ToolProcessingMiddleware(Middleware):
-    """Intercept tools/list with caching and sanitization.
-
-    Caching: Tool lists are cached globally and only refreshed when:
-    - Cache is empty (first request)
-    - Cache was explicitly invalidated (server enable/disable)
-    - Cache is older than 5 minutes (safety refresh)
-
-    This dramatically improves tools/list performance by avoiding
-    re-querying all upstream servers on every request.
-
-    Sanitization: FastMCP ProxyTool objects can carry circular Python
-    object references (especially from servers with $ref schemas like
-    Todoist). Pydantic's ``model_dump()`` crashes with 'Circular
-    reference detected (id repeated)'. We catch these and rebuild as
-    clean FunctionTools.
-    """
-
-    CACHE_TTL = 300  # 5 minutes max cache age
-
-    # Single-flight coalescing for concurrent cache misses.
-    # When the cache is empty/stale and many sessions request tools/list at
-    # once (e.g. after a tools_list_changed broadcast), only the first caller
-    # issues the upstream fetch — every other caller awaits the same result.
-    # Without this, N concurrent flows hit the same OAuth-backed Client and
-    # race the SDK's auth-context lock.
-    _inflight: ClassVar[asyncio.Future[list[Tool]] | None] = None
-    _inflight_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
-
-    async def on_request(
-        self,
-        context: MiddlewareContext[mt.Request[Any, Any]],
-        call_next: CallNext[mt.Request[Any, Any], Any],
-    ) -> Any:
-        """Track active sessions and notify session watches of new connections."""
-        if context.fastmcp_context is not None:
-            try:
-                session = context.fastmcp_context.session
-                sid = context.fastmcp_context.session_id
-                is_new = session not in _active_sessions
-                _active_sessions.add(session)
-
-                # Build the session_id -> token reverse map used to route
-                # neovim_* calls back to the editor that owns this chat.
-                nvim_proxy.record_session_token(sid)
-
-                if is_new:
-                    try:
-                        cp = getattr(session, "client_params", None)
-                        ci = getattr(cp, "clientInfo", None) if cp else None
-                        client_name = getattr(ci, "name", None) if ci else None
-                        client_version = getattr(ci, "version", None) if ci else None
-                        logger.info(
-                            "New MCP session: id=%s client=%s version=%s",
-                            sid,
-                            client_name,
-                            client_version,
-                        )
-                    except Exception:
-                        logger.info("New MCP session: id=%s (no client info)", sid)
-
-            except (RuntimeError, AttributeError):
-                pass  # Session not yet established
-        return await call_next(context)
-
-    async def on_list_tools(
-        self,
-        context: MiddlewareContext[mt.ListToolsRequest],
-        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
-    ) -> Sequence[Tool]:
-        now = time.time()
-        cache_age = now - _tool_cache_time
-
-        if _tool_cache is not None and cache_age < self.CACHE_TTL:
-            logger.warning(
-                "tools/list: CACHE HIT (%d tools, %.1fs old)",
-                len(_tool_cache),
-                cache_age,
-            )
-            base = self._apply_session_filter(context, _tool_cache)
-            full = await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
-            return _finalize_schemas(full)
-
-        tools = await self._fetch_or_join(context, call_next, cache_age)
-        base = self._apply_session_filter(context, tools)
-        full = await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
-        return _finalize_schemas(full)
-
-    async def _fetch_or_join(
-        self,
-        context: MiddlewareContext[mt.ListToolsRequest],
-        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
-        cache_age: float,
-    ) -> list[Tool]:
-        """Single-flight cache fill. First caller fetches; others await its result."""
-        cls = type(self)
-
-        async with cls._inflight_lock:
-            fut = cls._inflight
-            if fut is None or fut.done():
-                fut = asyncio.get_running_loop().create_future()
-                cls._inflight = fut
-                is_owner = True
-            else:
-                is_owner = False
-
-        if not is_owner:
-            logger.debug("tools/list: joining in-flight fetch")
-            return await fut
-
-        if _tool_cache is None:
-            # No prior cache (first fetch, or just invalidated). cache_age would
-            # be a meaningless now-minus-epoch value here, so don't log it.
-            logger.warning("tools/list: CACHE MISS - fetching fresh (no prior cache)")
-        else:
-            logger.warning("tools/list: CACHE MISS - fetching fresh (cache_age=%.1fs)", cache_age)
-        try:
-            tools = await self._do_fetch(context, call_next)
-            fut.set_result(tools)
-            return tools
-        except Exception as exc:
-            fut.set_exception(exc)
-            raise
-        finally:
-            async with cls._inflight_lock:
-                if cls._inflight is fut:
-                    cls._inflight = None
-
-    async def _do_fetch(
-        self,
-        context: MiddlewareContext[mt.ListToolsRequest],
-        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
-    ) -> list[Tool]:
-        """Fetch upstream, sanitize, filter, populate the global cache."""
-        global _tool_cache, _tool_cache_time
-
-        try:
-            raw = list(await call_next(context))
-        except Exception as e:
-            logger.error("tools/list: upstream error, returning stale cache: %s", e)
-            if _tool_cache is not None:
-                return _tool_cache
-            return []
-
-        sanitized = _sanitize_tools(raw)
-
-        # NB: schema_fixes + object-shape coercion are NOT applied here. They run
-        # once at the on_list_tools egress (_finalize_schemas) over the COMPLETE
-        # assembled list — upstream AND the appended neovim virtual tools — so no
-        # tool source can bypass them. Only the circular-$ref rebuild (above) is
-        # fetch-local, because it must guard what enters the cache.
-        filtered = _filter_tools(sanitized)
-        if len(filtered) < len(sanitized):
-            logger.info(
-                "tools/list: filtered %d -> %d tools based on tool_filter",
-                len(sanitized),
-                len(filtered),
-            )
-
-        # Re-inject last-known-good tools for servers that are only transiently
-        # absent (mid-reconnect), so a peer server's reconnect can't blank them.
-        # The reinjected slices were already sanitized + filtered when cached, so
-        # they are appended after _filter_tools rather than run through it again.
-        merged = _merge_stale_server_tools(filtered, time.time())
-
-        _tool_cache = merged
-        _tool_cache_time = time.time()
-        logger.info("tools/list: cached %d tools", len(merged))
-        return merged
-
-    @staticmethod
-    def _apply_session_filter(
-        context: MiddlewareContext[mt.ListToolsRequest],
-        tools: list[Tool],
-    ) -> list[Tool]:
-        """Apply the per-session server blocklist."""
-        if context.fastmcp_context is None:
-            return tools
-        try:
-            sid = context.fastmcp_context.session_id
-        except (RuntimeError, AttributeError):
-            return tools
-
-        blocked = _session_disabled.get(sid)
-        if not blocked:
-            return tools
-
-        out: list[Tool] = [
-            t
-            for t in tools
-            if _find_server_for_tool(str(t.name) if t.name else "")[0] not in blocked
-        ]
-        if len(out) < len(tools):
-            logger.debug(
-                "tools/list: session filter removed %d tool(s) for blocked servers %s",
-                len(tools) - len(out),
-                blocked,
-            )
-        return out
-
-    async def on_call_tool(
-        self,
-        context: MiddlewareContext[mt.CallToolRequestParams],
-        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
-    ) -> ToolResult:
-        """Wrap tool calls with error handling for resilience.
-
-        Error strategy:
-        - NotFoundError (unknown/disabled tool): re-raised as a protocol error
-          (-32002). This is a client mistake — the tool name is wrong or the
-          server is disabled. The AI should not retry with the same name.
-        - ToolError already raised upstream: re-raised unchanged so FastMCP
-          converts it to CallToolResult(isError=True) correctly.
-        - All other exceptions (connection, auth, rate-limit, etc.): wrapped
-          as ToolError so FastMCP sets isError=True in the response. This is
-          the correct MCP semantics: "the tool ran but something went wrong".
-        """
-        tool_name = context.message.name if context.message else "unknown"
-
-        # Virtual native server: intercept `neovim_*` and route over the
-        # back-channel instead of the upstream proxy. These tools are never in
-        # FastMCP's registry, so we must handle them before call_next.
-        if nvim_proxy.is_nvim_tool(tool_name):
-            return await nvim_proxy.call_nvim_tool(context, tool_name, _session_disabled)
-
-        # Per-session blocklist check: if the calling session has disabled
-        # the server that owns this tool, reject immediately.
-        if context.fastmcp_context is not None:
-            try:
-                sid = context.fastmcp_context.session_id
-                blocked = _session_disabled.get(sid)
-                if blocked:
-                    sess_server, _ = _find_server_for_tool(str(tool_name))
-                    if sess_server in blocked:
-                        raise NotFoundError(
-                            f"Tool '{tool_name}' is unavailable — server '{sess_server}' "
-                            "is disabled for this session. Use combiner__session_enable_server "
-                            "to re-enable it."
-                        )
-            except NotFoundError:
-                raise
-            except (RuntimeError, AttributeError):
-                pass
-        # Resolve the owning server once (longest prefix wins — disambiguates
-        # names that are prefixes of each other) for failure/recovery bookkeeping
-        # around the call result.
-        call_server: str | None = None
-        if _combiner_config:
-            for sname in sorted(_combiner_config.servers, key=len, reverse=True):
-                if tool_name.startswith(sname + "_"):
-                    call_server = sname
-                    break
-
-        try:
-            result = await call_next(context)
-        except NotFoundError:
-            # Protocol error — wrong tool name or server disabled. Re-raise
-            # so the MCP layer returns a -32002 JSON-RPC error, not a tool result.
-            raise
-        except ToolError:
-            # Already a proper tool error — re-raise unchanged.
-            raise
-        except AuthenticationError as e:
-            # Auth-failed servers: convert to ToolError immediately.
-            # This must NOT propagate as a generic exception — RetryMiddleware
-            # would catch it and retry (creating new OAuth instances).
-            logger.warning("Tool '%s' blocked by auth failure: %s", tool_name, e)
-            raise ToolError(
-                f"Tool '{tool_name}' is unavailable — the server's authentication "
-                f"failed. Use combiner__enable_server to retry authentication."
-            ) from e
-        except Exception as e:
-            server_name = call_server
-            error_str = str(e)
-
-            # Check for rate limiting (429) — transient, caller should retry
-            if (
-                "429" in error_str
-                or "too many requests" in error_str.lower()
-                or "rate limit" in error_str.lower()
-            ):
-                logger.warning("Tool '%s' rate-limited (429): %s", tool_name, e)
-                raise ToolError(
-                    f"Tool '{tool_name}' is temporarily unavailable due to rate limiting "
-                    f"(HTTP 429). Please wait a moment and retry."
-                ) from e
-
-            # Lazy liveness: a transport/process death (crashed stdio subprocess,
-            # broken pipe, dropped connection) means the upstream isn't serving.
-            # Record it in _failed_servers so /health and combiner__status show
-            # the server as down — for stdio there is no connection lifecycle, so
-            # this mark is the ONLY down signal; for HTTP we also downgrade out of
-            # "ready". 429s are transient (handled above) and skipped here. The
-            # mark is cleared on the next successful call (see the else branch).
-            if server_name and (_is_transport_dead(e) or is_stale_client_error(e)):
-                _failed_servers[server_name] = f"{type(e).__name__}: {e}"
-                if _conn_manager is not None:
-                    _conn_manager.mark_tools_unready(server_name)
-
-            # Check if this is a stale OAuth error — clear cache so next
-            # attempt triggers fresh authentication
-            if server_name and is_stale_client_error(e):
-                logger.warning(
-                    "Tool '%s' failed with stale OAuth error, clearing cache for '%s': %s",
-                    tool_name,
-                    server_name,
-                    e,
-                )
-                from mcp_combiner.config import OAuthConfig
-
-                token_dir = OAuthConfig().token_dir_path
-                clear_oauth_cache(server_name, token_dir)
-                _failed_servers[server_name] = f"OAuth error: {e}"
-
-            logger.error("Tool '%s' failed: %s", tool_name, e)
-            raise ToolError(f"Error calling tool '{tool_name}': {e}") from e
-        else:
-            # Success proves the server is alive again — clear any stale failure
-            # mark so /health and combiner__status flip it back to ready. For a
-            # crashed stdio server this is the recovery signal (a fresh subprocess
-            # answered); for HTTP the reconnect monitor already restored it.
-            if call_server and _failed_servers.pop(call_server, None) is not None:
-                logger.info("Server '%s' recovered on a successful call", call_server)
-            return result
 
 
 def _effective_isolate(srv: ServerConfig) -> bool:
@@ -1127,13 +465,12 @@ def create_combiner(
     global _combiner_config
     global _conn_manager
     global _combiner_instance
-    global STALE_TOOL_GRACE
 
     # Configurable stale-tool grace: how long a disconnected server keeps serving
     # its last-known tools before they're dropped. Default STALE_TOOL_GRACE.
     if stale_tool_grace is not None:
-        STALE_TOOL_GRACE = float(stale_tool_grace)
-        logger.info("Stale-tool grace set to %.0fs", STALE_TOOL_GRACE)
+        RUNTIME.tools.stale_grace = float(stale_tool_grace)
+        logger.info("Stale-tool grace set to %.0fs", RUNTIME.tools.stale_grace)
 
     # Replace the MCP SDK's per-call jsonschema.validate (which rebuilds the
     # validator + re-checks the meta-schema on every tool call) with a cached

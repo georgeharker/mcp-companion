@@ -64,6 +64,10 @@ class ToolCacheState:
     # started→ready tri-state for servers WITHOUT a ConnectionManager entry
     # (stdio / sharedserver), mirroring _ManagedConnection._tools_ready.
     local_tools_ready: dict[str, bool] = field(default_factory=dict)
+    # How long a reconnecting server's last-known tools stay advertised after
+    # it stops appearing in fresh fetches (the hysteresis window). Overridable
+    # via create_combiner(stale_tool_grace=…) / --stale-tool-grace.
+    stale_grace: float = 30.0
     # Lazy liveness: server name -> last error message from a failed call.
     failed_servers: dict[str, str] = field(default_factory=dict)
 
@@ -120,6 +124,7 @@ def reset() -> None:
     r.tools.server_tools.clear()
     r.tools.server_seen.clear()
     r.tools.local_tools_ready.clear()
+    r.tools.stale_grace = 30.0
     r.tools.failed_servers.clear()
     r.prime_tasks.clear()
     r.notification_tasks.clear()
