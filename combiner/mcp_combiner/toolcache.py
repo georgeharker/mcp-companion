@@ -39,17 +39,6 @@ UPSTREAM_TOOL_LIST_TIMEOUT = 5.0  # seconds
 _LOCAL_TOOLS_READY_TIMEOUT = 30.0  # seconds
 _LOCAL_TOOLS_READY_ATTEMPT = 5.0  # per-attempt bound, so a hung list can't block
 
-# Container aliases into the runtime — the moved code below is verbatim from
-# server.py; these keep it reading/writing the exact same objects.
-_failed_servers = RUNTIME.tools.failed_servers
-_server_tool_cache = RUNTIME.tools.server_tools
-_server_tool_seen = RUNTIME.tools.server_seen
-_local_tools_ready = RUNTIME.tools.local_tools_ready
-_active_sessions = RUNTIME.sessions.active
-_session_disabled = RUNTIME.sessions.disabled
-_prime_tasks = RUNTIME.prime_tasks
-_notification_tasks = RUNTIME.notification_tasks
-
 
 async def _notify_tool_list_changed() -> None:
     """Send ``notifications/tools/list_changed`` to every active MCP session.
@@ -57,7 +46,7 @@ async def _notify_tool_list_changed() -> None:
     Exceptions from individual sessions (e.g. client already disconnected)
     are logged and swallowed so one bad session never blocks the rest.
     """
-    sessions = list(_active_sessions)
+    sessions = RUNTIME.sessions.sessions()
     if not sessions:
         logger.debug("No active sessions to notify of tool list change")
         return
@@ -72,7 +61,7 @@ async def _notify_tool_list_changed() -> None:
 
 async def _notify_session_by_id(session_id: str) -> None:
     """Send ``notifications/tools/list_changed`` to a specific session by ID."""
-    for session in list(_active_sessions):
+    for session in RUNTIME.sessions.sessions():
         try:
             sid = getattr(session, "_fastmcp_state_prefix", None) or str(id(session))
             if sid == session_id:
@@ -116,7 +105,7 @@ def _is_transport_dead(exc: BaseException) -> bool:
 
     Distinguishes a dead server (crashed stdio subprocess, broken pipe, closed
     stream, dropped connection) from an ordinary tool-level error. A dead
-    transport marks the server down in ``_failed_servers``; a tool error does
+    transport marks the server down in ``RUNTIME.tools.failed_servers``; a tool error does
     not. Matches anyio's stream-closed exceptions by name to avoid importing it.
     """
     if isinstance(exc, (ConnectionError, BrokenPipeError, TimeoutError, EOFError, OSError)):
@@ -168,8 +157,7 @@ def clear_tool_cache() -> None:
     retries/"hanging"). The reconnect monitor fires the notification via
     ``on_tools_ready`` once the upstream's tools are actually listable.
     """
-    RUNTIME.tools.cache = None
-    RUNTIME.tools.cache_time = 0
+    RUNTIME.tools.clear_cache()
     # Drop cached JSON-schema validators so a reload or newly-connected server
     # never validates a tool call against a stale schema.
     from mcp_combiner import fastvalidate
@@ -213,21 +201,19 @@ def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
     # Every server that returned tools this fetch is live: refresh its slice and
     # confirm it "ready" (tools listable) for the stdio/sharedserver tri-state.
     for server, slice_ in per_fresh.items():
-        _server_tool_cache[server] = slice_
-        _server_tool_seen[server] = now
-        _local_tools_ready[server] = True
+        RUNTIME.tools.store_slice(server, slice_, now)
 
     result = list(fresh)
     if RUNTIME.config is None:
         return result
 
     present = set(per_fresh)
-    for server in list(_server_tool_cache):
+    for server in list(RUNTIME.tools.server_tools):
         if server in present:
             continue
         srv = RUNTIME.config.servers.get(server)
         auth_failed = RUNTIME.conn_manager.is_auth_failed(server) if RUNTIME.conn_manager else False
-        age = now - _server_tool_seen.get(server, 0.0)
+        age = now - RUNTIME.tools.server_seen.get(server, 0.0)
         # Keep re-serving a merely-absent server's tools within the grace window
         # (transient reconnect — the flapping fix), EXCEPT once a tool call has
         # actually failed against it (recorded in _failed_servers): that is the
@@ -237,11 +223,11 @@ def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
             srv is not None
             and not srv.disabled
             and not auth_failed
-            and server not in _failed_servers
+            and server not in RUNTIME.tools.failed_servers
             and age < RUNTIME.tools.stale_grace
         )
         if eligible:
-            stale = _server_tool_cache[server]
+            stale = RUNTIME.tools.server_tools[server]
             result.extend(stale)
             logger.info(
                 "tools/list: server '%s' absent (reconnecting) — serving %d "
@@ -252,9 +238,7 @@ def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
             )
         else:
             # Removed, disabled, auth-failed, or grace expired — let it drop.
-            _server_tool_cache.pop(server, None)
-            _server_tool_seen.pop(server, None)
-            _local_tools_ready.pop(server, None)
+            RUNTIME.tools.evict_slice(server)
     return result
 
 
@@ -275,8 +259,8 @@ def invalidate_tool_cache() -> None:
     try:
         loop = asyncio.get_running_loop()
         task = loop.create_task(_notify_tool_list_changed())
-        _notification_tasks.add(task)
-        task.add_done_callback(_notification_tasks.discard)
+        RUNTIME.notification_tasks.add(task)
+        task.add_done_callback(RUNTIME.notification_tasks.discard)
     except RuntimeError:
         # No running event loop — skip notification (e.g. during tests)
         pass
@@ -339,9 +323,7 @@ async def prime_server_tools(
             continue
 
         filtered = _filter_tools(_sanitize_tools(raw))
-        _server_tool_cache[name] = filtered
-        _server_tool_seen[name] = time.time()
-        _local_tools_ready[name] = True
+        RUNTIME.tools.store_slice(name, filtered, time.time())
         logger.info(
             "prime: '%s' listed %d tool(s) — slice stored, invalidating cache",
             name,
@@ -354,8 +336,8 @@ async def prime_server_tools(
 def spawn_prime(combiner: FastMCP, name: str) -> asyncio.Task[bool]:
     """Run prime_server_tools in the background, keeping a strong task ref."""
     task = asyncio.get_running_loop().create_task(prime_server_tools(combiner, name))
-    _prime_tasks.add(task)
-    task.add_done_callback(_prime_tasks.discard)
+    RUNTIME.prime_tasks.add(task)
+    task.add_done_callback(RUNTIME.prime_tasks.discard)
     return task
 
 
@@ -384,5 +366,5 @@ def _on_upstream_tools_ready(name: str) -> None:
         invalidate_tool_cache()
         return
     task = loop.create_task(_prime_or_announce())
-    _prime_tasks.add(task)
-    task.add_done_callback(_prime_tasks.discard)
+    RUNTIME.prime_tasks.add(task)
+    task.add_done_callback(RUNTIME.prime_tasks.discard)

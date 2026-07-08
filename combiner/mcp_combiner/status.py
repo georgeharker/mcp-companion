@@ -15,10 +15,6 @@ from mcp_combiner.runtime import RUNTIME
 
 logger = logging.getLogger("mcp-combiner")
 
-# Container aliases into the runtime (verbatim-moved code reads these names).
-_failed_servers = RUNTIME.tools.failed_servers
-_local_tools_ready = RUNTIME.tools.local_tools_ready
-
 
 def build_server_status(
     config: CombinerConfig,
@@ -35,7 +31,7 @@ def build_server_status(
     """
     info = config.get_server_status(name)
     srv = config.servers[name]
-    failed = name in _failed_servers
+    failed = name in RUNTIME.tools.failed_servers
     if srv.disabled:
         state = "disabled"
     elif conn_manager is not None and conn_manager.has_connection(name):
@@ -49,7 +45,7 @@ def build_server_status(
         # subprocess has crashed. No connection lifecycle tracks this, so the
         # failure mark is the down signal until a successful call clears it.
         state = "disconnected"
-    elif _local_tools_ready.get(name):
+    elif RUNTIME.tools.local_tools_ready.get(name):
         # stdio / non-connection-managed server whose tools are confirmed
         # listable (seen in a fetch, or a priming list succeeded).
         state = "ready"

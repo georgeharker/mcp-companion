@@ -406,13 +406,9 @@ def register_meta_tools(
 
         from mcp_combiner.runtime import RUNTIME
 
-        _session_disabled = RUNTIME.sessions.disabled
-
         # Use chat_id if provided, otherwise fall back to MCP session_id
         sid = chat_id if chat_id else ctx.session_id
-        if sid not in _session_disabled:
-            _session_disabled[sid] = set()
-        _session_disabled[sid].add(server_name)
+        RUNTIME.sessions.disable(sid, server_name)
 
         # Notify this session only so its tool list refreshes immediately.
         # (Only effective when using ctx.session_id, not chat_id)
@@ -431,7 +427,7 @@ def register_meta_tools(
                 "session_id": sid,
                 "action": "disabled",
                 "server": server_name,
-                "disabled_servers": sorted(_session_disabled.get(sid, set())),
+                "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
             }
         )
 
@@ -457,11 +453,9 @@ def register_meta_tools(
 
         from mcp_combiner.runtime import RUNTIME
 
-        _session_disabled = RUNTIME.sessions.disabled
-
         # Use chat_id if provided, otherwise fall back to MCP session_id
         sid = chat_id if chat_id else ctx.session_id
-        blocked = _session_disabled.get(sid)
+        blocked = RUNTIME.sessions.disabled_for(sid)
         if not blocked or server_name not in blocked:
             import json
 
@@ -471,14 +465,11 @@ def register_meta_tools(
                     "action": "no_change",
                     "server": server_name,
                     "message": f"Server '{server_name}' is not session-disabled",
-                    "disabled_servers": sorted(_session_disabled.get(sid, set())),
+                    "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
                 }
             )
 
-        blocked.discard(server_name)
-        # Clean up empty sets
-        if not blocked:
-            _session_disabled.pop(sid, None)
+        RUNTIME.sessions.enable(sid, server_name)
 
         # Notify this session only so its tool list refreshes immediately.
         if not chat_id:
@@ -496,7 +487,7 @@ def register_meta_tools(
                 "session_id": sid,
                 "action": "enabled",
                 "server": server_name,
-                "disabled_servers": sorted(_session_disabled.get(sid, set())),
+                "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
             }
         )
 
@@ -517,10 +508,8 @@ def register_meta_tools(
         """
         from mcp_combiner.runtime import RUNTIME
 
-        _session_disabled = RUNTIME.sessions.disabled
-
         sid = chat_id if chat_id else ctx.session_id
-        blocked = list(_session_disabled.get(sid, set()))
+        blocked = RUNTIME.sessions.disabled_snapshot(sid)
         blocked.sort()
 
         import json

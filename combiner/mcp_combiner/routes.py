@@ -28,12 +28,6 @@ from mcp_combiner.toolcache import _notify_session_by_id
 
 logger = logging.getLogger("mcp-combiner")
 
-# Container aliases into the runtime (verbatim-moved code reads these names).
-_active_sessions = RUNTIME.sessions.active
-_session_disabled = RUNTIME.sessions.disabled
-_token_sessions = RUNTIME.sessions.token_sessions
-_pending_token_filters = RUNTIME.sessions.pending_token_filters
-
 
 def register_routes(
     combiner: FastMCP,
@@ -70,12 +64,12 @@ def register_routes(
     async def list_sessions(request: Request) -> JSONResponse:
         """List active MCP sessions with their IDs, client info, and filter state."""
         sessions_out: list[dict[str, Any]] = []
-        for sess in list(_active_sessions):
+        for sess in RUNTIME.sessions.sessions():
             try:
                 sid = getattr(sess, "_fastmcp_state_prefix", None) or str(id(sess))
             except AttributeError:
                 sid = str(id(sess))
-            blocked = _session_disabled.get(sid, set())
+            blocked = RUNTIME.sessions.disabled.get(sid, set())
             # Extract client info from the MCP initialize handshake
             client_info: dict[str, Any] | None = None
             try:
@@ -112,7 +106,7 @@ def register_routes(
             return JSONResponse({"error": "session_id required"}, status_code=400)
 
         if request.method == "GET":
-            disabled = _session_disabled.get(session_id, set())
+            disabled = RUNTIME.sessions.disabled.get(session_id, set())
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -121,7 +115,7 @@ def register_routes(
             )
 
         if request.method == "DELETE":
-            removed = _session_disabled.pop(session_id, None)
+            removed = RUNTIME.sessions.clear_disabled(session_id)
             # Notify the session so its tool list refreshes
             await _notify_session_by_id(session_id)
             return JSONResponse(
@@ -151,12 +145,7 @@ def register_routes(
         if enable_server is not None:
             if enable_server not in config.servers:
                 return JSONResponse({"error": f"Unknown server: {enable_server}"}, status_code=400)
-            current = _session_disabled.get(session_id, set())
-            current.discard(enable_server)
-            if current:
-                _session_disabled[session_id] = current
-            else:
-                _session_disabled.pop(session_id, None)
+            RUNTIME.sessions.enable(session_id, enable_server)
             await _notify_session_by_id(session_id)
             logger.info("REST: session %s enabled server %s", session_id, enable_server)
             return JSONResponse(
@@ -164,15 +153,14 @@ def register_routes(
                     "session_id": session_id,
                     "action": "enabled",
                     "server": enable_server,
-                    "disabled_servers": sorted(_session_disabled.get(session_id, set())),
+                    "disabled_servers": RUNTIME.sessions.disabled_snapshot(session_id),
                 }
             )
 
         if disable_server is not None:
             if disable_server not in config.servers:
                 return JSONResponse({"error": f"Unknown server: {disable_server}"}, status_code=400)
-            current = _session_disabled.setdefault(session_id, set())
-            current.add(disable_server)
+            RUNTIME.sessions.disable(session_id, disable_server)
             await _notify_session_by_id(session_id)
             logger.info("REST: session %s disabled server %s", session_id, disable_server)
             return JSONResponse(
@@ -180,7 +168,7 @@ def register_routes(
                     "session_id": session_id,
                     "action": "disabled",
                     "server": disable_server,
-                    "disabled_servers": sorted(_session_disabled.get(session_id, set())),
+                    "disabled_servers": RUNTIME.sessions.disabled_snapshot(session_id),
                 }
             )
 
@@ -208,10 +196,7 @@ def register_routes(
         if unknown:
             return JSONResponse({"error": f"Unknown servers: {unknown}"}, status_code=400)
 
-        if disabled_list:
-            _session_disabled[session_id] = set(disabled_list)
-        else:
-            _session_disabled.pop(session_id, None)
+        RUNTIME.sessions.set_disabled(session_id, set(disabled_list))
 
         # Notify the target session
         await _notify_session_by_id(session_id)
@@ -224,7 +209,7 @@ def register_routes(
         return JSONResponse(
             {
                 "session_id": session_id,
-                "disabled_servers": sorted(_session_disabled.get(session_id, set())),
+                "disabled_servers": RUNTIME.sessions.disabled_snapshot(session_id),
             }
         )
 
@@ -238,7 +223,7 @@ def register_routes(
         session_id on the first initialize response.
         """
         token = request.path_params.get("token", "")
-        session_id = _token_sessions.get(token)
+        session_id = RUNTIME.sessions.session_for_token(token)
         if session_id is None:
             return JSONResponse({"error": "token not found"}, status_code=404)
         logger.debug("Token lookup: %s -> %s", token, session_id)
@@ -262,15 +247,15 @@ def register_routes(
         if not token:
             return JSONResponse({"error": "token required"}, status_code=400)
 
-        session_id = _token_sessions.get(token)
+        session_id = RUNTIME.sessions.session_for_token(token)
 
         if request.method == "GET":
             if session_id:
-                disabled = _session_disabled.get(session_id, set())
+                disabled = RUNTIME.sessions.disabled.get(session_id, set())
                 return JSONResponse(
                     {"token": token, "session_id": session_id, "disabled_servers": sorted(disabled)}
                 )
-            pending = _pending_token_filters.get(token, set())
+            pending = RUNTIME.sessions.pending_for(token)
             return JSONResponse(
                 {
                     "token": token,
@@ -281,9 +266,9 @@ def register_routes(
             )
 
         if request.method == "DELETE":
-            _pending_token_filters.pop(token, None)
+            RUNTIME.sessions.set_pending(token, None)
             if session_id:
-                removed = _session_disabled.pop(session_id, None)
+                removed = RUNTIME.sessions.clear_disabled(session_id)
                 await _notify_session_by_id(session_id)
                 return JSONResponse(
                     {
@@ -325,34 +310,28 @@ def register_routes(
 
         if session_id:
             # Session already connected — apply immediately
-            current = set(_session_disabled.get(session_id, set()))
+            current = set(RUNTIME.sessions.disabled.get(session_id, set()))
             new_disabled = _resolve_disabled(current)
-            if new_disabled:
-                _session_disabled[session_id] = new_disabled
-            else:
-                _session_disabled.pop(session_id, None)
+            RUNTIME.sessions.set_disabled(session_id, new_disabled)
             await _notify_session_by_id(session_id)
             logger.info(
                 "REST token filter: token=%s session=%s disabled=%s",
                 token,
                 session_id,
-                sorted(_session_disabled.get(session_id, set())),
+                RUNTIME.sessions.disabled_snapshot(session_id),
             )
             return JSONResponse(
                 {
                     "token": token,
                     "session_id": session_id,
-                    "disabled_servers": sorted(_session_disabled.get(session_id, set())),
+                    "disabled_servers": RUNTIME.sessions.disabled_snapshot(session_id),
                 }
             )
 
         # Session not yet connected — store as pending
-        current = set(_pending_token_filters.get(token, set()))
+        current = set(RUNTIME.sessions.pending_for(token))
         new_disabled = _resolve_disabled(current)
-        if new_disabled:
-            _pending_token_filters[token] = new_disabled
-        else:
-            _pending_token_filters.pop(token, None)
+        RUNTIME.sessions.set_pending(token, new_disabled)
         logger.info(
             "REST token filter (pending): token=%s disabled=%s",
             token,

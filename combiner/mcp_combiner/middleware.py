@@ -35,11 +35,6 @@ from mcp_combiner.toolcache import (
 
 logger = logging.getLogger("mcp-combiner")
 
-# Container aliases into the runtime (verbatim-moved code reads these names).
-_active_sessions = RUNTIME.sessions.active
-_session_disabled = RUNTIME.sessions.disabled
-_failed_servers = RUNTIME.tools.failed_servers
-
 
 class ToolProcessingMiddleware(Middleware):
     """Intercept tools/list with caching and sanitization.
@@ -80,8 +75,7 @@ class ToolProcessingMiddleware(Middleware):
             try:
                 session = context.fastmcp_context.session
                 sid = context.fastmcp_context.session_id
-                is_new = session not in _active_sessions
-                _active_sessions.add(session)
+                is_new = RUNTIME.sessions.track(session)
 
                 # Build the session_id -> token reverse map used to route
                 # neovim_* calls back to the editor that owns this chat.
@@ -121,12 +115,12 @@ class ToolProcessingMiddleware(Middleware):
                 cache_age,
             )
             base = self._apply_session_filter(context, RUNTIME.tools.cache)
-            full = await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
+            full = await nvim_proxy.append_nvim_tools(context, base, RUNTIME.sessions.disabled)
             return _finalize_schemas(full)
 
         tools = await self._fetch_or_join(context, call_next, cache_age)
         base = self._apply_session_filter(context, tools)
-        full = await nvim_proxy.append_nvim_tools(context, base, _session_disabled)
+        full = await nvim_proxy.append_nvim_tools(context, base, RUNTIME.sessions.disabled)
         return _finalize_schemas(full)
 
     async def _fetch_or_join(
@@ -205,8 +199,7 @@ class ToolProcessingMiddleware(Middleware):
         # they are appended after _filter_tools rather than run through it again.
         merged = _merge_stale_server_tools(filtered, time.time())
 
-        RUNTIME.tools.cache = merged
-        RUNTIME.tools.cache_time = time.time()
+        RUNTIME.tools.set_cache(merged, time.time())
         logger.info("tools/list: cached %d tools", len(merged))
         return merged
 
@@ -223,7 +216,7 @@ class ToolProcessingMiddleware(Middleware):
         except (RuntimeError, AttributeError):
             return tools
 
-        blocked = _session_disabled.get(sid)
+        blocked = RUNTIME.sessions.disabled_for(sid)
         if not blocked:
             return tools
 
@@ -263,14 +256,14 @@ class ToolProcessingMiddleware(Middleware):
         # back-channel instead of the upstream proxy. These tools are never in
         # FastMCP's registry, so we must handle them before call_next.
         if nvim_proxy.is_nvim_tool(tool_name):
-            return await nvim_proxy.call_nvim_tool(context, tool_name, _session_disabled)
+            return await nvim_proxy.call_nvim_tool(context, tool_name, RUNTIME.sessions.disabled)
 
         # Per-session blocklist check: if the calling session has disabled
         # the server that owns this tool, reject immediately.
         if context.fastmcp_context is not None:
             try:
                 sid = context.fastmcp_context.session_id
-                blocked = _session_disabled.get(sid)
+                blocked = RUNTIME.sessions.disabled_for(sid)
                 if blocked:
                     sess_server, _ = _find_server_for_tool(str(tool_name))
                     if sess_server in blocked:
@@ -329,13 +322,13 @@ class ToolProcessingMiddleware(Middleware):
 
             # Lazy liveness: a transport/process death (crashed stdio subprocess,
             # broken pipe, dropped connection) means the upstream isn't serving.
-            # Record it in _failed_servers so /health and combiner__status show
+            # Record it (RUNTIME.tools.failed_servers) so /health and combiner__status show
             # the server as down — for stdio there is no connection lifecycle, so
             # this mark is the ONLY down signal; for HTTP we also downgrade out of
             # "ready". 429s are transient (handled above) and skipped here. The
             # mark is cleared on the next successful call (see the else branch).
             if server_name and (_is_transport_dead(e) or is_stale_client_error(e)):
-                _failed_servers[server_name] = f"{type(e).__name__}: {e}"
+                RUNTIME.tools.record_failure(server_name, f"{type(e).__name__}: {e}")
                 if RUNTIME.conn_manager is not None:
                     RUNTIME.conn_manager.mark_tools_unready(server_name)
 
@@ -352,7 +345,7 @@ class ToolProcessingMiddleware(Middleware):
 
                 token_dir = OAuthConfig().token_dir_path
                 clear_oauth_cache(server_name, token_dir)
-                _failed_servers[server_name] = f"OAuth error: {e}"
+                RUNTIME.tools.record_failure(server_name, f"OAuth error: {e}")
 
             logger.error("Tool '%s' failed: %s", tool_name, e)
             raise ToolError(f"Error calling tool '{tool_name}': {e}") from e
@@ -361,6 +354,6 @@ class ToolProcessingMiddleware(Middleware):
             # mark so /health and combiner__status flip it back to ready. For a
             # crashed stdio server this is the recovery signal (a fresh subprocess
             # answered); for HTTP the reconnect monitor already restored it.
-            if call_server and _failed_servers.pop(call_server, None) is not None:
+            if call_server and RUNTIME.tools.clear_failure(call_server):
                 logger.info("Server '%s' recovered on a successful call", call_server)
             return result

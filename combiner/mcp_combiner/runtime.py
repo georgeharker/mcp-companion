@@ -37,7 +37,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class SessionRegistry:
-    """Downstream (client ↔ combiner) session state."""
+    """Downstream (client ↔ combiner) session state.
+
+    All WRITES go through the methods below — the containers stay public for
+    reads (and for the server.py compatibility aliases), but nothing outside
+    this class should mutate them directly.
+    """
 
     # Weak refs to all active ServerSessions; populated per request by
     # ToolProcessingMiddleware, auto-pruned on GC.
@@ -49,10 +54,82 @@ class SessionRegistry:
     # Filters stored for a token before its client has connected.
     pending_token_filters: dict[str, set[str]] = field(default_factory=dict)
 
+    # -- active sessions --------------------------------------------------
+
+    def track(self, session: ServerSession) -> bool:
+        """Record a live session; returns True the first time it is seen."""
+        is_new = session not in self.active
+        self.active.add(session)
+        return is_new
+
+    def sessions(self) -> list[ServerSession]:
+        """Snapshot of the live sessions (safe to iterate)."""
+        return list(self.active)
+
+    # -- per-session blocklist ---------------------------------------------
+
+    def disabled_for(self, session_id: str) -> set[str] | None:
+        """The raw disabled set for a session, or None if it has no filter."""
+        return self.disabled.get(session_id)
+
+    def disabled_snapshot(self, session_id: str) -> list[str]:
+        """Sorted disabled-server names for a session (empty when unfiltered)."""
+        return sorted(self.disabled.get(session_id, set()))
+
+    def disable(self, session_id: str, server: str) -> None:
+        self.disabled.setdefault(session_id, set()).add(server)
+
+    def enable(self, session_id: str, server: str) -> None:
+        """Remove one server from a session's blocklist; drops empty entries."""
+        blocked = self.disabled.get(session_id)
+        if blocked is None:
+            return
+        blocked.discard(server)
+        if not blocked:
+            self.disabled.pop(session_id, None)
+
+    def set_disabled(self, session_id: str, servers: set[str] | None) -> None:
+        """Replace a session's blocklist; None/empty clears it."""
+        if servers:
+            self.disabled[session_id] = servers
+        else:
+            self.disabled.pop(session_id, None)
+
+    def clear_disabled(self, session_id: str) -> set[str] | None:
+        """Drop a session's blocklist entirely; returns what was removed."""
+        return self.disabled.pop(session_id, None)
+
+    # -- token correlation (Q1 caveat: values are wire mcp-session-ids) -----
+
+    def session_for_token(self, token: str) -> str | None:
+        return self.token_sessions.get(token)
+
+    def map_token(self, token: str, session_id: str) -> None:
+        self.token_sessions[token] = session_id
+
+    # -- pending token filters ----------------------------------------------
+
+    def pending_for(self, token: str) -> set[str]:
+        return self.pending_token_filters.get(token, set())
+
+    def set_pending(self, token: str, servers: set[str] | None) -> None:
+        """Replace a token's pending filter; None/empty clears it."""
+        if servers:
+            self.pending_token_filters[token] = servers
+        else:
+            self.pending_token_filters.pop(token, None)
+
+    def pop_pending(self, token: str) -> set[str] | None:
+        return self.pending_token_filters.pop(token, None)
+
 
 @dataclass
 class ToolCacheState:
-    """tools/list cache + per-server hysteresis + local readiness state."""
+    """tools/list cache + per-server hysteresis + local readiness state.
+
+    All WRITES go through the methods below; the containers stay public for
+    reads (and for the server.py compatibility aliases).
+    """
 
     # The combined tools/list cache and when it was filled.
     cache: list[Tool] | None = None
@@ -70,6 +147,39 @@ class ToolCacheState:
     stale_grace: float = 30.0
     # Lazy liveness: server name -> last error message from a failed call.
     failed_servers: dict[str, str] = field(default_factory=dict)
+
+    # -- aggregate cache -----------------------------------------------------
+
+    def set_cache(self, tools: list[Tool], now: float) -> None:
+        self.cache = tools
+        self.cache_time = now
+
+    def clear_cache(self) -> None:
+        self.cache = None
+        self.cache_time = 0.0
+
+    # -- per-server slices (hysteresis) --------------------------------------
+
+    def store_slice(self, server: str, tools: list[Tool], now: float) -> None:
+        """Record a server's live tool slice and confirm it tools-ready."""
+        self.server_tools[server] = tools
+        self.server_seen[server] = now
+        self.local_tools_ready[server] = True
+
+    def evict_slice(self, server: str) -> None:
+        """Forget a server's slice + readiness (removed/disabled/expired)."""
+        self.server_tools.pop(server, None)
+        self.server_seen.pop(server, None)
+        self.local_tools_ready.pop(server, None)
+
+    # -- lazy failure bookkeeping ---------------------------------------------
+
+    def record_failure(self, server: str, message: str) -> None:
+        self.failed_servers[server] = message
+
+    def clear_failure(self, server: str) -> bool:
+        """Clear a server's failure mark; returns True if one was present."""
+        return self.failed_servers.pop(server, None) is not None
 
 
 @dataclass

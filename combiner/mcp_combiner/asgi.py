@@ -38,12 +38,8 @@ _MCP_TOKEN_PATH_RE = re.compile(
     r"^/mcp/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(/.*)?$"
 )
 
-# Container aliases into the runtime (verbatim-moved code reads these names).
-# NOTE (QUESTIONS.md Q1): _token_sessions values recorded here are the wire
+# NOTE (QUESTIONS.md Q1): token→session mappings recorded here carry the wire
 # mcp-session-id — a different namespace from Context.session_id. Preserved.
-_token_sessions = RUNTIME.sessions.token_sessions
-_pending_token_filters = RUNTIME.sessions.pending_token_filters
-_session_disabled = RUNTIME.sessions.disabled
 
 
 @dataclass
@@ -149,7 +145,7 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
         if token is None:
             return await call_next(request)
 
-        already_mapped = token in _token_sessions
+        already_mapped = RUNTIME.sessions.session_for_token(token) is not None
         if not already_mapped:
             logger.info(
                 "Token not yet mapped: token=%s  source=%s  method=%s",
@@ -161,7 +157,7 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
             logger.debug(
                 "Token already mapped: token=%s  session=%s",
                 token,
-                _token_sessions[token],
+                RUNTIME.sessions.session_for_token(token),
             )
 
         response = await call_next(request)
@@ -169,7 +165,7 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
         if not already_mapped:
             sid = response.headers.get("mcp-session-id")
             if sid:
-                _token_sessions[token] = sid
+                RUNTIME.sessions.map_token(token, sid)
                 logger.info(
                     "Token mapped: token=%s  session=%s  source=%s",
                     token,
@@ -177,9 +173,9 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
                     "url" if url_token else "header",
                 )
                 # Apply any pending filter that was stored before the client connected
-                pending = _pending_token_filters.pop(token, None)
+                pending = RUNTIME.sessions.pop_pending(token)
                 if pending:
-                    _session_disabled[sid] = pending
+                    RUNTIME.sessions.set_disabled(sid, pending)
                     logger.info(
                         "Pending token filter applied: token=%s  session=%s  disabled=%s",
                         token,
