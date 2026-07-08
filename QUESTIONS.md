@@ -110,3 +110,48 @@ interpreted as a token (or bufnr passing to change) rather than used verbatim.
 `_fastmcp_state_prefix` is missing — a memory address that matches nothing
 else and changes across GC. Probably fine as a debug view, but worth deciding
 whether the route should instead surface the transport session id.
+
+## Q4 — CLI session ops: addressing model deferred (design notes for later)
+
+**Status:** parked deliberately (2026-07-08). George: the CLI may not need to
+toggle a chat's session at all — revisit with fresh eyes rather than design
+it now. Recorded here so the analysis isn't re-derived.
+
+**The awkwardness, in three layers:**
+
+1. **The CLI has no "this session".** Every `mcp-combiner` invocation opens a
+   short-lived MCP session inside `ctl._call_meta` and drops it on exit — so
+   the self-scoped meta-tools (`combiner__session_disable_server` without
+   `chat_id`, which filter the *calling* session) are meaningless from the
+   CLI: the filtered session dies with the process.
+2. **Discovery.** Targeting another chat needs its token, but tokens are
+   minted by the Lua plugin per chat and there is NO enumeration —
+   `/sessions/token/<t>` requires already knowing `t`; nothing lists the
+   token map. `GET /sessions` lists sessions, but…
+3. **…listing and targeting are in different namespaces — Q1 again.**
+   `/sessions` shows `Context.session_id` values (the namespace filtering
+   reads); `--token` resolves through the wire-id map (currently inert, Q1).
+   The only end-to-end-working CLI targeting today would be `--session-id`
+   against `/sessions/{id}/filter` — which ctl.py does not currently expose.
+   The shipped `session enable/disable/allow --token` subcommands faithfully
+   drive the token route and therefore record-but-don't-apply until Q1 is
+   fixed (noted in ctl.py's docstring).
+
+**Sketch if/when revisited (dependency order):**
+- (a) Fix Q1 first — prerequisite for token-addressed ergonomics; makes
+  `/sessions` and the token map joinable so a pick list can show
+  token + clientInfo + filter state in one table.
+- (b) `--session-id` on the session subcommands → `/sessions/{id}/filter`
+  (the working namespace); cheap and honest as a stopgap.
+- (c) Stable CLI identity for self-scoped ops: the CLI adopts the chat
+  correlation mechanism — send `X-MCP-Combiner-Session` from
+  `$MCP_COMBINER_SESSION_TOKEN` (or `mcp-combiner session begin` mints one),
+  so repeated CLI calls (incl. `call`) ride one logical session. Reuses the
+  existing token dance; no new server machinery.
+- (d) Interactive pick: no addressing flag → list live sessions (excluding
+  the CLI's own), prompt; auto-select when exactly one candidate. Needs (a).
+
+**Decision needed at revisit:** does the CLI need chat-session control at
+all, or is global enable/disable + status its whole session story? If the
+latter, consider *removing* the token-addressed session subcommands rather
+than leaving a surface that silently no-ops (or gate them until Q1 lands).
