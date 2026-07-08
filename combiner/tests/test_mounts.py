@@ -18,6 +18,7 @@ import pytest
 from fakes import FakeConnManager, FakeSSManager
 from fastmcp import Client, FastMCP
 
+import mcp_combiner.proxyfactory as proxyfactory_mod
 import mcp_combiner.server as server_mod
 import mcp_combiner.toolcache as toolcache_mod
 from mcp_combiner.config import CombinerConfig
@@ -105,7 +106,7 @@ async def test_restart_leaves_one_live_provider(
         proxies.append(_child(f"crib-gen{len(proxies)}"))
         return proxies[-1]
 
-    monkeypatch.setattr(server_mod, "_create_server_proxy", _make_proxy)
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", _make_proxy)
     monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: None)
     monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: None)
     monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: None)

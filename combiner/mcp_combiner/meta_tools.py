@@ -31,7 +31,7 @@ def register_meta_tools(
         the same lifecycle state the Neovim MCPStatus panel shows, via the
         shared status builder.
         """
-        from mcp_combiner.server import build_server_status
+        from mcp_combiner.status import build_server_status
 
         return {name: build_server_status(config, conn_manager, name) for name in config.servers}
 
@@ -61,8 +61,8 @@ def register_meta_tools(
             conn_manager.reset_auth_failure(server_name)
 
         try:
-            from mcp_combiner.server import (
-                _create_server_proxy,
+            from mcp_combiner.proxyfactory import _create_server_proxy
+            from mcp_combiner.toolcache import (
                 invalidate_tool_cache,
                 prime_server_tools,
             )
@@ -127,7 +127,7 @@ def register_meta_tools(
         # Remove the providers this server's mount added (tracked by identity
         # in the mount registry — see mcp_combiner.mounts).
         try:
-            from mcp_combiner.server import invalidate_tool_cache
+            from mcp_combiner.toolcache import invalidate_tool_cache
 
             removed = drop_server_providers(combiner, server_name)
 
@@ -165,7 +165,7 @@ def register_meta_tools(
         Priming (tools/list → ready) is the caller's job, via
         prime_server_tools — see combiner__restart_server's tools-ready gate.
         """
-        from mcp_combiner.server import _create_server_proxy
+        from mcp_combiner.proxyfactory import _create_server_proxy
 
         await ss_manager.ensure_started(server_name)
         if conn_manager.is_http_server(srv):
@@ -212,7 +212,7 @@ def register_meta_tools(
                 "to bring it up instead of restarting"
             )
 
-        from mcp_combiner.server import (
+        from mcp_combiner.toolcache import (
             clear_tool_cache,
             invalidate_tool_cache,
             prime_server_tools,
@@ -316,7 +316,7 @@ def register_meta_tools(
         Returns:
             A summary of what changed.
         """
-        from mcp_combiner.server import invalidate_tool_cache
+        from mcp_combiner.toolcache import invalidate_tool_cache
 
         try:
             new_cfg = CombinerConfig.load(config.config_path)
@@ -404,7 +404,9 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
 
-        from mcp_combiner.server import _session_disabled
+        from mcp_combiner.runtime import RUNTIME
+
+        _session_disabled = RUNTIME.sessions.disabled
 
         # Use chat_id if provided, otherwise fall back to MCP session_id
         sid = chat_id if chat_id else ctx.session_id
@@ -453,7 +455,9 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
 
-        from mcp_combiner.server import _session_disabled
+        from mcp_combiner.runtime import RUNTIME
+
+        _session_disabled = RUNTIME.sessions.disabled
 
         # Use chat_id if provided, otherwise fall back to MCP session_id
         sid = chat_id if chat_id else ctx.session_id
@@ -511,7 +515,9 @@ def register_meta_tools(
         Returns:
             JSON string with session status.
         """
-        from mcp_combiner.server import _session_disabled
+        from mcp_combiner.runtime import RUNTIME
+
+        _session_disabled = RUNTIME.sessions.disabled
 
         sid = chat_id if chat_id else ctx.session_id
         blocked = list(_session_disabled.get(sid, set()))

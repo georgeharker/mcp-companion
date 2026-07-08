@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from fakes import FakeCombiner, FakeConnManager, FakeProvider, FakeSSManager
 
+import mcp_combiner.proxyfactory as proxyfactory_mod
 import mcp_combiner.server as server_mod
 import mcp_combiner.toolcache as toolcache_mod
 from mcp_combiner.config import CombinerConfig, ServerConfig
@@ -40,18 +41,18 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # alpha is sharedserver-backed so restart() reports a real process bounce.
     ss = FakeSSManager(sharedserver_backed={"alpha"})
 
-    # _create_server_proxy / invalidate_tool_cache live in server module and are
-    # imported lazily inside the tool — patch them there.
-    monkeypatch.setattr(server_mod, "_create_server_proxy", lambda *a, **k: object())
+    # _create_server_proxy / invalidate_tool_cache are imported lazily inside
+    # the meta-tools from their owning modules — patch them there.
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
     invalidated = {"count": 0}
     monkeypatch.setattr(
-        server_mod,
+        toolcache_mod,
         "invalidate_tool_cache",
         lambda: invalidated.__setitem__("count", invalidated["count"] + 1),
     )
     cleared = {"count": 0}
     monkeypatch.setattr(
-        server_mod,
+        toolcache_mod,
         "clear_tool_cache",
         lambda: cleared.__setitem__("count", cleared["count"] + 1),
     )
@@ -261,7 +262,7 @@ async def test_restart_stdio_primes_before_broadcast(
         return []
 
     monkeypatch.setattr(FakeProvider, "list_tools", _list_tools)
-    monkeypatch.setattr(server_mod, "_create_server_proxy", lambda *a, **k: object())
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
     monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
     monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
     monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
