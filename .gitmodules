@@ -1,0 +1,3 @@
+[submodule "claude-mcp-combiner"]
+	path = claude-mcp-combiner
+	url = git@github.com:georgeharker/claude-mcp-combiner.git
