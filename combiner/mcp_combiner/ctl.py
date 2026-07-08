@@ -6,9 +6,12 @@ over MCP (the ``combiner__*`` meta-tools via ``tools/call``), and per-chat
 session filters over the token REST routes.
 
 Like the plugin's control channel, this connects as a TOKENLESS control
-session and names target chats by token where needed. (QUESTIONS.md Q1: the
-token-route filters it manages are currently recorded but not applied by the
-combiner — the CLI faithfully drives the same surface.)
+session and names target chats by token where needed.
+
+Session-control verbs are WIP: every CLI invocation is a transient MCP
+session (there is no CLI "this session" to self-scope filters to), and
+token-addressed filters are recorded but not yet applied by the combiner
+pending the session-addressing rework — see QUESTIONS.md Q1/Q4.
 """
 
 from __future__ import annotations
@@ -218,7 +221,11 @@ def add_ctl_parsers(subparsers: "argparse._SubParsersAction[argparse.ArgumentPar
     _common(p)
     p.set_defaults(func=cmd_tools)
 
-    p = subparsers.add_parser("session", help="Per-chat session filters (by token)")
+    p = subparsers.add_parser(
+        "session",
+        help="Per-chat session filters (by token) — WIP: status works; "
+        "enable/disable/allow are recorded but not yet applied (see QUESTIONS.md Q1/Q4)",
+    )
     p.add_argument(
         "session_op",
         choices=("status", "enable", "disable", "allow", "clear"),

@@ -95,9 +95,14 @@ mcp-combiner reload                    # re-read config, apply the diff
 mcp-combiner tools                     # list advertised tools
 mcp-combiner call myserver_echo --args '{"message": "hi"}'
 mcp-combiner session status                              # list sessions
-mcp-combiner session disable <server> --token <uuid>     # per-chat filter
-mcp-combiner session allow --servers a,b --token <uuid>  # allow-list
+mcp-combiner session disable <server> --token <uuid>     # per-chat filter (WIP)
+mcp-combiner session allow --servers a,b --token <uuid>  # allow-list (WIP)
 ```
+
+> **WIP:** the session filter verbs (`enable`/`disable`/`allow`/`clear`) are a
+> work in progress — CLI invocations are transient sessions, and
+> token-addressed filters are recorded but not yet applied while the
+> session-addressing rework lands. `session status` is fully functional.
 
 All commands accept `--host`/`--port` (default `127.0.0.1:9741`) or `--url`,
 and `--json` for scripting.

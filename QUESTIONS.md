@@ -117,6 +117,11 @@ whether the route should instead surface the transport session id.
 toggle a chat's session at all — revisit with fresh eyes rather than design
 it now. Recorded here so the analysis isn't re-derived.
 
+**Decision (2026-07-08):** keep the verbs, document them as transient/WIP —
+ctl.py help + docstring and the README Control CLI section now say so
+(`session status` works; enable/disable/allow are recorded-not-applied
+pending the rework). No removal, no new addressing machinery yet.
+
 **The awkwardness, in three layers:**
 
 1. **The CLI has no "this session".** Every `mcp-combiner` invocation opens a
