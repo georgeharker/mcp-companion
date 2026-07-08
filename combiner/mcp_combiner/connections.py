@@ -774,6 +774,21 @@ def _is_auth_error(exc: BaseException) -> bool:
     return False
 
 
+def build_http_transport(srv: ServerConfig) -> StreamableHttpTransport | SSETransport:
+    """Construct the explicit HTTP/SSE transport for an upstream server.
+
+    The single shared implementation of the url/header interpolation + SSE vs
+    streamable-HTTP selection previously copy-pasted in connections and both
+    proxy factories. Constructing explicitly (never ``Client(str)``) keeps the
+    precise transport union type.
+    """
+    url: str = _interpolate_str(srv.url) if srv.url else ""
+    headers: dict[str, str] = _interpolate_dict(srv.headers) if srv.headers else {}
+    if srv.transport == Transport.SSE:
+        return SSETransport(url=url, headers=headers)
+    return StreamableHttpTransport(url=url, headers=headers)
+
+
 def _make_disconnected_client(
     config: CombinerConfig,
     name: str,
@@ -802,17 +817,7 @@ def _make_disconnected_client(
             cache_tokens=config.oauth.cache_tokens,
         )
 
-    url: str = _interpolate_str(srv.url) if srv.url else ""
-    headers: dict[str, str] = _interpolate_dict(srv.headers) if srv.headers else {}
-
-    # Always construct the transport explicitly so the return type is
-    # ``Client[StreamableHttpTransport | SSETransport]`` — not the wide
-    # union that ``Client(str)`` produces.
-    transport: StreamableHttpTransport | SSETransport
-    if srv.transport == Transport.SSE:
-        transport = SSETransport(url=url, headers=headers)
-    else:
-        transport = StreamableHttpTransport(url=url, headers=headers)
+    transport = build_http_transport(srv)
 
     if auth is not None:
         return Client(transport, auth=auth)
