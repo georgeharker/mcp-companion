@@ -491,7 +491,11 @@ class ConnectionManager:
                 try:
                     self._on_connection_success(conn.name)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "on_connection_success callback failed for '%s'",
+                        conn.name,
+                        exc_info=True,
+                    )
             # Confirm the upstream can actually list tools, then fire the
             # tools-ready event that drives invalidation. See _signal_tools_ready.
             await self._signal_tools_ready(conn)
@@ -559,7 +563,7 @@ class ConnectionManager:
         try:
             self._on_tools_ready(conn.name)
         except Exception:
-            pass
+            logger.debug("on_tools_ready callback failed for '%s'", conn.name, exc_info=True)
 
     async def _teardown(self, conn: _ManagedConnection) -> None:
         """Cancel the monitor and close the exit stack."""
@@ -593,7 +597,7 @@ class ConnectionManager:
         try:
             await conn.stack.aclose()
         except Exception:
-            pass
+            logger.debug("closing old connection stack for '%s' failed", conn.name, exc_info=True)
         conn.client_ref[0] = None
         conn.stack = AsyncExitStack()
 
