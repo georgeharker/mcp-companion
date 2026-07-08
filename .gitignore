@@ -18,3 +18,4 @@ _quarto-deploy.yml
 **/.coverage
 /combiner/dist/
 *.egg-info/
+.DS_Store
