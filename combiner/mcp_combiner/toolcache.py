@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -79,6 +80,24 @@ def _matches_filter(tool_name: str, patterns: list[str]) -> bool:
         if fnmatch.fnmatch(tool_name, pattern):
             return True
     return False
+
+
+# ``protocol://path`` — mirrors FastMCP's Namespace URI pattern
+# (fastmcp/server/transforms/namespace.py). Combiner-owned so we don't call the
+# private ``Namespace._transform_uri``; pinned equal to it by a test so a FastMCP
+# scheme change surfaces in CI rather than silently diverging.
+_NS_URI = re.compile(r"^([^:]+://)(.*?)$")
+
+
+def namespace_uri(uri: str, prefix: str) -> str:
+    """Apply a namespace to a URI: ``protocol://path`` → ``protocol://<prefix>/path``.
+
+    Identical to what the mount's ``Namespace`` applies to resources, so a
+    namespaced notification / tool-``_meta`` pointer matches ``resources/list``.
+    Non-URI strings pass through unchanged.
+    """
+    m = _NS_URI.match(uri)
+    return f"{m.group(1)}{prefix}/{m.group(2)}" if m else uri
 
 
 def _find_server_for_tool(tool_name: str) -> tuple[str | None, str]:

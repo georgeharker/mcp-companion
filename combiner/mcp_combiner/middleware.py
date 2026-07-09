@@ -18,7 +18,6 @@ from typing import Any, ClassVar, TypeGuard
 import mcp.types as mt
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.server.transforms.namespace import Namespace
 from fastmcp.tools import Tool
 from fastmcp.tools.tool import ToolResult
 
@@ -32,6 +31,7 @@ from mcp_combiner.toolcache import (
     _find_server_for_tool,
     _is_transport_dead,
     _merge_stale_server_tools,
+    namespace_uri,
 )
 
 logger = logging.getLogger("mcp-combiner")
@@ -42,14 +42,14 @@ def _is_uri(value: Any) -> TypeGuard[str]:
     return isinstance(value, str) and "://" in value
 
 
-def _rewrite_app_meta(meta: dict[str, Any], ns: Namespace) -> dict[str, Any]:
+def _rewrite_app_meta(meta: dict[str, Any], server: str) -> dict[str, Any]:
     """Namespace the MCP-Apps UI-resource pointers inside a tool's ``_meta``.
 
     Returns a shallow-copied meta with the pointer(s) forward-namespaced, or the
     original object unchanged when there is nothing to rewrite.  Only rewrites
-    ``protocol://``-shaped strings, via the same ``Namespace._transform_uri`` the
-    mount applies to the resources themselves, so the pointer and its target stay
-    aligned.  Leaves ``_meta.ui.csp`` and everything else untouched.
+    ``protocol://``-shaped strings, via the same transform the mount applies to
+    the resources themselves (``namespace_uri``), so the pointer and its target
+    stay aligned.  Leaves ``_meta.ui.csp`` and everything else untouched.
     """
     new_meta: dict[str, Any] | None = None
 
@@ -58,7 +58,7 @@ def _rewrite_app_meta(meta: dict[str, Any], ns: Namespace) -> dict[str, Any]:
     resource_uri = ui.get("resourceUri") if isinstance(ui, dict) else None
     if isinstance(ui, dict) and _is_uri(resource_uri):
         new_ui = dict(ui)
-        new_ui["resourceUri"] = ns._transform_uri(resource_uri)
+        new_ui["resourceUri"] = namespace_uri(resource_uri, server)
         new_meta = dict(meta)
         new_meta["ui"] = new_ui
 
@@ -66,7 +66,7 @@ def _rewrite_app_meta(meta: dict[str, Any], ns: Namespace) -> dict[str, Any]:
     output_template = meta.get("openai/outputTemplate")
     if _is_uri(output_template):
         new_meta = new_meta if new_meta is not None else dict(meta)
-        new_meta["openai/outputTemplate"] = ns._transform_uri(output_template)
+        new_meta["openai/outputTemplate"] = namespace_uri(output_template, server)
 
     return new_meta if new_meta is not None else meta
 
@@ -91,17 +91,13 @@ def _namespace_app_meta(tools: Sequence[Tool]) -> list[Tool]:
     """
     if RUNTIME.config is None:
         return list(tools)
-    ns_cache: dict[str, Namespace] = {}
     out: list[Tool] = []
     for t in tools:
         server, _ = _find_server_for_tool(str(t.name) if t.name else "")
         if server is None or not isinstance(t.meta, dict):
             out.append(t)
             continue
-        ns = ns_cache.get(server)
-        if ns is None:
-            ns = ns_cache[server] = Namespace(server)
-        new_meta = _rewrite_app_meta(t.meta, ns)
+        new_meta = _rewrite_app_meta(t.meta, server)
         out.append(t if new_meta is t.meta else t.model_copy(update={"meta": new_meta}))
     return out
 

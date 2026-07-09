@@ -823,6 +823,11 @@ def _make_disconnected_client(
 
     transport = build_http_transport(srv)
 
-    if auth is not None:
-        return Client(transport, auth=auth)
-    return Client(transport)
+    # Forward-namespace this server's resource notifications to downstream clients.
+    # A persistent connection is one shared upstream session serving all chats, so
+    # updates broadcast (target=None); see mcp_combiner.notifications.
+    from mcp_combiner.notifications import attach_resource_forwarding
+
+    client = Client(transport, auth=auth) if auth is not None else Client(transport)
+    attach_resource_forwarding(client, name)
+    return client

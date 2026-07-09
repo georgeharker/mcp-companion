@@ -23,10 +23,32 @@ from fastmcp.tools import Tool
 from mcp_combiner.config import CombinerConfig, ServerConfig
 from mcp_combiner.middleware import _namespace_app_meta, _rewrite_app_meta
 from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.toolcache import namespace_uri
 
 
 def _tool(name: str, meta: dict[str, Any] | None) -> Tool:
     return Tool.from_function(lambda x: x, name="_").model_copy(update={"name": name, "meta": meta})
+
+
+# ── namespace_uri parity with FastMCP's mount transform ────────────
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "ui://svg-mcp/preview",  # self-namespaced (the common case)
+        "ui://svg-mcp/preview/panel",  # nested path
+        "resource://host/a/b",  # other scheme
+        "ui://a",  # empty path
+        "not-a-uri",  # passthrough
+        "",  # empty
+    ],
+)
+def test_namespace_uri_matches_fastmcp(uri: str) -> None:
+    """Our combiner-owned namespace_uri must equal FastMCP's Namespace transform
+    (the one the mount applies to resources), so a FastMCP scheme change fails
+    HERE in CI rather than silently diverging the notification / _meta URIs."""
+    assert namespace_uri(uri, "svg-mcp") == Namespace("svg-mcp")._transform_uri(uri)
 
 
 # ── _rewrite_app_meta (pure dict logic) ────────────────────────────
@@ -34,40 +56,34 @@ def _tool(name: str, meta: dict[str, Any] | None) -> Tool:
 
 class TestRewriteAppMeta:
     def test_rewrites_ui_resource_uri(self) -> None:
-        ns = Namespace("svg-mcp")
-        out = _rewrite_app_meta({"ui": {"resourceUri": "ui://svg-mcp/preview"}}, ns)
+        out = _rewrite_app_meta({"ui": {"resourceUri": "ui://svg-mcp/preview"}}, "svg-mcp")
         assert out["ui"]["resourceUri"] == "ui://svg-mcp/svg-mcp/preview"
 
     def test_rewritten_pointer_reverse_resolves_to_upstream(self) -> None:
         """The whole point: the mount's reverse strips exactly one segment,
         landing back on the real upstream URI the server registered."""
-        ns = Namespace("svg-mcp")
-        out = _rewrite_app_meta({"ui": {"resourceUri": "ui://svg-mcp/preview"}}, ns)
-        assert ns._reverse_uri(out["ui"]["resourceUri"]) == "ui://svg-mcp/preview"
+        out = _rewrite_app_meta({"ui": {"resourceUri": "ui://svg-mcp/preview"}}, "svg-mcp")
+        assert Namespace("svg-mcp")._reverse_uri(out["ui"]["resourceUri"]) == "ui://svg-mcp/preview"
 
     def test_leaves_other_ui_fields_untouched(self) -> None:
-        ns = Namespace("svg-mcp")
         out = _rewrite_app_meta(
             {"ui": {"resourceUri": "ui://svg-mcp/preview", "csp": "x", "visibility": ["model"]}},
-            ns,
+            "svg-mcp",
         )
         assert out["ui"]["csp"] == "x"
         assert out["ui"]["visibility"] == ["model"]
 
     def test_rewrites_openai_output_template(self) -> None:
-        ns = Namespace("app")
-        out = _rewrite_app_meta({"openai/outputTemplate": "ui://app/widget"}, ns)
+        out = _rewrite_app_meta({"openai/outputTemplate": "ui://app/widget"}, "app")
         assert out["openai/outputTemplate"] == "ui://app/widget".replace("ui://", "ui://app/")
 
     def test_noop_returns_same_object(self) -> None:
-        ns = Namespace("svg-mcp")
         meta = {"unrelated": 1, "ui": {"visibility": ["model"]}}  # no resourceUri
-        assert _rewrite_app_meta(meta, ns) is meta
+        assert _rewrite_app_meta(meta, "svg-mcp") is meta
 
     def test_non_uri_resource_uri_left_alone(self) -> None:
-        ns = Namespace("svg-mcp")
         meta = {"ui": {"resourceUri": "not-a-uri"}}
-        assert _rewrite_app_meta(meta, ns) is meta
+        assert _rewrite_app_meta(meta, "svg-mcp") is meta
 
 
 # ── _namespace_app_meta (egress pass over the tool list) ───────────
