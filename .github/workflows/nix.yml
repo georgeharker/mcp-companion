@@ -89,3 +89,6 @@ jobs:
           echo "$out"
           echo "$out" | grep -q -- "--config" \
             || { echo "::error::mcp-combiner --help did not mention --config"; exit 1; }
+          # Pin the 0.8.0 CLI surface: the serve flag must be advertised.
+          echo "$out" | grep -q -- "--mcp" \
+            || { echo "::error::mcp-combiner --help did not mention --mcp"; exit 1; }

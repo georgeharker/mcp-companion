@@ -689,7 +689,10 @@ entirely**. The flake exposes three packages:
 - `mcp-combiner-bin` — the `mcp-combiner` console script as a standalone app (this is `default`,
   i.e. what `nix run` executes). Since v0.8.0 the bare binary is the **control CLI**
   (`nix run . -- status`); serving takes the explicit flag: `nix run . -- --mcp --config …`.
-- `mcp-companion-nvim` — the Lua/Neovim plugin (no Python).
+- `mcp-companion-nvim` — the Lua/Neovim plugin. **Lua only**: it contains no
+  combiner source and no Python, so the runtime auto-install cannot work from
+  the read-only Nix store — you **must** set `combiner.command` (or
+  `combiner.python_cmd`) to one of the combiner packages above.
 
 Wire it up with `combiner.command`, pointing at the console script (the natural front door —
 same `main()` and CLI flags as `python -m mcp_combiner`):
@@ -1519,6 +1522,9 @@ scripts/test.sh fast    # unit tier
 scripts/test.sh e2e     # process-level tier (spawns combiner + mock upstreams)
 scripts/test.sh         # everything
 ```
+
+`nix flake check` runs the unit tier only — the e2e tier spawns subprocesses
+and uses loopback networking, which the Nix build sandbox does not allow.
 
 or directly:
 
