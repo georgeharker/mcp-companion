@@ -557,6 +557,18 @@ The Lua plugin connects the combiner to
 [CodeCompanion.nvim](https://github.com/olimorris/codecompanion.nvim), exposing
 MCP capabilities as native editor features.
 
+<p align="center">
+  <img src="docs/assets/neovim-flows.svg" alt="Neovim integration flows: CodeCompanion chats (HTTP, ACP, CLI — one token each) and the plugin (ops/MCPStatus, combiner client with SSE, native neovim_* tools and channel) connect to the combiner over per-chat /mcp/<token> sessions and a control channel, while the combiner dispatches neovim_* tool calls back into the live editor over the msgpack-RPC back-channel" width="820">
+</p>
+
+Three kinds of traffic connect editor and combiner: each chat gets its own
+token-correlated MCP session (`/mcp/<token>` — carried by the HTTP adapter's
+lite client, the ACP `mcpServers` entry, or the CLI agent's environment); the
+plugin's tokenless **control channel** drives operations and receives SSE
+push; and the **back-channel** runs in reverse — the combiner dispatches
+`neovim_*` tool calls into the live editor over a private msgpack-RPC socket,
+so any connected agent can drive buffers, files, and diagnostics.
+
 ### Requirements
 
 - Neovim 0.10+
