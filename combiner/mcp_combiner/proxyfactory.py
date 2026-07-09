@@ -28,7 +28,6 @@ from mcp_combiner.connections import (
     ConnectionManager,
     build_http_transport,
 )
-from mcp_combiner.notifications import resource_notify_handler
 from mcp_combiner.runtime import RUNTIME
 
 logger = logging.getLogger("mcp-combiner")
@@ -87,11 +86,7 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
 
     if auth is not None and srv.url:
         # Auth requires a Client so we can inject httpx.Auth into the transport.
-        client = Client(
-            build_http_transport(srv),
-            auth=auth,
-            message_handler=resource_notify_handler(name),
-        )
+        client = Client(build_http_transport(srv), auth=auth)
         return create_proxy(client, name=name)
 
     # No auth — use the standard config-dict path (preserves headers)
@@ -134,11 +129,9 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
         mgr = RUNTIME.conn_manager
         shared_auth = mgr.get_auth(name)
         oauth_stateful: StatefulProxyClient[Any] = (
-            StatefulProxyClient(
-                transport, auth=shared_auth, message_handler=resource_notify_handler(name)
-            )
+            StatefulProxyClient(transport, auth=shared_auth)
             if shared_auth is not None
-            else StatefulProxyClient(transport, message_handler=resource_notify_handler(name))
+            else StatefulProxyClient(transport)
         )
 
         async def _gated_factory() -> Any:
@@ -175,11 +168,9 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
         cache_tokens=config.oauth.cache_tokens,
     )
     stateful: StatefulProxyClient[Any] = (
-        StatefulProxyClient(
-            transport, auth=auth, message_handler=resource_notify_handler(name)
-        )
+        StatefulProxyClient(transport, auth=auth)
         if auth is not None
-        else StatefulProxyClient(transport, message_handler=resource_notify_handler(name))
+        else StatefulProxyClient(transport)
     )
     logger.info("Server '%s': per-chat session isolation enabled (isolate=true)", name)
     return FastMCPProxy(client_factory=stateful.new_stateful, name=name)

@@ -823,11 +823,6 @@ def _make_disconnected_client(
 
     transport = build_http_transport(srv)
 
-    # Forward-namespace this server's resource notifications (resources/updated,
-    # resources/list_changed) to downstream clients — see notifications.py.
-    from mcp_combiner.notifications import resource_notify_handler
-
-    handler = resource_notify_handler(name)
     if auth is not None:
-        return Client(transport, auth=auth, message_handler=handler)
-    return Client(transport, message_handler=handler)
+        return Client(transport, auth=auth)
+    return Client(transport)
