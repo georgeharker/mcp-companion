@@ -13,11 +13,12 @@ import asyncio
 import logging
 import time
 from collections.abc import Sequence
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeGuard
 
 import mcp.types as mt
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.server.transforms.namespace import Namespace
 from fastmcp.tools import Tool
 from fastmcp.tools.tool import ToolResult
 
@@ -34,6 +35,75 @@ from mcp_combiner.toolcache import (
 )
 
 logger = logging.getLogger("mcp-combiner")
+
+
+def _is_uri(value: Any) -> TypeGuard[str]:
+    """A protocol://… string that FastMCP's Namespace transform would rewrite."""
+    return isinstance(value, str) and "://" in value
+
+
+def _rewrite_app_meta(meta: dict[str, Any], ns: Namespace) -> dict[str, Any]:
+    """Namespace the MCP-Apps UI-resource pointers inside a tool's ``_meta``.
+
+    Returns a shallow-copied meta with the pointer(s) forward-namespaced, or the
+    original object unchanged when there is nothing to rewrite.  Only rewrites
+    ``protocol://``-shaped strings, via the same ``Namespace._transform_uri`` the
+    mount applies to the resources themselves, so the pointer and its target stay
+    aligned.  Leaves ``_meta.ui.csp`` and everything else untouched.
+    """
+    new_meta: dict[str, Any] | None = None
+
+    # MCP-Apps spec field: _meta.ui.resourceUri → the ui:// widget resource.
+    ui = meta.get("ui")
+    resource_uri = ui.get("resourceUri") if isinstance(ui, dict) else None
+    if isinstance(ui, dict) and _is_uri(resource_uri):
+        new_ui = dict(ui)
+        new_ui["resourceUri"] = ns._transform_uri(resource_uri)
+        new_meta = dict(meta)
+        new_meta["ui"] = new_ui
+
+    # OpenAI Apps SDK variant: _meta["openai/outputTemplate"].
+    output_template = meta.get("openai/outputTemplate")
+    if _is_uri(output_template):
+        new_meta = new_meta if new_meta is not None else dict(meta)
+        new_meta["openai/outputTemplate"] = ns._transform_uri(output_template)
+
+    return new_meta if new_meta is not None else meta
+
+
+def _namespace_app_meta(tools: Sequence[Tool]) -> list[Tool]:
+    """Forward-namespace MCP-Apps UI-resource pointers in tool ``_meta``.
+
+    FastMCP's ``Namespace`` transform rewrites resource URIs
+    (``ui://svg-mcp/preview`` → ``ui://svg-mcp/svg-mcp/preview``) and tool
+    *names*, but **not** the ``resourceUri`` string inside a tool's ``_meta.ui``
+    — so the pointer and its target diverge and the host cannot resolve the
+    widget.  This one-way rewrite realigns them.
+
+    Applied at the ``on_list_tools`` egress over the cached (un-rewritten) base,
+    so it lands exactly once per request — never write the rewritten meta back to
+    the cache.  It must be one-shot rather than idempotent-by-detection: servers
+    commonly self-namespace as ``ui://<server>/…``, so a rewritten pointer is
+    indistinguishable from a raw one by inspection.
+
+    Tools with no owning server (combiner meta-tools, virtual ``neovim_*``) or no
+    dict ``_meta`` pass through untouched.
+    """
+    if RUNTIME.config is None:
+        return list(tools)
+    ns_cache: dict[str, Namespace] = {}
+    out: list[Tool] = []
+    for t in tools:
+        server, _ = _find_server_for_tool(str(t.name) if t.name else "")
+        if server is None or not isinstance(t.meta, dict):
+            out.append(t)
+            continue
+        ns = ns_cache.get(server)
+        if ns is None:
+            ns = ns_cache[server] = Namespace(server)
+        new_meta = _rewrite_app_meta(t.meta, ns)
+        out.append(t if new_meta is t.meta else t.model_copy(update={"meta": new_meta}))
+    return out
 
 
 class ToolProcessingMiddleware(Middleware):
@@ -116,12 +186,12 @@ class ToolProcessingMiddleware(Middleware):
             )
             base = self._apply_session_filter(context, RUNTIME.tools.cache)
             full = await nvim_proxy.append_nvim_tools(context, base, RUNTIME.sessions.disabled)
-            return _finalize_schemas(full)
+            return _finalize_schemas(_namespace_app_meta(full))
 
         tools = await self._fetch_or_join(context, call_next, cache_age)
         base = self._apply_session_filter(context, tools)
         full = await nvim_proxy.append_nvim_tools(context, base, RUNTIME.sessions.disabled)
-        return _finalize_schemas(full)
+        return _finalize_schemas(_namespace_app_meta(full))
 
     async def _fetch_or_join(
         self,
