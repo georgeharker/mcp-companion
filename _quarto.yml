@@ -18,6 +18,8 @@ project:
   resources:
     - docs/schemas/project.schema.json
     - docs/assets/logo.svg
+    - docs/assets/architecture.svg
+    - docs/assets/internals.svg
 
 # gfm_auto_identifiers makes heading anchors match GitHub's slugs, which the
 # docs' cross-links use. Keep pandoc's full markdown reader otherwise —

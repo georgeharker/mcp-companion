@@ -73,7 +73,7 @@ end
 --- Check if combiner is already running on the configured port
 --- @param callback fun(running: boolean)
 function M._check_existing(callback)
-    local url = string.format("http://%s:%d/health", _config.combiner.host, _config.combiner.port)
+    local url = require("mcp_companion.config").combiner_url() .. "/health"
     http.request({
         url = url,
         method = "get",
@@ -97,6 +97,7 @@ local function _combiner_cmd()
         cmd = { _config.combiner.python_cmd, "-m", "mcp_combiner" }
     end
     vim.list_extend(cmd, {
+        "--mcp",
         "--config",
         _config.combiner.config,
         "--port",
@@ -262,7 +263,7 @@ end
 --- Poll health endpoint then create MCP client
 function M._wait_and_connect()
     local state = require("mcp_companion.state")
-    local url = string.format("http://%s:%d/health", _config.combiner.host, _config.combiner.port)
+    local url = require("mcp_companion.config").combiner_url() .. "/health"
     local attempts = 0
     local max_attempts = _config.combiner.startup_timeout or 30
 

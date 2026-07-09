@@ -14,9 +14,13 @@ We chose a Python [FastMCP](https://github.com/jlowin/fastmcp) combiner over mai
 Node.js hub, because:
 
 - FastMCP has a stable, maintained Python SDK
-- `stateless_http=True` mode avoids session corruption issues (FastMCP #823, #945)
 - uv makes the venv trivially reproducible
 - Python is easier to extend than the abandoned mcp-hub
+
+(The combiner originally ran `stateless_http=True` to dodge session-corruption
+issues — FastMCP #823/#945. It now runs **stateful** streamable HTTP
+(`stateless_http=False`), which is required for the GET/SSE notification
+stream that OpenCode and the Lua client consume.)
 
 The combiner is a FastMCP server that proxies all configured MCP servers via the
 `everything` mount pattern. It exposes them all on a single HTTP endpoint at
@@ -38,15 +42,15 @@ lives for the lifetime of the Neovim instance.
 ## HTTP Client Design
 
 The Lua HTTP client (`combiner/client.lua`) uses `vim.uv.new_tcp()` — one TCP connection
-per request, not persistent. This is because:
+per *request* (`Connection: close`, forcing immediate body delivery), plus **one
+long-lived SSE stream** (`GET /mcp`) for server-push notifications
+(`tools/resources/prompts list_changed`). The SSE stream reconnects with a fixed
+2s backoff and shuts down gracefully (FIN, not RST) so it never corrupts FastMCP's
+session state; a 30s polling timer remains as a fallback refresh path.
 
-- FastMCP's HTTP endpoint keeps connections alive for SSE notifications by default
-- `Connection: close` on every request forces immediate body delivery
-- `stateless_http=True` on the server eliminates session state corruption
-
-No SSE notification stream is used. Instead, capabilities are polled via `vim.uv.new_timer()`
-at a configurable interval (default 30s). This avoids an SSE disconnect bug that corrupts
-the FastMCP proxy state.
+Sessions are stateful: every request carries `Mcp-Session-Id`, and per-chat
+clients additionally carry the chat token (`X-MCP-Combiner-Session` header
+and/or `/mcp/<token>` URL).
 
 ## Tool Naming
 
@@ -110,19 +114,21 @@ If the agent does not support HTTP, we fall back to stdio via `mcp-remote`:
 
 ### Monkey-patch approach
 
-CC's `transform_to_acp()` function only handles stdio servers and requires them to be
-in `default_servers`. We cannot use it.
+CC's stock MCP plumbing can't inject a per-session HTTP server entry, so
+`cc/init.lua` patches two seams at setup:
 
-Instead, `_inject_combiner_config()` monkey-patches `Connection:_establish_session` on the
-CC ACP `Connection` class. The patch:
+1. **ACP**: `codecompanion.mcp.transform_to_acp` is wrapped to append the
+   combiner `mcpServers` entry (built by `build_combiner_entry`) into the ACP
+   session, carrying the chat token in the header and/or `/mcp/<token>` URL
+   (`combiner.token_in_url` tri-state; the stdio `mcp-remote` fallback always
+   uses the URL since it forwards neither env nor headers).
+2. **CLI agents**: `codecompanion.interactions.cli.create` is wrapped so the
+   spawned agent runs under `env MCP_COMPANION_COMBINER_URL=http://…/mcp/<token>`,
+   scoped to that spawn.
 
-1. Runs once (idempotent via `Connection._mcp_companion_patched` flag)
-2. Per session: wraps `send_rpc_request` on the instance
-3. Intercepts `session/new` and `session/load` to inject the combiner entry
-4. Restores `send_rpc_request` after `_establish_session` returns
-
-This is safe because `_agent_info` (containing `mcpCapabilities`) is populated from the
-`initialize` response before `_establish_session` is called.
+Each chat's token is minted in the corresponding `*Pre` autocmd; per-chat
+`allowed_servers` filters are POSTed to `/sessions/token/<token>/filter`
+(`combiner/sessions.lua`).
 
 ## Data Flow
 
@@ -177,47 +183,120 @@ it is allowed to use.
 For full implementation details see
 [`docs/designs/per-chat-session-filtering.md`](designs/per-chat-session-filtering.md).
 
+## Combiner Internal Architecture
+
+The Python combiner was decomposed (2026-07) from a single `server.py` god
+module into focused modules with a one-way dependency DAG. Management (the
+`combiner__*` meta-tools, the session/health REST API, and the `mcp-combiner`
+control CLI) sits in a distinct band above the domain modules and below only
+the wiring:
+
+<p align="center">
+  <img src="assets/internals.svg" alt="Combiner internal architecture: entry point → wiring → management and request plane → domain → foundation, all state owned by CombinerRuntime; the mcp-combiner CLI is a pure client of the management plane; mockserver is the test instrument" width="820">
+</p>
+
+
+Key properties:
+
+- **`runtime.CombinerRuntime`** owns all mutable state (`SessionRegistry`,
+  `ToolCacheState`, late-bound config/manager refs, the boot id). All *writes*
+  go through its methods; the old `server.py` globals survive only as
+  read-compat aliases for tests.
+- **Entry point**: `mcp-combiner <command>` is a control CLI (`ctl.py`,
+  httpx REST + short-lived fastmcp sessions); `mcp-combiner --mcp --config …`
+  serves. Bare `--config` still serves with a deprecation warning.
+- **Self-healing**: `connections.ConnectionManager` health-checks every 30s,
+  reconnects with capped backoff (15s max for local upstreams), and after 3
+  consecutive failed re-opens hard-restarts a sharedserver-backed process
+  (nothing else respawns it). Every HTTP server — including `isolate: true`
+  ones — gets a persistent "primer" connection that owns OAuth, priming, and
+  escalation.
+- **Tool publication** (`toolcache`) is deliberately subtle and treated as
+  load-bearing: silent `clear_tool_cache` vs broadcasting
+  `invalidate_tool_cache`; per-server last-known-good slices re-served within
+  a stale grace window (anti-flapping hysteresis); a single started→ready
+  prime path shared by stdio/sharedserver/HTTP. Do not "simplify" this area
+  without reading the docstrings.
+
+### Test harness
+
+`mcp_combiner.mockserver` is an instrumentable mock MCP server (stdio or
+HTTP) used by the e2e suites in `combiner/tests/`: configurable tools with
+**verbatim** (including deliberately malformed) schemas, scripted response
+queues, latency/error injection, `mock__crash`, per-session call tracking,
+and a persistent boot counter — enough to prove restart, self-healing,
+session-isolation and combiner-reconnect behavior against real processes.
+`scripts/test.sh {fast|e2e|all}` and `scripts/test-lua.sh` run the tiers.
+
 ## File Structure
 
 ```
 mcp-companion.nvim/
 ├── combiner/                     Python FastMCP combiner
 │   ├── pyproject.toml
-│   └── mcp_combiner/
-│       ├── server.py           FastMCP proxy server + filter REST API
-│       ├── config.py           MCP server config loader (VS Code format)
-│       ├── meta_tools.py       Combiner meta-tools (status, enable/disable servers)
-│       └── __main__.py         CLI entry point + TokenRewriteMiddleware
+│   ├── mcp_combiner/
+│   │   ├── __main__.py         CLI parse/dispatch: control commands vs --mcp serve
+│   │   ├── ctl.py              Control CLI ops (status/enable/restart/session/…)
+│   │   ├── asgi.py             ServeOptions + TokenRewriteMiddleware + app factory
+│   │   ├── server.py           create_combiner wiring + lifespan
+│   │   ├── runtime.py          CombinerRuntime — ALL mutable state, behind methods
+│   │   ├── middleware.py       ToolProcessingMiddleware (list/call pipeline)
+│   │   ├── toolcache.py        tools/list cache, hysteresis, priming, notifications
+│   │   ├── schemafix.py        schema sanitization + named fixes (--schema-fix)
+│   │   ├── proxyfactory.py     upstream proxy construction incl. isolate/OAuth primer
+│   │   ├── routes.py           /health + /sessions* REST API
+│   │   ├── status.py           the one status snapshot (health + combiner__status)
+│   │   ├── meta_tools.py       combiner__* management tools
+│   │   ├── connections.py      persistent upstream connections + self-healing
+│   │   ├── config.py           MCP server config loader (VS Code format)
+│   │   ├── auth.py             OAuth 2.1 + encrypted token store
+│   │   ├── mounts.py           explicit provider registry (restart-bug fix)
+│   │   ├── sharedserver.py     refcounted external process manager
+│   │   ├── nvim_proxy.py       virtual neovim_* server + /neovim REST
+│   │   ├── nvim_channel.py     pynvim back-channel into live editors
+│   │   ├── fastvalidate.py     cached jsonschema validators (SDK patch)
+│   │   ├── schema.py           shared object-schema normalization
+│   │   └── mockserver.py       instrumentable mock MCP server (tests/debugging)
+│   └── tests/                  pytest suite (unit + e2e process tiers)
 ├── lua/mcp_companion/
-│   ├── init.lua                Public API + setup()
+│   ├── init.lua                Public API + setup() + user commands
+│   ├── ops.lua                 Operations facade (commands/UI/CC all call this)
 │   ├── config.lua              Config schema + defaults + auto-detection
 │   ├── state.lua               Shared state + event bus
+│   ├── project.lua             .mcp-companion.json discovery/apply/save
 │   ├── log.lua                 Logger
+│   ├── http.lua                curl-based REST client
+│   ├── schema.lua              Tool schema normalization (issue #7)
+│   ├── install.lua             uv-based combiner install
 │   ├── combiner/
 │   │   ├── init.lua            Combiner process lifecycle + per-chat client factory
-│   │   └── client.lua          HTTP client (vim.uv TCP) with lite mode
+│   │   ├── client.lua          MCP client (vim.uv TCP + SSE stream) with lite mode
+│   │   └── sessions.lua        Token-filter REST client (/sessions/token/*)
 │   ├── cc/
-│   │   ├── init.lua            CC extension entry point + ACP injection + per-chat filtering
-│   │   ├── tools.lua           MCP tools → CC tools registration + per-chat call routing
+│   │   ├── init.lua            CC extension entry + ACP/CLI injection + tokens
+│   │   ├── tools.lua           MCP tools → CC tools registration
 │   │   ├── session_commands.lua  /mcp-session slash command
 │   │   ├── editor_context.lua  MCP resources → CC #editor_context entries
 │   │   ├── slash_commands.lua  MCP prompts → CC / slash commands
-│   │   └── approval.lua        [STUB] Tool approval flow
-│   ├── native/
-│   │   └── init.lua            [STUB] Pure-Lua MCP server registration
+│   │   └── approval.lua        Tiered tool approval (globs + tier aliases)
+│   ├── native/                 In-process Lua MCP server (neovim_* tools)
+│   │   ├── init.lua            Registry + dispatch + frozen manifest
+│   │   ├── channel.lua         Socket + /neovim registration + token binds
+│   │   └── neovim/             buffers/files/diagnostics/resources tools
 │   └── ui/
-│       └── init.lua            Status floating window
-└── tests/
-    └── (pytest suite for combiner Python code)
+│       └── init.lua            :MCPStatus floating window
+├── scripts/                    test.sh (fast/e2e/all), test-lua.sh
+└── tests/                      Lua tests (self-contained + integration)
 ```
 
-## Known Limitations
+## Known Limitations / Open Issues
 
-- No tool approval flow (all tools auto-execute)
-- Native (pure-Lua) MCP server registration is not implemented — design for a native
-  Neovim control server (msgpack-RPC back-channel for external agents) in
-  [`docs/designs/native-neovim-server.md`](designs/native-neovim-server.md)
-- `transform_to_acp` (upstream CC) has no HTTP server branch and no nil guard on
-  `cfg.cmd`; our patch adds HTTP support but the upstream should be fixed
-- Pending token filters are held in memory — if the combiner restarts between
-  `ACPSessionPre` and the ACP agent's first connect, the filter is lost
+- **QUESTIONS.md Q1/Q1b (open)**: per-chat filters set through the token REST
+  route are recorded but not applied — the token→session map carries the wire
+  `mcp-session-id` while filtering keys on fastmcp's `Context.session_id`.
+  The meta-tool path works. Pinned by `xfail(strict=True)` e2e tests.
+- Pending token filters are held in memory — lost if the combiner restarts
+  between `ACPSessionPre` and the agent's first connect.
+- `transform_to_acp` (upstream CC) still needs the HTTP branch upstreamed.
+- Deferred refactors: `cc/init.lua` split (acp/cli_agents/tokens) and
+  decoupling `combiner/client.lua` from the state event bus.

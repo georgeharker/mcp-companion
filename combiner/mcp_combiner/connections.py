@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -56,21 +57,31 @@ logger = logging.getLogger("mcp-combiner")
 # The only transport types this module creates.
 HttpClient = Client[StreamableHttpTransport | SSETransport]
 
+
 # ---------------------------------------------------------------------------
 # Reconnection tuning
 # ---------------------------------------------------------------------------
-_INITIAL_BACKOFF = 2.0  # seconds
-_MAX_BACKOFF = 60.0
+def _env_float(name: str, default: float) -> float:
+    """Timing knob override for tests (MCP_COMBINER_* env); defaults unchanged."""
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+_INITIAL_BACKOFF = _env_float("MCP_COMBINER_INITIAL_BACKOFF", 2.0)  # seconds
+_MAX_BACKOFF = _env_float("MCP_COMBINER_MAX_BACKOFF", 60.0)
 # Localhost/sharedserver upstreams cap much lower: dialing the loopback is
 # cheap, and a 60s back-off turns a quick server bounce into a minute of
 # "disconnected" after the process is already back up.
-_MAX_BACKOFF_LOCAL = 15.0
+_MAX_BACKOFF_LOCAL = _env_float("MCP_COMBINER_MAX_BACKOFF_LOCAL", 15.0)
 _BACKOFF_MULTIPLIER = 2.0
 # Consecutive failed re-opens on a sharedserver-backed upstream before the
 # monitor escalates from re-dialing to hard-restarting the backing process
 # (nothing else respawns a crashed process — re-dialing alone spins forever).
 _BACKING_RESTART_AFTER = 3
-_HEALTH_CHECK_INTERVAL = 30.0  # seconds between keepalive pings
+# Seconds between keepalive pings.
+_HEALTH_CHECK_INTERVAL = _env_float("MCP_COMBINER_HEALTH_INTERVAL", 30.0)
 _TOOLS_READY_TIMEOUT = 30.0  # seconds to await a just-connected upstream's first tools/list
 
 # How long the factory waits for an in-flight connect before giving up.
@@ -480,7 +491,11 @@ class ConnectionManager:
                 try:
                     self._on_connection_success(conn.name)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "on_connection_success callback failed for '%s'",
+                        conn.name,
+                        exc_info=True,
+                    )
             # Confirm the upstream can actually list tools, then fire the
             # tools-ready event that drives invalidation. See _signal_tools_ready.
             await self._signal_tools_ready(conn)
@@ -548,7 +563,7 @@ class ConnectionManager:
         try:
             self._on_tools_ready(conn.name)
         except Exception:
-            pass
+            logger.debug("on_tools_ready callback failed for '%s'", conn.name, exc_info=True)
 
     async def _teardown(self, conn: _ManagedConnection) -> None:
         """Cancel the monitor and close the exit stack."""
@@ -582,7 +597,7 @@ class ConnectionManager:
         try:
             await conn.stack.aclose()
         except Exception:
-            pass
+            logger.debug("closing old connection stack for '%s' failed", conn.name, exc_info=True)
         conn.client_ref[0] = None
         conn.stack = AsyncExitStack()
 
@@ -763,6 +778,21 @@ def _is_auth_error(exc: BaseException) -> bool:
     return False
 
 
+def build_http_transport(srv: ServerConfig) -> StreamableHttpTransport | SSETransport:
+    """Construct the explicit HTTP/SSE transport for an upstream server.
+
+    The single shared implementation of the url/header interpolation + SSE vs
+    streamable-HTTP selection previously copy-pasted in connections and both
+    proxy factories. Constructing explicitly (never ``Client(str)``) keeps the
+    precise transport union type.
+    """
+    url: str = _interpolate_str(srv.url) if srv.url else ""
+    headers: dict[str, str] = _interpolate_dict(srv.headers) if srv.headers else {}
+    if srv.transport == Transport.SSE:
+        return SSETransport(url=url, headers=headers)
+    return StreamableHttpTransport(url=url, headers=headers)
+
+
 def _make_disconnected_client(
     config: CombinerConfig,
     name: str,
@@ -791,17 +821,7 @@ def _make_disconnected_client(
             cache_tokens=config.oauth.cache_tokens,
         )
 
-    url: str = _interpolate_str(srv.url) if srv.url else ""
-    headers: dict[str, str] = _interpolate_dict(srv.headers) if srv.headers else {}
-
-    # Always construct the transport explicitly so the return type is
-    # ``Client[StreamableHttpTransport | SSETransport]`` — not the wide
-    # union that ``Client(str)`` produces.
-    transport: StreamableHttpTransport | SSETransport
-    if srv.transport == Transport.SSE:
-        transport = SSETransport(url=url, headers=headers)
-    else:
-        transport = StreamableHttpTransport(url=url, headers=headers)
+    transport = build_http_transport(srv)
 
     if auth is not None:
         return Client(transport, auth=auth)

@@ -15,6 +15,8 @@ from unittest.mock import MagicMock
 import pytest
 from starlette.testclient import TestClient
 
+from mcp_combiner.runtime import RUNTIME
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -280,15 +282,15 @@ class TestToolsListSingleFlight:
         import mcp_combiner.server as srv
 
         _reset_session_state()
-        srv._tool_cache = None
-        srv._tool_cache_time = 0
+        RUNTIME.tools.cache = None
+        RUNTIME.tools.cache_time = 0
         srv.ToolProcessingMiddleware._inflight = None
 
     def teardown_method(self):
         import mcp_combiner.server as srv
 
-        srv._tool_cache = None
-        srv._tool_cache_time = 0
+        RUNTIME.tools.cache = None
+        RUNTIME.tools.cache_time = 0
         srv.ToolProcessingMiddleware._inflight = None
         _reset_session_state()
 
@@ -370,14 +372,14 @@ class TestStaleServerTools:
         import mcp_combiner.server as srv
 
         self._srv = srv
-        self._saved = (srv._combiner_config, srv._conn_manager)
+        self._saved = (RUNTIME.config, RUNTIME.conn_manager)
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
         srv._local_tools_ready.clear()
 
     def teardown_method(self):
         srv = self._srv
-        srv._combiner_config, srv._conn_manager = self._saved
+        RUNTIME.config, RUNTIME.conn_manager = self._saved
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
         srv._local_tools_ready.clear()
@@ -414,8 +416,8 @@ class TestStaleServerTools:
     def test_reconnecting_peer_tools_survive(self):
         """beta mid-reconnect (absent from fresh) keeps its tools after alpha reconnects."""
         srv = self._srv
-        srv._combiner_config = self._config()
-        srv._conn_manager = None
+        RUNTIME.config = self._config()
+        RUNTIME.conn_manager = None
 
         both = [self._tool("alpha_one"), self._tool("beta_one"), self._tool("beta_two")]
         # First fetch: both live — seeds the per-server cache.
@@ -432,8 +434,8 @@ class TestStaleServerTools:
     def test_disabled_server_tools_dropped(self):
         """A disabled server's stale tools are not re-served (and are evicted)."""
         srv = self._srv
-        srv._combiner_config = self._config(beta_disabled=True)
-        srv._conn_manager = None
+        RUNTIME.config = self._config(beta_disabled=True)
+        RUNTIME.conn_manager = None
 
         srv._server_tool_cache["beta"] = [self._tool("beta_one")]
         srv._server_tool_seen["beta"] = 1000.0
@@ -445,13 +447,13 @@ class TestStaleServerTools:
     def test_grace_window_expiry_drops_tools(self):
         """Past STALE_TOOL_GRACE the stale slice is dropped and evicted."""
         srv = self._srv
-        srv._combiner_config = self._config()
-        srv._conn_manager = None
+        RUNTIME.config = self._config()
+        RUNTIME.conn_manager = None
 
         srv._server_tool_cache["beta"] = [self._tool("beta_one")]
         srv._server_tool_seen["beta"] = 1000.0
 
-        now = 1000.0 + srv.STALE_TOOL_GRACE + 1
+        now = 1000.0 + RUNTIME.tools.stale_grace + 1
         merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=now)
         assert self._names(merged) == ["alpha_one"]
         assert "beta" not in srv._server_tool_cache
@@ -461,10 +463,10 @@ class TestStaleServerTools:
         from unittest.mock import MagicMock
 
         srv = self._srv
-        srv._combiner_config = self._config()
+        RUNTIME.config = self._config()
         cm = MagicMock()
         cm.is_auth_failed = lambda name: name == "beta"
-        srv._conn_manager = cm
+        RUNTIME.conn_manager = cm
 
         srv._server_tool_cache["beta"] = [self._tool("beta_one")]
         srv._server_tool_seen["beta"] = 1000.0
@@ -477,8 +479,8 @@ class TestStaleServerTools:
         """Remove on tool attempt: a server with a recorded call failure is not
         re-served, even inside the grace window (its stale slice is dropped)."""
         srv = self._srv
-        srv._combiner_config = self._config()
-        srv._conn_manager = None
+        RUNTIME.config = self._config()
+        RUNTIME.conn_manager = None
         srv._server_tool_cache["beta"] = [self._tool("beta_one")]
         srv._server_tool_seen["beta"] = 1000.0
         srv._failed_servers["beta"] = "ConnectionError: dead"
@@ -492,8 +494,8 @@ class TestStaleServerTools:
     def test_present_server_marked_tools_ready(self):
         """A server that returns tools in a fresh fetch is confirmed 'ready'."""
         srv = self._srv
-        srv._combiner_config = self._config()
-        srv._conn_manager = None
+        RUNTIME.config = self._config()
+        RUNTIME.conn_manager = None
         assert srv._local_tools_ready.get("alpha") is None
         srv._merge_stale_server_tools([self._tool("alpha_one")], now=1000.0)
         assert srv._local_tools_ready.get("alpha") is True
@@ -501,8 +503,8 @@ class TestStaleServerTools:
     def test_evicted_server_loses_ready(self):
         """A dropped (disabled/expired) server also loses its ready flag."""
         srv = self._srv
-        srv._combiner_config = self._config(beta_disabled=True)
-        srv._conn_manager = None
+        RUNTIME.config = self._config(beta_disabled=True)
+        RUNTIME.conn_manager = None
         srv._server_tool_cache["beta"] = [self._tool("beta_one")]
         srv._server_tool_seen["beta"] = 1000.0
         srv._local_tools_ready["beta"] = True
@@ -545,8 +547,10 @@ class TestLocalToolsReady:
             return [TestStaleServerTools._tool("beta_one")]
 
         combiner = self._combiner_with_provider("beta", list_tools)
-        orig = srv.invalidate_tool_cache
-        srv.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
+        import mcp_combiner.toolcache as toolcache_mod
+
+        orig = toolcache_mod.invalidate_tool_cache
+        toolcache_mod.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
         try:
             ok = await srv.prime_server_tools(combiner, "beta", timeout=10.0, interval=0.0)
             assert ok is True
@@ -555,7 +559,7 @@ class TestLocalToolsReady:
             assert [str(t.name) for t in srv._server_tool_cache["beta"]] == ["beta_one"]
             assert calls == [1]  # broadcast exactly once, after the list returned
         finally:
-            srv.invalidate_tool_cache = orig  # type: ignore[assignment]
+            toolcache_mod.invalidate_tool_cache = orig  # type: ignore[assignment]
             srv._local_tools_ready.pop("beta", None)
             srv._server_tool_cache.pop("beta", None)
             srv._server_tool_seen.pop("beta", None)
@@ -572,8 +576,10 @@ class TestLocalToolsReady:
             raise ConnectionError("never up")
 
         combiner = self._combiner_with_provider("gamma", list_tools)
-        orig = srv.invalidate_tool_cache
-        srv.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
+        import mcp_combiner.toolcache as toolcache_mod
+
+        orig = toolcache_mod.invalidate_tool_cache
+        toolcache_mod.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
         try:
             ok = await srv.prime_server_tools(combiner, "gamma", timeout=0.05, interval=0.0)
             assert ok is False
@@ -581,7 +587,7 @@ class TestLocalToolsReady:
             assert "gamma" not in srv._server_tool_cache
             assert calls == []
         finally:
-            srv.invalidate_tool_cache = orig  # type: ignore[assignment]
+            toolcache_mod.invalidate_tool_cache = orig  # type: ignore[assignment]
 
 
 def test_stale_tool_grace_configurable():
@@ -589,15 +595,15 @@ def test_stale_tool_grace_configurable():
     leaves the module default (30s) untouched."""
     import mcp_combiner.server as srv
 
-    saved = srv.STALE_TOOL_GRACE
+    saved = RUNTIME.tools.stale_grace
     try:
-        srv.STALE_TOOL_GRACE = 30.0
+        RUNTIME.tools.stale_grace = 30.0
         srv.create_combiner(str(FIXTURES / "servers.json"))  # None → unchanged
-        assert srv.STALE_TOOL_GRACE == 30.0
+        assert RUNTIME.tools.stale_grace == 30.0
         srv.create_combiner(str(FIXTURES / "servers.json"), stale_tool_grace=7)
-        assert srv.STALE_TOOL_GRACE == 7.0
+        assert RUNTIME.tools.stale_grace == 7.0
     finally:
-        srv.STALE_TOOL_GRACE = saved
+        RUNTIME.tools.stale_grace = saved
 
 
 # ── unconditional object-schema coercion (issue #7 safety net) ─────
@@ -620,19 +626,19 @@ class TestCoerceObjectSchemas:
         return FunctionTool(fn=lambda: None, name=name, description="", parameters=params)
 
     def test_missing_type_and_properties_coerced(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         (out,) = srv._coerce_object_schemas([self._tool("neovim_get_cursor", {})])
         assert out.parameters == {"type": "object", "properties": {}}
 
     def test_missing_properties_filled(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         (out,) = srv._coerce_object_schemas([self._tool("t", {"type": "object"})])
         assert out.parameters == {"type": "object", "properties": {}}
 
     def test_valid_schema_passed_through_unchanged(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         good = self._tool("t", {"type": "object", "properties": {"x": {"type": "string"}}})
         (out,) = srv._coerce_object_schemas([good])
@@ -640,7 +646,7 @@ class TestCoerceObjectSchemas:
 
     def test_dispatch_fn_preserved_on_rebuild(self):
         """Rebuild must preserve fn so neovim virtual-tool dispatch still works."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         t = self._tool("neovim_x", {})
         (out,) = srv._coerce_object_schemas([t])
@@ -648,7 +654,7 @@ class TestCoerceObjectSchemas:
 
     def test_string_required_wrapped_in_array(self):
         """A bare-string `required` is coerced to a single-element array."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         t = self._tool("t", {"type": "object", "properties": {}, "required": "buffer"})
         (out,) = srv._coerce_object_schemas([t])
@@ -656,7 +662,7 @@ class TestCoerceObjectSchemas:
 
     def test_uncoercible_required_dropped(self):
         """A non-list, non-string `required` (e.g. a number) is dropped."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         t = self._tool("t", {"type": "object", "properties": {}, "required": 5})
         (out,) = srv._coerce_object_schemas([t])
@@ -664,7 +670,7 @@ class TestCoerceObjectSchemas:
 
     def test_valid_required_preserved(self):
         """A list `required` is valid and passes through untouched (not rebuilt)."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         good = self._tool("t", {"type": "object", "properties": {}, "required": ["x"]})
         (out,) = srv._coerce_object_schemas([good])
@@ -688,10 +694,10 @@ class TestFinalizeSchemas:
 
     def test_schema_fixes_reach_a_neovim_named_tool(self):
         """anyof_type_hoist (which coerce never does) is applied to a neovim tool."""
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
-        saved = srv._schema_fixes_global
-        srv._schema_fixes_global = frozenset({"anyof_type_hoist"})
+        saved = RUNTIME.schema_fixes
+        RUNTIME.schema_fixes = frozenset({"anyof_type_hoist"})
         try:
             t = self._tool(
                 "neovim_x",
@@ -702,30 +708,30 @@ class TestFinalizeSchemas:
             # global schema_fix ran on a neovim-named tool at egress.
             assert out.parameters["anyOf"][0] == {"type": "array", "items": {"type": "string"}}
         finally:
-            srv._schema_fixes_global = saved
+            RUNTIME.schema_fixes = saved
 
     def test_idempotent_across_repeat_calls(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
-        saved = srv._schema_fixes_global
-        srv._schema_fixes_global = frozenset({"empty_object"})
+        saved = RUNTIME.schema_fixes
+        RUNTIME.schema_fixes = frozenset({"empty_object"})
         try:
             once = srv._finalize_schemas([self._tool("neovim_x", {})])
             twice = srv._finalize_schemas(once)
             assert once[0].parameters == twice[0].parameters == {"type": "object", "properties": {}}
         finally:
-            srv._schema_fixes_global = saved
+            RUNTIME.schema_fixes = saved
 
     def test_coerce_still_runs_with_no_schema_fixes(self):
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
-        saved = srv._schema_fixes_global
-        srv._schema_fixes_global = frozenset()
+        saved = RUNTIME.schema_fixes
+        RUNTIME.schema_fixes = frozenset()
         try:
             (out,) = srv._finalize_schemas([self._tool("neovim_x", {})])
             assert out.parameters == {"type": "object", "properties": {}}
         finally:
-            srv._schema_fixes_global = saved
+            RUNTIME.schema_fixes = saved
 
 
 class TestBuildNvimTools:
@@ -761,21 +767,22 @@ class TestOnListToolsIntegration:
         import mcp_combiner.nvim_proxy as nvim_proxy
         import mcp_combiner.server as srv
 
-        srv._tool_cache = None
-        srv._tool_cache_time = 0
+        RUNTIME.tools.cache = None
+        RUNTIME.tools.cache_time = 0
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
         srv.ToolProcessingMiddleware._inflight = None
+
         self._saved_channel = nvim_proxy._nvim_channel
-        self._saved_fixes = srv._schema_fixes_global
+        self._saved_fixes = RUNTIME.schema_fixes
 
     def teardown_method(self):
         import mcp_combiner.nvim_proxy as nvim_proxy
         import mcp_combiner.server as srv
 
         nvim_proxy._nvim_channel = self._saved_channel
-        srv._schema_fixes_global = self._saved_fixes
-        srv._tool_cache = None
+        RUNTIME.schema_fixes = self._saved_fixes
+        RUNTIME.tools.cache = None
         srv.ToolProcessingMiddleware._inflight = None
 
     @staticmethod
@@ -884,7 +891,7 @@ class TestOutputSchemaPlumbing:
         """A schema_fix that rebuilds the tool must keep its output_schema."""
         from fastmcp.tools.function_tool import FunctionTool
 
-        import mcp_combiner.server as srv
+        import mcp_combiner.schemafix as srv
 
         # Missing `properties` → empty_object fix changes params → tool is rebuilt.
         t = FunctionTool(

@@ -31,7 +31,7 @@ def register_meta_tools(
         the same lifecycle state the Neovim MCPStatus panel shows, via the
         shared status builder.
         """
-        from mcp_combiner.server import build_server_status
+        from mcp_combiner.status import build_server_status
 
         return {name: build_server_status(config, conn_manager, name) for name in config.servers}
 
@@ -61,8 +61,8 @@ def register_meta_tools(
             conn_manager.reset_auth_failure(server_name)
 
         try:
-            from mcp_combiner.server import (
-                _create_server_proxy,
+            from mcp_combiner.proxyfactory import _create_server_proxy
+            from mcp_combiner.toolcache import (
                 invalidate_tool_cache,
                 prime_server_tools,
             )
@@ -127,7 +127,7 @@ def register_meta_tools(
         # Remove the providers this server's mount added (tracked by identity
         # in the mount registry — see mcp_combiner.mounts).
         try:
-            from mcp_combiner.server import invalidate_tool_cache
+            from mcp_combiner.toolcache import invalidate_tool_cache
 
             removed = drop_server_providers(combiner, server_name)
 
@@ -165,7 +165,7 @@ def register_meta_tools(
         Priming (tools/list → ready) is the caller's job, via
         prime_server_tools — see combiner__restart_server's tools-ready gate.
         """
-        from mcp_combiner.server import _create_server_proxy
+        from mcp_combiner.proxyfactory import _create_server_proxy
 
         await ss_manager.ensure_started(server_name)
         if conn_manager.is_http_server(srv):
@@ -212,7 +212,7 @@ def register_meta_tools(
                 "to bring it up instead of restarting"
             )
 
-        from mcp_combiner.server import (
+        from mcp_combiner.toolcache import (
             clear_tool_cache,
             invalidate_tool_cache,
             prime_server_tools,
@@ -316,7 +316,7 @@ def register_meta_tools(
         Returns:
             A summary of what changed.
         """
-        from mcp_combiner.server import invalidate_tool_cache
+        from mcp_combiner.toolcache import invalidate_tool_cache
 
         try:
             new_cfg = CombinerConfig.load(config.config_path)
@@ -404,13 +404,11 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
 
-        from mcp_combiner.server import _session_disabled
+        from mcp_combiner.runtime import RUNTIME
 
         # Use chat_id if provided, otherwise fall back to MCP session_id
         sid = chat_id if chat_id else ctx.session_id
-        if sid not in _session_disabled:
-            _session_disabled[sid] = set()
-        _session_disabled[sid].add(server_name)
+        RUNTIME.sessions.disable(sid, server_name)
 
         # Notify this session only so its tool list refreshes immediately.
         # (Only effective when using ctx.session_id, not chat_id)
@@ -429,7 +427,7 @@ def register_meta_tools(
                 "session_id": sid,
                 "action": "disabled",
                 "server": server_name,
-                "disabled_servers": sorted(_session_disabled.get(sid, set())),
+                "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
             }
         )
 
@@ -453,11 +451,11 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
 
-        from mcp_combiner.server import _session_disabled
+        from mcp_combiner.runtime import RUNTIME
 
         # Use chat_id if provided, otherwise fall back to MCP session_id
         sid = chat_id if chat_id else ctx.session_id
-        blocked = _session_disabled.get(sid)
+        blocked = RUNTIME.sessions.disabled_for(sid)
         if not blocked or server_name not in blocked:
             import json
 
@@ -467,14 +465,11 @@ def register_meta_tools(
                     "action": "no_change",
                     "server": server_name,
                     "message": f"Server '{server_name}' is not session-disabled",
-                    "disabled_servers": sorted(_session_disabled.get(sid, set())),
+                    "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
                 }
             )
 
-        blocked.discard(server_name)
-        # Clean up empty sets
-        if not blocked:
-            _session_disabled.pop(sid, None)
+        RUNTIME.sessions.enable(sid, server_name)
 
         # Notify this session only so its tool list refreshes immediately.
         if not chat_id:
@@ -492,7 +487,7 @@ def register_meta_tools(
                 "session_id": sid,
                 "action": "enabled",
                 "server": server_name,
-                "disabled_servers": sorted(_session_disabled.get(sid, set())),
+                "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
             }
         )
 
@@ -511,10 +506,10 @@ def register_meta_tools(
         Returns:
             JSON string with session status.
         """
-        from mcp_combiner.server import _session_disabled
+        from mcp_combiner.runtime import RUNTIME
 
         sid = chat_id if chat_id else ctx.session_id
-        blocked = list(_session_disabled.get(sid, set()))
+        blocked = RUNTIME.sessions.disabled_snapshot(sid)
         blocked.sort()
 
         import json

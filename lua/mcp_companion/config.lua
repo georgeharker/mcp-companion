@@ -357,17 +357,6 @@ end
 function M.setup(opts)
     opts = opts or {}
 
-    -- Deprecation: the `combiner` config key was renamed to `combiner`.
-    if opts.combiner ~= nil and opts.combiner == nil then
-        vim.notify(
-            "[mcp-companion] the `combiner` config key was renamed to `combiner` — "
-                .. "rename it in your setup() call (e.g. `combiner = { … }`).",
-            vim.log.levels.WARN
-        )
-        opts.combiner = opts.combiner
-        opts.combiner = nil
-    end
-
     _config = vim.tbl_deep_extend("force", {}, M.defaults, opts)
 
     -- Did the user pin a custom python? (before we auto-resolve it to a venv path)

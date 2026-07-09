@@ -3,9 +3,9 @@ name: CI (mcp-combiner)
 on:
   push:
     branches: [main, dev]
-    paths: ["combiner/**", "lua/**", "tests/**", ".github/workflows/ci.yml"]
+    paths: ["combiner/**", "lua/**", "tests/**", "scripts/**", ".github/workflows/ci.yml"]
   pull_request:
-    paths: ["combiner/**", "lua/**", "tests/**", ".github/workflows/ci.yml"]
+    paths: ["combiner/**", "lua/**", "tests/**", "scripts/**", ".github/workflows/ci.yml"]
 
 jobs:
   check:
@@ -21,6 +21,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Neovim so the real-editor tests (test_nvim_channel, test_nvim_e2e)
+      # run instead of silently skipping.
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+
       - name: Install (project + dev group, from uv.lock)
         run: uv sync
 
@@ -33,12 +40,16 @@ jobs:
       - name: Types (mypy)
         run: uv run mypy mcp_combiner
 
-      - name: Tests (pytest)
-        run: uv run pytest -q
+      - name: Tests — fast tier
+        run: uv run pytest -q -m "not e2e"
+
+      - name: Tests — e2e tier
+        # Spawns real combiner + mock subprocesses. sharedserver-backed tests
+        # skip automatically (binary not installed in CI).
+        run: uv run pytest -q -m "e2e"
 
   lua-tests:
     # Self-contained Lua tests only (no combiner/CodeCompanion/network needed).
-    # Each test calls `cq` on failure, so a non-zero exit fails the job.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,9 +60,4 @@ jobs:
           neovim: true
 
       - name: Lua tests (headless)
-        run: |
-          set -e
-          for t in tests/test_schema.lua tests/test_native.lua; do
-            echo "== $t =="
-            nvim --headless --noplugin -u NONE -c "set rtp+=$PWD" -c "luafile $t"
-          done
+        run: scripts/test-lua.sh

@@ -98,40 +98,21 @@ end
 local function _call_session_tool(chat, tool_name, server_name, callback)
     local token = chat._mcp_token
     if token then
-        local cfg = require("mcp_companion.config").get()
-        local host = (cfg.combiner and cfg.combiner.host) or "127.0.0.1"
-        local port = (cfg.combiner and cfg.combiner.port) or 9741
-        local http = require("mcp_companion.http")
-
+        local sessions = require("mcp_companion.combiner.sessions")
         local is_disabling = tool_name == "combiner__session_disable_server"
         local action_key = is_disabling and "disable" or "enable"
-        local body = vim.json.encode({ [action_key] = server_name })
 
-        http.request({
-            url = string.format("http://%s:%d/sessions/token/%s/filter", host, port, token),
-            method = "post",
-            headers = { ["Content-Type"] = "application/json" },
-            body = body,
-            timeout = 5000,
-            callback = function(r)
-                vim.schedule(function()
-                    if r.status == 200 then
-                        local ok, data = pcall(vim.json.decode, r.body)
-                        if ok and data and data.disabled_servers and chat.bufnr then
-                            local disabled_map = {}
-                            for _, s in ipairs(data.disabled_servers) do
-                                disabled_map[s] = true
-                            end
-                            _session_state[chat.bufnr] = disabled_map
-                        end
-                        local action = is_disabling and "disabled" or "enabled"
-                        callback(nil, string.format("%s %s for this session", action, server_name))
-                    else
-                        callback(string.format("Combiner filter update failed (status %s)", r.status))
-                    end
-                end)
-            end,
-        })
+        sessions.set_filter(token, { [action_key] = server_name }, function(err, data)
+            if err then
+                callback("Combiner filter update failed: " .. err)
+                return
+            end
+            if data.disabled_servers and chat.bufnr then
+                _session_state[chat.bufnr] = sessions.disabled_set(data)
+            end
+            local action = is_disabling and "disabled" or "enabled"
+            callback(nil, string.format("%s %s for this session", action, server_name))
+        end)
         return
     end
 
@@ -338,42 +319,23 @@ end
 function M.fetch_session_status(chat, callback)
     local token = chat and chat._mcp_token
     if token then
-        local cfg = require("mcp_companion.config").get()
-        local host = (cfg.combiner and cfg.combiner.host) or "127.0.0.1"
-        local port = (cfg.combiner and cfg.combiner.port) or 9741
-        local http = require("mcp_companion.http")
+        local sessions = require("mcp_companion.combiner.sessions")
         log.debug(
             "MCPStatus: fetching session filter via token (bufnr=%s token=%s)",
             tostring(chat and chat.bufnr),
             token
         )
-
-        http.request({
-            url = string.format("http://%s:%d/sessions/token/%s/filter", host, port, token),
-            method = "get",
-            timeout = 3000,
-            callback = function(resp)
-                vim.schedule(function()
-                    if resp.status ~= 200 then
-                        callback(string.format("HTTP %s", resp.status), nil)
-                        return
-                    end
-                    local ok, data = pcall(vim.json.decode, resp.body)
-                    if not ok or not data then
-                        callback("JSON parse error", nil)
-                        return
-                    end
-                    local disabled = {}
-                    for _, name in ipairs(data.disabled_servers or {}) do
-                        disabled[name] = true
-                    end
-                    if chat and chat.bufnr then
-                        _session_state[chat.bufnr] = disabled
-                    end
-                    callback(nil, disabled)
-                end)
-            end,
-        })
+        sessions.get_filter(token, function(err, data)
+            if err then
+                callback(err, nil)
+                return
+            end
+            local disabled = sessions.disabled_set(data)
+            if chat and chat.bufnr then
+                _session_state[chat.bufnr] = disabled
+            end
+            callback(nil, disabled)
+        end)
         return
     end
 

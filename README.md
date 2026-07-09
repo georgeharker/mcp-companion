@@ -27,7 +27,7 @@ UI.
 ## Overview
 
 <p align="center">
-  <img src="docs/assets/architecture.svg" alt="MCP Combiner aggregates N MCP servers behind one HTTP endpoint (:9741), serving the Neovim plugin (CodeCompanion), OpenCode (ACP agent), and any HTTP client (curl, scripts)" width="760">
+  <img src="docs/assets/architecture.svg" alt="MCP Combiner aggregates N MCP servers behind one HTTP endpoint (:9741), serving the Neovim plugin (CodeCompanion), OpenCode (ACP agent), and the mcp-combiner CLI or any HTTP client" width="760">
 </p>
 
 ---
@@ -46,7 +46,7 @@ cd combiner
 uv sync --frozen
 
 # Run the combiner
-uv run python -m mcp_combiner --config ~/.config/mcp/servers.json --port 9741
+uv run python -m mcp_combiner --mcp --config ~/.config/mcp/servers.json --port 9741
 
 # Health check
 curl http://127.0.0.1:9741/health
@@ -60,6 +60,57 @@ curl http://127.0.0.1:9741/health
 - Handles environment variable interpolation, OAuth 2.1 auth, schema sanitization
 - Provides meta-tools (`combiner__status`, `combiner__enable_server`, `combiner__disable_server`)
 - Serves a `/health` endpoint with server status
+
+### Architecture
+
+<p align="center">
+  <img src="docs/assets/internals.svg" alt="Combiner internal architecture: entry point → wiring → management and request plane → domain → foundation, all state owned by CombinerRuntime; the mcp-combiner CLI is a pure client of the management plane; mockserver is the test instrument" width="820">
+</p>
+
+Internally the combiner is a one-way layered DAG: the serve entry point
+(`--mcp` → `__main__` · `asgi`) wires up `server`, which registers the
+**management & request plane** (`meta_tools`, the `/sessions*` REST routes,
+and the tools/list + tool-call middleware) over the **domain** modules
+(tool cache/hysteresis, proxy construction, status, schema fixes) and the
+**foundation** (persistent connections with self-healing, sharedserver
+process management, auth, the Neovim back-channel). All mutable state is
+owned by `runtime.CombinerRuntime` and mutated only through its methods.
+The `mcp-combiner` CLI is a pure client of the management plane; the
+`mockserver` module is the instrumentable test upstream. Full internal
+design notes live in
+[`docs/design.md`](https://github.com/georgeharker/mcp-companion/blob/main/docs/design.md).
+
+### Control CLI
+
+`mcp-combiner` (without `--mcp`) is a control CLI for a running combiner —
+the same operations surface the Neovim plugin exposes:
+
+```bash
+mcp-combiner status                    # glyph table: server, state, transport
+mcp-combiner health --json             # raw /health payload
+mcp-combiner enable <server>           # mount + connect
+mcp-combiner disable <server>          # unmount + disconnect
+mcp-combiner restart <server>          # hard bounce for combiner-owned processes
+mcp-combiner reload                    # re-read config, apply the diff
+mcp-combiner tools                     # list advertised tools
+mcp-combiner call myserver_echo --args '{"message": "hi"}'
+mcp-combiner session status                              # list sessions
+mcp-combiner session disable <server> --token <uuid>     # per-chat filter (WIP)
+mcp-combiner session allow --servers a,b --token <uuid>  # allow-list (WIP)
+```
+
+> **WIP:** the session filter verbs (`enable`/`disable`/`allow`/`clear`) are a
+> work in progress — CLI invocations are transient sessions, and
+> token-addressed filters are recorded but not yet applied while the
+> session-addressing rework lands. `session status` is fully functional.
+
+All commands accept `--host`/`--port` (default `127.0.0.1:9741`) or `--url`,
+and `--json` for scripting.
+
+> **Migration note:** the server is now started with an explicit `--mcp`
+> flag (`mcp-combiner --mcp --config … --port …`). The historical bare
+> `mcp-combiner --config …` invocation still serves, with a deprecation
+> warning — add `--mcp` to launcher configs when convenient.
 
 ### Using with other MCP clients
 
@@ -363,13 +414,13 @@ and reused across sessions. Refresh tokens are handled automatically.
 
 ```bash
 # Disable disk caching entirely (tokens lost on restart)
-python -m mcp_combiner --config servers.json --no-oauth-cache
+python -m mcp_combiner --mcp --config servers.json --no-oauth-cache
 
 # Use a custom token directory
-python -m mcp_combiner --config servers.json --oauth-token-dir /secure/tokens
+python -m mcp_combiner --mcp --config servers.json --oauth-token-dir /secure/tokens
 
 # Re-enable caching if config file says otherwise
-python -m mcp_combiner --config servers.json --oauth-cache
+python -m mcp_combiner --mcp --config servers.json --oauth-cache
 ```
 
 Priority order (highest to lowest): CLI flag → config `oauth` section → built-in default.
@@ -485,7 +536,7 @@ For stronger security, set a custom encryption key:
 ```bash
 # Via environment variable
 export MCP_COMBINER_TOKEN_KEY="your-secret-key-here"
-python -m mcp_combiner --config servers.json
+python -m mcp_combiner --mcp --config servers.json
 
 # Or in Neovim config
 require("mcp_companion").setup({
@@ -1451,15 +1502,39 @@ version.
 ### Python combiner
 
 ```bash
+scripts/test.sh fast    # unit tier
+scripts/test.sh e2e     # process-level tier (spawns combiner + mock upstreams)
+scripts/test.sh         # everything
+```
+
+or directly:
+
+```bash
 cd combiner
 uv sync --frozen
-pytest tests/ -v
-mypy --strict mcp_combiner/ tests/
+uv run pytest -q
+uv run mypy mcp_combiner
 ```
+
+The e2e tier drives real combiner subprocesses against
+`mcp_combiner.mockserver` — an instrumentable mock MCP server (stdio or
+HTTP) with configurable tools, verbatim (including deliberately malformed)
+schemas, scripted responses, fault injection, per-session call tracking and
+a persistent boot counter. It is also useful standalone when debugging
+combiner behavior:
+
+```bash
+python -m mcp_combiner.mockserver --name mock --transport http --port 9760
+curl http://127.0.0.1:9760/stats
+```
+
+sharedserver-backed e2e tests run when the `sharedserver` binary is on PATH
+and skip otherwise; Neovim-backed tests likewise require `nvim`.
 
 ### Lua plugin
 
 ```bash
+scripts/test-lua.sh     # all self-contained tests, headless
 lua-language-server --check=. --checklevel=Warning
 ```
 

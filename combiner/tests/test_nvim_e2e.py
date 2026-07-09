@@ -59,7 +59,7 @@ async def combiner_and_nvim() -> AsyncIterator[None]:
         json.dump({"mcpServers": {}}, f)  # no upstreams — keeps startup fast
 
     combiner = subprocess.Popen(
-        [sys.executable, "-m", "mcp_combiner", "--config", cfg_path, "--port", str(_PORT)],
+        [sys.executable, "-m", "mcp_combiner", "--mcp", "--config", cfg_path, "--port", str(_PORT)],
         cwd=str(_COMBINER_DIR),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

@@ -971,6 +971,55 @@ function Client:_refresh_server_health(callback)
     })
 end
 
+--- Concatenated text of an MCP tool result's content items.
+--- @param result table|nil
+--- @return string
+local function _result_text(result)
+    local text = ""
+    if result and result.content then
+        for _, item in ipairs(result.content) do
+            if item.text then
+                text = text .. item.text
+            end
+        end
+    end
+    return text
+end
+
+--- Public full refresh: health first (lifecycle/disabled states), then
+--- capabilities (tool lists) — _update_server_state merges both.
+--- @param callback? fun()
+function Client:refresh(callback)
+    self:_refresh_server_health(function()
+        self:refresh_capabilities(callback)
+    end)
+end
+
+--- Call a combiner meta-tool, then refresh health + capabilities so state and
+--- the UI reflect the change. Shared by toggle/restart/reload.
+--- @param tool_name string
+--- @param args table
+--- @param label string log label
+--- @param callback? fun(err?: string, result?: string)
+local function _meta_op(self, tool_name, args, label, callback)
+    self:call_tool(tool_name, args, function(err, result)
+        if err then
+            log.error("Failed to %s: %s", label, tostring(err))
+            if callback then
+                callback(err)
+            end
+            return
+        end
+        local result_text = _result_text(result)
+        log.info("%s result: %s", label, result_text)
+        self:refresh(function()
+            if callback then
+                callback(nil, result_text)
+            end
+        end)
+    end)
+end
+
 --- Toggle a server's enabled/disabled state
 --- Calls combiner__enable_server or combiner__disable_server, then refreshes
 --- @param server_name string
@@ -991,37 +1040,7 @@ function Client:toggle_server(server_name, callback)
     local tool_name = info.disabled and "combiner__enable_server" or "combiner__disable_server"
     local action = info.disabled and "Enabling" or "Disabling"
     log.info("%s server: %s", action, server_name)
-
-    self:call_tool(tool_name, { server_name = server_name }, function(err, result)
-        if err then
-            log.error("Failed to toggle server %s: %s", server_name, tostring(err))
-            if callback then
-                callback(err)
-            end
-            return
-        end
-
-        -- Extract result text from MCP response
-        local result_text = ""
-        if result and result.content then
-            for _, item in ipairs(result.content) do
-                if item.text then
-                    result_text = result_text .. item.text
-                end
-            end
-        end
-        log.info("Toggle result: %s", result_text)
-
-        -- Refresh health data first (to get updated disabled status),
-        -- then refresh capabilities (to get updated tool list)
-        self:_refresh_server_health(function()
-            self:refresh_capabilities(function()
-                if callback then
-                    callback(nil, result_text)
-                end
-            end)
-        end)
-    end)
+    _meta_op(self, tool_name, { server_name = server_name }, "toggle " .. server_name, callback)
 end
 
 --- Restart a single MCP server on the combiner — ditch it and bring it back
@@ -1031,34 +1050,7 @@ end
 --- @param callback? fun(err?: string, result?: string)
 function Client:restart_server(server_name, callback)
     log.info("Restarting server: %s", server_name)
-    self:call_tool("combiner__restart_server", { server_name = server_name }, function(err, result)
-        if err then
-            log.error("Failed to restart server %s: %s", server_name, tostring(err))
-            if callback then
-                callback(err)
-            end
-            return
-        end
-
-        -- Extract result text from MCP response
-        local result_text = ""
-        if result and result.content then
-            for _, item in ipairs(result.content) do
-                if item.text then
-                    result_text = result_text .. item.text
-                end
-            end
-        end
-        log.info("Restart result: %s", result_text)
-
-        self:_refresh_server_health(function()
-            self:refresh_capabilities(function()
-                if callback then
-                    callback(nil, result_text)
-                end
-            end)
-        end)
-    end)
+    _meta_op(self, "combiner__restart_server", { server_name = server_name }, "restart " .. server_name, callback)
 end
 
 --- Ask the combiner to re-read its config file and apply server changes.
@@ -1067,36 +1059,7 @@ end
 --- @param callback? fun(err?: string, result?: string)
 function Client:reload_config(callback)
     log.info("Reloading combiner config")
-    self:call_tool("combiner__reload_config", {}, function(err, result)
-        if err then
-            log.error("Failed to reload config: %s", tostring(err))
-            if callback then
-                callback(err)
-            end
-            return
-        end
-
-        -- Extract result text from MCP response
-        local result_text = ""
-        if result and result.content then
-            for _, item in ipairs(result.content) do
-                if item.text then
-                    result_text = result_text .. item.text
-                end
-            end
-        end
-        log.info("Reload result: %s", result_text)
-
-        -- Refresh health data first (updated server set/disabled status),
-        -- then refresh capabilities (updated tool list).
-        self:_refresh_server_health(function()
-            self:refresh_capabilities(function()
-                if callback then
-                    callback(nil, result_text)
-                end
-            end)
-        end)
-    end)
+    _meta_op(self, "combiner__reload_config", {}, "reload config", callback)
 end
 
 --- Call a tool on the combiner

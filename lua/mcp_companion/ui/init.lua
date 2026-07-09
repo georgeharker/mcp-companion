@@ -483,23 +483,12 @@ function M.open()
     end, "Refresh")
 
     map("R", function()
-        local combiner = require("mcp_companion.combiner")
-        combiner.restart()
+        require("mcp_companion.ops").restart_combiner()
     end, "Restart combiner")
 
     map("c", function()
-        local combiner_mod = require("mcp_companion.combiner")
-        local client = combiner_mod.client
-        if not client or not client.connected then
-            vim.notify("[mcp-companion] Combiner not connected", vim.log.levels.WARN)
-            return
-        end
-        vim.notify("[mcp-companion] Reloading combiner config...", vim.log.levels.INFO)
-        client:reload_config(function(err, result)
-            if err then
-                vim.notify(string.format("[mcp-companion] Reload failed: %s", tostring(err)), vim.log.levels.ERROR)
-            else
-                vim.notify(string.format("[mcp-companion] %s", result or "config reloaded"), vim.log.levels.INFO)
+        require("mcp_companion.ops").reload_config(function(err)
+            if not err then
                 M._fetch_and_render()
             end
         end)
@@ -538,22 +527,7 @@ function M.open()
         if not line_data or not line_data.server_name then
             return
         end
-        local srv_name = line_data.server_name
-        local combiner_mod = require("mcp_companion.combiner")
-        local client = combiner_mod.client
-        if not client or not client.connected then
-            vim.notify("[mcp-companion] Combiner not connected", vim.log.levels.WARN)
-            return
-        end
-        -- Show feedback
-        vim.notify(string.format("[mcp-companion] Toggling %s...", srv_name), vim.log.levels.INFO)
-        client:toggle_server(srv_name or "", function(err, result)
-            if err then
-                vim.notify(string.format("[mcp-companion] Toggle failed: %s", tostring(err)), vim.log.levels.ERROR)
-            else
-                vim.notify(string.format("[mcp-companion] %s", result or "done"), vim.log.levels.INFO)
-            end
-        end)
+        require("mcp_companion.ops").toggle_server(line_data.server_name or "")
     end, "Toggle server enable/disable")
 
     map("p", function()
@@ -563,39 +537,12 @@ function M.open()
         if not line_data or not line_data.server_name then
             return
         end
-        local srv_name = line_data.server_name
-        if srv_name == "_combiner" then
-            return
-        end
-
-        local state = require("mcp_companion.state")
-        local servers = state.field("servers") or {}
-        local known = {}
-        for _, srv in ipairs(servers) do
-            if srv.name and srv.name ~= "_combiner" then
-                table.insert(known, srv.name)
+        require("mcp_companion.ops").toggle_in_project(line_data.server_name, function(err)
+            if not err then
+                -- Re-render so the [project off] indicator updates immediately.
+                M.render()
             end
-        end
-        if #known == 0 then
-            vim.notify("[mcp-companion] No connected servers — combiner state not loaded yet", vim.log.levels.WARN)
-            return
-        end
-
-        local project = require("mcp_companion.project")
-        local ok, result = pcall(project.toggle_in_project_file, srv_name, known)
-        if not ok then
-            vim.notify("[mcp-companion] Project toggle failed: " .. tostring(result), vim.log.levels.ERROR)
-            return
-        end
-
-        local new_state_label = result.now_visible and "visible" or "hidden"
-        vim.notify(
-            string.format("[mcp-companion] %s %s in project (%s)", srv_name, new_state_label, result.path),
-            vim.log.levels.INFO
-        )
-
-        -- Re-render so the [project off] indicator updates immediately.
-        M.render()
+        end)
     end, "Toggle server in .mcp-companion.json")
 
     map("x", function()
@@ -717,9 +664,7 @@ function M._fetch_and_render()
     local combiner_mod = require("mcp_companion.combiner")
     local client = combiner_mod.client
     if client and client.connected then
-        client:_refresh_server_health(function()
-            client:refresh_capabilities()
-        end)
+        client:refresh()
     end
 
     -- If we have a source chat/CLI buffer, fetch live session status
