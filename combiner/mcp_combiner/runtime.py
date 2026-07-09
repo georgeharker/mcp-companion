@@ -49,6 +49,9 @@ class SessionRegistry:
     active: weakref.WeakSet[ServerSession] = field(default_factory=weakref.WeakSet)
     # Per-session server blocklist: session id -> disabled server names.
     disabled: dict[str, set[str]] = field(default_factory=dict)
+    # Per-session elicitation grants ("Allow for session"): session id ->
+    # set of "<server>/<local_tool>" keys the user approved for the session.
+    granted: dict[str, set[str]] = field(default_factory=dict)
     # Chat token -> combiner session id (see Q1 namespace caveat above).
     token_sessions: dict[str, str] = field(default_factory=dict)
     # Filters stored for a token before its client has connected.
@@ -98,6 +101,20 @@ class SessionRegistry:
     def clear_disabled(self, session_id: str) -> set[str] | None:
         """Drop a session's blocklist entirely; returns what was removed."""
         return self.disabled.pop(session_id, None)
+
+    # -- per-session elicitation grants ------------------------------------
+
+    def grant(self, session_id: str, key: str) -> None:
+        """Record an "Allow for session" grant for ``<server>/<local_tool>``."""
+        self.granted.setdefault(session_id, set()).add(key)
+
+    def is_granted(self, session_id: str, key: str) -> bool:
+        """True if this session already approved ``key`` for the session."""
+        return key in self.granted.get(session_id, ())
+
+    def clear_granted(self, session_id: str) -> None:
+        """Drop a session's elicitation grants (e.g. on disconnect)."""
+        self.granted.pop(session_id, None)
 
     # -- token correlation (Q1 caveat: values are wire mcp-session-ids) -----
 

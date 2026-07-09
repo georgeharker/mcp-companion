@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -123,6 +126,135 @@ class SharedServerConfig(BaseModel):
         )
 
 
+class PermissionAction(str, Enum):
+    """What to do with a tool call: allow it, deny it, or ask the user."""
+
+    ALLOW = "allow"
+    DENY = "deny"
+    ELICIT = "elicit"
+
+
+def _matches_any(name: str, patterns: list[str]) -> bool:
+    """True if *name* matches any of the fnmatch glob *patterns*."""
+    return any(fnmatch.fnmatch(name, p) for p in patterns)
+
+
+class PermissionPolicy(BaseModel):
+    """Per-call permission policy (config shape).
+
+    Applies to tool *calls* only — never to tool publication.  Patterns are
+    globs matched against the **local** tool name (without the ``<server>_``
+    prefix), the same fnmatch semantics as ``tool_filter``.
+
+    Scalar fields are ``None`` = *inherit* so a per-server block can override
+    just one of them while inheriting the rest from the global policy.  The
+    resolved default when nothing is set is :attr:`PermissionAction.ALLOW`
+    (i.e. **off** — no gate), so an unconfigured combiner behaves exactly as
+    before this feature existed.
+    """
+
+    default: PermissionAction | None = None
+    """Action for tools that match no pattern.  ``None`` inherits; the global
+    fallback is ``ALLOW`` (off)."""
+    allow: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+    elicit: list[str] = Field(default_factory=list)
+    elicit_unavailable: PermissionAction | None = None
+    """What to do when a call resolves to ELICIT but the client cannot elicit.
+    ``None`` inherits; the global fallback is ``DENY`` (secure)."""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> PermissionPolicy | None:
+        """Parse a ``permissions`` block; ``None``/empty → ``None`` (no policy)."""
+        if not data:
+            return None
+        if not isinstance(data, dict):
+            raise ValueError("permissions must be an object")
+
+        def _action(key: str) -> PermissionAction | None:
+            v = data.get(key)
+            if v is None:
+                return None
+            return PermissionAction(str(v))
+
+        def _patterns(*keys: str) -> list[str]:
+            for k in keys:
+                if k in data and data[k]:
+                    return list(data[k])
+            return []
+
+        return cls(
+            default=_action("default"),
+            allow=_patterns("allow"),
+            deny=_patterns("deny"),
+            elicit=_patterns("elicit"),
+            elicit_unavailable=_action("elicitUnavailable") or _action("elicit_unavailable"),
+        )
+
+
+@dataclass(frozen=True)
+class ResolvedPolicy:
+    """A concrete, merged policy for one server (global ⊕ server ⊕ auto_approve)."""
+
+    default: PermissionAction
+    allow: tuple[str, ...]
+    deny: tuple[str, ...]
+    elicit: tuple[str, ...]
+    elicit_unavailable: PermissionAction
+
+    def is_active(self) -> bool:
+        """False when this policy can only ever allow — lets callers fast-path."""
+        return self.default is not PermissionAction.ALLOW or bool(self.deny) or bool(self.elicit)
+
+    def resolve(self, local_tool: str) -> PermissionAction:
+        """Action for *local_tool* — precedence deny > elicit > allow > default."""
+        if _matches_any(local_tool, list(self.deny)):
+            return PermissionAction.DENY
+        if _matches_any(local_tool, list(self.elicit)):
+            return PermissionAction.ELICIT
+        if _matches_any(local_tool, list(self.allow)):
+            return PermissionAction.ALLOW
+        return self.default
+
+
+def _merge_policies(
+    global_p: PermissionPolicy | None,
+    server_p: PermissionPolicy | None,
+    auto_approve: list[str],
+) -> ResolvedPolicy:
+    """Layer a per-server policy over the global one.
+
+    Pattern sets are the **union** (global first, then server, then the
+    server's ``auto_approve`` as additional allow patterns).  Scalars take the
+    server's value when set, else the global's, else the secure fallback
+    (default → ALLOW/off, elicit_unavailable → DENY).
+    """
+
+    def pick(
+        get: "Callable[[PermissionPolicy], PermissionAction | None]",
+        fallback: PermissionAction,
+    ) -> PermissionAction:
+        for p in (server_p, global_p):
+            if p is not None and (v := get(p)) is not None:
+                return v
+        return fallback
+
+    def union(get: "Callable[[PermissionPolicy], list[str]]") -> tuple[str, ...]:
+        out: list[str] = []
+        for p in (global_p, server_p):
+            if p is not None:
+                out.extend(get(p))
+        return tuple(out)
+
+    return ResolvedPolicy(
+        default=pick(lambda p: p.default, PermissionAction.ALLOW),
+        allow=union(lambda p: p.allow) + tuple(auto_approve),
+        deny=union(lambda p: p.deny),
+        elicit=union(lambda p: p.elicit),
+        elicit_unavailable=pick(lambda p: p.elicit_unavailable, PermissionAction.DENY),
+    )
+
+
 class ServerConfig(BaseModel):
     """Configuration for a single MCP server."""
 
@@ -155,6 +287,11 @@ class ServerConfig(BaseModel):
     Patterns are matched against the tool name (without server prefix).
     Examples: ``["gmail_*", "calendar_*"]`` to only include Gmail and Calendar tools.
     """
+
+    permissions: PermissionPolicy | None = None
+    """Per-call permission policy for this server (overrides/extends the global
+    ``permissions`` block).  ``None`` = inherit the global policy.  See
+    :class:`PermissionPolicy`.  Gates tool *calls* only, never publication."""
 
     isolate: bool | None = None
     """Tri-state: give each downstream chat its own upstream MCP session.
@@ -200,6 +337,7 @@ class ServerConfig(BaseModel):
                 "shared_server",
                 "toolFilter",
                 "tool_filter",
+                "permissions",
                 "isolate",
             },
         )
@@ -235,6 +373,7 @@ class ServerConfig(BaseModel):
             auth=data.get("auth"),
             shared_server=shared_server,
             tool_filter=tool_filter,
+            permissions=PermissionPolicy.from_dict(data.get("permissions")),
             isolate=(None if data.get("isolate") is None else bool(data["isolate"])),
         )
 
@@ -335,6 +474,10 @@ class CombinerConfig(BaseModel):
     servers: dict[str, ServerConfig] = Field(default_factory=dict)
     shared_servers: dict[str, SharedServerConfig] = Field(default_factory=dict)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
+    permissions: PermissionPolicy | None = None
+    """Global tool-call permission policy applied to every server, unless a
+    server overrides it.  ``None`` (default) means **off** — no gate, identical
+    to pre-feature behavior.  See :class:`PermissionPolicy`."""
     config_path: str = ""
 
     @classmethod
@@ -360,11 +503,28 @@ class CombinerConfig(BaseModel):
         raw_oauth: dict[str, Any] = raw.get("oauth", {})
         oauth = OAuthConfig.from_dict(raw_oauth) if raw_oauth else OAuthConfig()
 
+        permissions = PermissionPolicy.from_dict(raw.get("permissions"))
+
         return cls(
             servers=servers,
             shared_servers=shared_servers,
             oauth=oauth,
+            permissions=permissions,
             config_path=str(path),
+        )
+
+    def effective_policy(self, server_name: str) -> ResolvedPolicy:
+        """The concrete permission policy for *server_name*.
+
+        Merges the global ``permissions`` with the server's own block and its
+        ``auto_approve`` allow-list.  Cheap to call per request; callers should
+        check :meth:`ResolvedPolicy.is_active` to skip the gate entirely.
+        """
+        srv = self.servers.get(server_name)
+        return _merge_policies(
+            self.permissions,
+            srv.permissions if srv else None,
+            list(srv.auto_approve) if srv else [],
         )
 
     def get_enabled_servers(self) -> dict[str, ServerConfig]:

@@ -21,7 +21,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool
 from fastmcp.tools.tool import ToolResult
 
-from mcp_combiner import nvim_proxy
+from mcp_combiner import nvim_proxy, permissions
 from mcp_combiner.auth import clear_oauth_cache, is_stale_client_error
 from mcp_combiner.connections import AuthenticationError
 from mcp_combiner.runtime import RUNTIME
@@ -351,6 +351,15 @@ class ToolProcessingMiddleware(Middleware):
                 if tool_name.startswith(sname + "_"):
                     call_server = sname
                     break
+
+        # Permission policy gate (tool CALLS only — never publication). Resolve
+        # the effective allow/deny/elicit policy for the owning server; deny or a
+        # declined elicitation short-circuits before the upstream ever runs.
+        if call_server and RUNTIME.config is not None and context.fastmcp_context is not None:
+            policy = RUNTIME.config.effective_policy(call_server)
+            if policy.is_active():
+                local_name = str(tool_name)[len(call_server) + 1 :]
+                await permissions.enforce(context.fastmcp_context, call_server, local_name, policy)
 
         try:
             result = await call_next(context)
