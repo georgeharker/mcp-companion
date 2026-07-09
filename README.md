@@ -183,6 +183,7 @@ format is supported:
 | `auth` | `string\|object` | Authentication config (see below) |
 | `sharedServer` | `string` | Name of a `sharedServers` entry to start before connecting (see below) |
 | `toolFilter` | `string[]` | Glob patterns; only matching tool names are exposed (empty = all) |
+| `permissions` | `object` | Opt-in per-call allow/deny/elicit policy for this server's tools — see [Combiner-side tool-call permissions](#combiner-side-tool-call-permissions) |
 | `isolate` | `boolean` | Give each chat its own upstream MCP session — see [isolate](#isolate--per-chat-sessions) |
 
 ### isolate — per-chat sessions
@@ -796,12 +797,18 @@ before execution:
 #### Approval for external agents
 
 When an external agent reaches the combiner — over ACP (Claude Code, OpenCode via
-CodeCompanion) or as a directly-configured MCP client — **the combiner does not
-approve anything.** This is standard MCP: a server (the combiner is one) executes
-the `tools/call` it receives; **consent is the host/client's responsibility.**
-So tool permissions for these agents are configured **in the agent itself**, not
-in mcp-companion. That governs every tool the agent can reach through the combiner,
-including the `neovim_*` tools.
+CodeCompanion) or as a directly-configured MCP client — **by default the combiner
+does not approve anything.** This is standard MCP: a server (the combiner is one)
+executes the `tools/call` it receives; **consent is the host/client's
+responsibility.** So tool permissions for these agents are normally configured
+**in the agent itself**, not in mcp-companion. That governs every tool the agent
+can reach through the combiner, including the `neovim_*` tools.
+
+> **Opt-in exception:** the combiner *can* enforce its own allow / deny / **elicit**
+> policy on top of the agent's — useful when the agent's model is coarse, when one
+> policy should follow a server across every agent, or when you want an interactive
+> prompt for specific tools regardless of client. Off by default; see
+> [Combiner-side tool-call permissions](#combiner-side-tool-call-permissions).
 
 | Agent | Where permissions live | Docs |
 |---|---|---|
@@ -813,10 +820,10 @@ For example, to make Claude Code *always prompt* before any neovim write/exec
 tool, add an `ask` rule like `mcp__mcp-companion__neovim_edit_buffer` (or a
 broader pattern) in its `settings.json` per the linked docs.
 
-> The combiner's own controls are **exposure**, not approval: per-session server
-> gating (`/mcp-session`, `.mcp-companion.json`) and the `exec` tier being off by
-> default (`native_servers.neovim.expose_exec`). Combine those with the agent's
-> permission rules above.
+> Beyond that opt-in policy, the combiner's controls are **exposure**, not
+> approval: per-session server gating (`/mcp-session`, `.mcp-companion.json`) and
+> the `exec` tier being off by default (`native_servers.neovim.expose_exec`).
+> Combine those with the agent's permission rules above.
 
 ##### Auto-approve spec
 
@@ -835,6 +842,69 @@ broader pattern) in its `settings.json` per the linked docs.
 The built-in `neovim` server defaults to `{ "tier:read", "tier:navigate" }` — so
 reads and navigation auto-approve while writes/exec prompt. Override it, e.g.
 `auto_approve = { "tier:read", "edit_buffer" }` or `auto_approve = true`.
+
+#### Combiner-side tool-call permissions
+
+<p align="center">
+  <img src="docs/assets/permissions-flow.svg" alt="Permission gate: the combiner's on_call_tool resolves the effective policy (global, per-server, and autoApprove merged) and matches the local tool name by precedence deny > elicit > allow > default; with no policy the gate is inactive and skipped. A call resolves to one of three outcomes — deny returns a ToolError and never calls upstream; elicit prompts the user (Allow once / Allow for session, cached / Deny), falling back to elicitUnavailable when the client can't prompt; allow lets the call proceed. Gates tool calls only, never publication; combiner and neovim tools are exempt." width="820">
+</p>
+
+Unlike the agent-side approval above, this is the combiner gating calls **itself** —
+opt-in, and **off by default**. With no `permissions` block anywhere the combiner
+approves nothing of its own and behaves exactly as before this feature existed; add
+one and it enforces an allow / deny / **elicit** policy on the tools you name,
+independent of (and on top of) the agent's own rules.
+
+Configure it globally at the top level of `servers.json` and/or per server (the
+per-server block overrides and extends the global one):
+
+```jsonc
+{
+  "permissions": {                  // global — applies to every server
+    "default": "allow",             // action when no pattern matches (default: allow = off)
+    "elicitUnavailable": "deny"     // fallback when a call resolves to elicit but the
+  },                                //   client can't prompt (default: deny, secure)
+  "mcpServers": {
+    "github": {
+      "url": "…",
+      "permissions": {              // per-server — overrides/extends the global
+        "deny":    ["*_delete", "delete_*"],           // rejected — never runs
+        "elicit":  ["create_*", "merge_*"],            // prompt the user each call
+        "allow":   ["get_*", "list_*", "search_*"]     // always runs
+      }
+    }
+  }
+}
+```
+
+- **Patterns** are globs over the **local** tool name (without the `<server>_`
+  prefix) — the same fnmatch semantics as `toolFilter`.
+- **Precedence** (first match wins): `deny` > `elicit` > `allow` > `default`.
+- **Actions:**
+  - `allow` — the call proceeds.
+  - `deny` — rejected with a `ToolError` (`isError: true`); the upstream server is
+    never invoked.
+  - `elicit` — the combiner prompts the user via MCP elicitation with **Allow
+    once** / **Allow for session** / **Deny**. "Allow for session" is cached per
+    session so the tool isn't re-prompted; a declined or cancelled prompt is a
+    `ToolError`.
+- **`elicitUnavailable`** — when a call resolves to `elicit` but the client has no
+  elicitation capability, apply this instead of hanging on a prompt nobody can
+  answer: `deny` (default, secure) or `allow`. Global or per server.
+- **Scalars inherit.** In a per-server block, `default` / `elicitUnavailable` left
+  unset inherit the global value; the `allow`/`deny`/`elicit` pattern sets are the
+  **union** of global + server (plus the server's `autoApprove` list, which folds
+  into the allow-set).
+
+**Off by default, provably.** With no `permissions` and no per-server block the
+resolved policy is `default: allow` with empty deny/elicit sets — which the
+combiner detects as *inactive* and skips entirely, so the call path is byte-for-byte
+identical to a build without the feature. Turning on a server's `autoApprove` adds
+allow patterns but never activates the gate on its own.
+
+**Scope:** gates tool **calls** only — never tool *publication* (tools still list
+normally). The combiner meta-tools (`combiner__*`) and the built-in `neovim_*`
+tools are exempt.
 
 #### Combiner lifecycle
 
