@@ -98,8 +98,9 @@ triggering a fresh OAuth flow rather than crashing.
 | `mcp-oauth-client-info` | `{server_url}/client_info` | `OAuthClientInformationFull` (dynamic client registration) | Until `client_secret_expires_at` |
 | `mcp-oauth-token-expiry` | `{server_url}/token_expiry` | `{"expires_at": <absolute_timestamp>}` | 1 year |
 
-The `mcp-oauth-token-expiry` sidecar is a combiner-level addition (see [Token Expiry
-Problem](#2-token-expiry-problem-and-sidecar-fix)).
+The `mcp-oauth-token-expiry` record is written and read by FastMCP itself
+(`TokenStorageAdapter`, upstream fix #2862); the combiner only bootstraps a
+refresh when it is absent (see [Token Expiry](#2-token-expiry-fastmcp-persisted)).
 
 ## Auth Selection
 
@@ -133,10 +134,9 @@ Client.__aenter__()  (MCP handshake)
   └→ httpx sends request
       └→ _RefreshTokenOAuth.async_auth_flow(request)
           └→ _initialize()  [first call only]
-              ├→ super()._initialize()
-              │    ├→ Load tokens from disk
-              │    └→ Load client_info from disk
-              │    └→ update_token_expiry(tokens)  ← WRONG (see below)
+              ├→ super()._initialize()  (FastMCP)
+              │    ├→ Load tokens + client_info from disk
+              │    └→ token_expiry_time = get_token_expiry()  (absolute; #2862)
               │
               ├→ _discover_oauth_metadata()
               │    ├→ GET server/.well-known/oauth-protected-resource
@@ -144,10 +144,10 @@ Client.__aenter__()  (MCP handshake)
               │    └→ GET accounts.google.com/.well-known/oauth-authorization-server
               │         → token_endpoint: "https://oauth2.googleapis.com/token"
               │
-              └→ Check sidecar expiry:
-                   ├─ Valid → use cached token
+              └→ Decide (gated on can_refresh_token()):
+                   ├─ Valid + expiry persisted → use cached token
                    ├─ Expired → _proactive_refresh()  (silent HTTP POST)
-                   └─ No sidecar → _proactive_refresh()  (bootstrap)
+                   └─ No persisted expiry → _proactive_refresh()  (one-time bootstrap)
 ```
 
 ### On Token Expiry (during normal operation)
@@ -177,7 +177,7 @@ Request returns 401
       │    └→ Start uvicorn on callback_port (e.g. 9876)
       │    └→ Wait for OAuth redirect with auth code (300s timeout)
       ├→ Exchange code for tokens (POST token_endpoint)
-      └→ Store tokens + persist sidecar expiry
+      └→ Store tokens (FastMCP persists absolute expiry via set_tokens)
 ```
 
 ## Problems Found and Fixes
@@ -212,29 +212,32 @@ For example, ClickUp's proxy at `https://mcp.clickup.com/mcp` correctly discover
 the provider, ~100-200ms). Metadata can change. Cache invalidation would add
 complexity with minimal benefit.
 
-### 2. Token Expiry Problem and Sidecar Fix
+### 2. Token Expiry (FastMCP-persisted)
 
 **Problem**: `expires_in` in the `OAuthToken` is a relative value (e.g. `3600`
-seconds from issuance). The MCP SDK stores it as-is. On reload, FastMCP's
-`_initialize()` recalculates `token_expiry_time = time.time() + expires_in`, making
-a token issued hours ago appear freshly minted. The SDK then sends the expired access
-token, gets a 401, and triggers a full browser re-auth — even though a silent refresh
-would have worked.
+seconds from issuance), stored as-is. Naively recalculating
+`token_expiry_time = time.time() + expires_in` on reload makes a token issued
+hours ago appear freshly minted — so the SDK sends the expired access token, gets
+a 401, and triggers a full browser re-auth even though a silent refresh would work.
 
-**Fix**: The combiner persists an absolute expiry timestamp in a sidecar key
-(`mcp-oauth-token-expiry` collection) alongside the token. On init:
+**Fix (upstream)**: FastMCP's `TokenStorageAdapter` (#2862) persists an **absolute**
+`expires_at` in the `mcp-oauth-token-expiry` collection on every `set_tokens`, and
+`OAuth._initialize()` restores `token_expiry_time` from `get_token_expiry()` — so a
+reloaded token's expiry reflects reality. The combiner used to carry its own
+`_ExpiryAwareAdapter` for this; that is now redundant and has been removed.
 
-1. **Sidecar exists, token not expired** → use cached access token as-is.
-2. **Sidecar exists, token expired** → proactively refresh via `_proactive_refresh()`.
-3. **No sidecar (bootstrap)** → proactively refresh to get a fresh token and
-   establish the sidecar.
+**Combiner's remaining role**: in `_RefreshTokenOAuth._initialize()`, refresh
+proactively when the cached token is expired *or* when no absolute expiry was ever
+persisted (`get_token_expiry()` is `None` — a cache written before #2862). The
+latter is a one-time **bootstrap**: the refresh writes FastMCP's expiry key, so
+subsequent starts read it and don't refresh again (not a loop). Both are gated on
+`can_refresh_token()`, so a token without a refresh_token (e.g. ClickUp's 10-year
+tokens) is left untouched — its 401, if any, drives reauth.
 
 `_proactive_refresh()` POSTs directly to the real token endpoint with
-`grant_type=refresh_token`, updates the context, stores new tokens, and persists the
-sidecar — all during `_initialize()`, before any MCP requests are made.
-
-The sidecar is also updated after every `async_auth_flow()` completion (which covers
-SDK-initiated refreshes and full re-authorizations during normal operation).
+`grant_type=refresh_token`, updates the context, and stores the new tokens (which
+re-persists FastMCP's absolute expiry) — all during `_initialize()`, before any MCP
+requests are made.
 
 ### 3. Concurrent OAuth Callback Server Crash
 
@@ -330,20 +333,14 @@ class _RefreshTokenOAuth(OAuth):
     async def callback_handler(self) -> tuple[str, str | None]
         # Per-port singleton — reuses existing callback server
 
-    async def _save_token_expiry(self) -> None
-        # Persist absolute expiry to sidecar key
-
-    async def _load_token_expiry(self) -> float | None
-        # Load absolute expiry from sidecar key
-
-    async def _proactive_refresh(self) -> None
-        # Direct POST to token endpoint during init
+    async def _proactive_refresh(self) -> _RefreshOutcome
+        # Direct POST to token endpoint (refresh_token grant); SUCCESS/NETWORK/AUTH
 
     async def _initialize(self) -> None
-        # Load tokens, discover metadata, restore/refresh expiry
+        # Load tokens, discover metadata; refresh if expired or no persisted expiry
 
     async def async_auth_flow(self, request) -> AsyncGenerator
-        # Wraps parent to persist sidecar after flow completes
+        # Pre-flight refresh + classify upstream 401s (third-party validator probe)
 
     async def _discover_oauth_metadata(self) -> None
         # RFC 9728 PRM + OAuth AS metadata discovery
@@ -528,7 +525,7 @@ On first launch, the combiner will:
 6. Tokens are exchanged, encrypted, and stored to disk
 
 Subsequent restarts silently refresh the cached token — no browser interaction
-required (see [Token Expiry Problem and Sidecar Fix](#2-token-expiry-problem-and-sidecar-fix)).
+required (see [Token Expiry](#2-token-expiry-fastmcp-persisted)).
 
 ### Step 6: Verify
 
@@ -584,7 +581,8 @@ around:
 
 2. **expires_in treated as absolute on reload** — `calculate_token_expiry()` uses
    `time.time() + expires_in` which is correct at issuance but wrong on reload.
-   Fixed by sidecar expiry persistence.
+   Fixed **upstream** by FastMCP's absolute-expiry persistence (#2862); the
+   combiner only bootstraps a refresh when that record is absent.
 
 3. **uvicorn sys.exit(1) on port conflict** — The OAuth callback server (uvicorn)
    calls `sys.exit(1)` when it can't bind the port, killing the entire process.

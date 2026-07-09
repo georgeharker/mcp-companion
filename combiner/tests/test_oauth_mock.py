@@ -341,22 +341,33 @@ class TestPersistence:
     token when still valid, and refreshes silently when expired."""
 
     async def _expire_persisted_token(self, mock: ServedOAuthMock, token_dir: Path) -> None:
-        """Rewrite the on-disk absolute-expiry sidecar(s) into the past.
+        """Rewrite FastMCP's on-disk absolute-expiry record into the past.
 
-        Two absolute-expiry records live in the ``mcp-oauth-token-expiry``
-        collection: the combiner's own (``_ExpiryAwareAdapter``, key ``expiry``)
-        and FastMCP's built-in one (key ``{server_url}/token_expiry``), which is
-        the one ``OAuth._initialize`` restores ``token_expiry_time`` from.  We
-        expire both so a subsequent instance deterministically sees the cached
-        access token as stale and refreshes — no sleeping."""
-        from mcp_combiner.auth import _ExpiryAwareAdapter, create_encrypted_store
+        FastMCP restores ``token_expiry_time`` from its ``{server_url}/token_expiry``
+        key (collection ``mcp-oauth-token-expiry``); setting it to the past makes a
+        subsequent instance deterministically see the cached access token as stale
+        and refresh — no sleeping."""
+        from mcp_combiner.auth import create_encrypted_store
 
         store = create_encrypted_store(token_dir / "mock")
-        past = {"expires_at": time.time() - 100}
-        for key in (_ExpiryAwareAdapter._EXPIRY_KEY, f"{mock.mcp_url}/token_expiry"):
-            await store.put(
-                key=key, value=past, collection=_ExpiryAwareAdapter._EXPIRY_COLLECTION
-            )
+        await store.put(
+            key=f"{mock.mcp_url}/token_expiry",
+            value={"expires_at": time.time() - 100},
+            collection="mcp-oauth-token-expiry",
+        )
+
+    async def _drop_persisted_expiry(self, mock: ServedOAuthMock, token_dir: Path) -> None:
+        """Delete the absolute-expiry key entirely — simulating a token cache
+        written before FastMCP #2862: tokens present, but no persisted absolute
+        expiry, so the loaded token's stale relative expires_in would otherwise
+        make it look valid."""
+        from mcp_combiner.auth import create_encrypted_store
+
+        store = create_encrypted_store(token_dir / "mock")
+        await store.delete(
+            key=f"{mock.mcp_url}/token_expiry",
+            collection="mcp-oauth-token-expiry",
+        )
 
     async def test_valid_cached_token_reused_without_new_consent(
         self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
@@ -404,3 +415,39 @@ class TestPersistence:
         # The freshly refreshed access token is what reached /mcp in session 2.
         refreshed_access = mock.provider.audit.issued[-1].access_token
         assert refreshed_access in mock.provider.audit.authenticated_mcp_calls()
+
+    async def test_cache_without_persisted_expiry_bootstraps_one_refresh(
+        self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
+    ) -> None:
+        """Migration path: a legacy cache with no persisted absolute expiry
+        triggers exactly ONE silent bootstrap refresh on the next start (the
+        combiner refreshes when ``get_token_expiry()`` is None) — not a browser
+        reauth, and not a loop."""
+        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+
+        # Session 1: consent flow persists tokens + FastMCP's expiry key.
+        oauth1 = _oauth_for(mock, tmp_path)
+        assert await _call_echo(mock, oauth1, "first") == "Echo: first"
+        held_refresh = mock.provider.audit.issued[0].refresh_token
+        assert not mock.provider.audit.token_requests_of("refresh_token")
+
+        # Simulate a pre-#2862 cache: tokens on disk, absolute expiry missing.
+        await self._drop_persisted_expiry(mock, tmp_path)
+
+        # Session 2: fresh instance bootstraps one refresh — no re-consent, even
+        # though the cached access token's clock-time hasn't actually expired.
+        oauth2 = _oauth_for(mock, tmp_path)
+        assert await _call_echo(mock, oauth2, "second") == "Echo: second"
+        assert len(mock.provider.audit.registrations) == 1
+        assert len(mock.provider.audit.authorize_requests) == 1
+        refreshes = mock.provider.audit.token_requests_of("refresh_token")
+        assert len(refreshes) == 1
+        assert refreshes[0].refresh_token == held_refresh
+        bootstrapped = mock.provider.audit.issued[-1].access_token
+        assert bootstrapped in mock.provider.audit.authenticated_mcp_calls()
+
+        # Session 3: the bootstrap refresh re-persisted a real absolute expiry, so
+        # this start does NOT refresh again — proves it's one-time, not a loop.
+        oauth3 = _oauth_for(mock, tmp_path)
+        assert await _call_echo(mock, oauth3, "third") == "Echo: third"
+        assert len(mock.provider.audit.token_requests_of("refresh_token")) == 1

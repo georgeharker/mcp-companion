@@ -30,7 +30,6 @@ import anyio
 import httpx
 from cryptography.fernet import Fernet
 from fastmcp.client.auth import OAuth
-from fastmcp.client.auth.oauth import TokenStorageAdapter
 from fastmcp.client.oauth_callback import OAuthCallbackResult
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
 from key_value.aio.protocols import AsyncKeyValue
@@ -198,85 +197,6 @@ def create_encrypted_store(storage_dir: Path) -> AsyncKeyValue:
 _GOOGLE_ACCOUNTS_HOST = "accounts.google.com"
 
 
-class _ExpiryAwareAdapter(TokenStorageAdapter):
-    """TokenStorageAdapter that persists absolute token expiry alongside tokens.
-
-    The MCP SDK stores ``OAuthToken.expires_in`` (a relative duration from
-    issuance) and recalculates ``token_expiry_time`` as
-    ``time.time() + expires_in`` on every load.  After a combiner restart this
-    makes an old token appear freshly minted.
-
-    We intercept ``set_tokens`` / ``get_tokens`` to maintain a separate
-    ``expires_at`` (absolute epoch seconds) in the same key-value store.  On
-    load, ``get_tokens`` returns a token whose ``expires_in`` is relative to
-    *now*, so the SDK's ``update_token_expiry`` produces the correct absolute
-    expiry.  When no stored expiry exists the token is returned with
-    ``expires_in=-1``, causing ``is_token_valid()`` → ``False`` and triggering
-    a proactive refresh in ``_initialize``.
-
-    The grace window (set by ``_apply_network_grace_window``) mutates
-    ``token_expiry_time`` directly in memory without calling ``set_tokens``,
-    so it is intentionally not persisted here.
-    """
-
-    _EXPIRY_COLLECTION = "mcp-oauth-token-expiry"
-    _EXPIRY_KEY = "expiry"
-
-    def __init__(self, async_key_value: AsyncKeyValue, server_url: str) -> None:
-        super().__init__(async_key_value, server_url)
-        self._kv = async_key_value
-        self._url = server_url
-
-    async def set_tokens(self, tokens: OAuthToken) -> None:
-        await super().set_tokens(tokens)
-        if tokens.expires_in is not None:
-            expires_at = time.time() + tokens.expires_in
-            await self._kv.put(
-                key=self._EXPIRY_KEY,
-                value={"expires_at": expires_at},
-                collection=self._EXPIRY_COLLECTION,
-                ttl=60 * 60 * 24 * 365,
-            )
-            logger.info(
-                "Persisted absolute token expiry (%.0fs remaining) for %s",
-                tokens.expires_in,
-                self._url,
-            )
-
-    async def get_tokens(self) -> OAuthToken | None:
-        token = await super().get_tokens()
-        if token is None or token.expires_in is None:
-            return token
-        try:
-            data = await self._kv.get(
-                key=self._EXPIRY_KEY,
-                collection=self._EXPIRY_COLLECTION,
-            )
-            if data and "expires_at" in data:
-                remaining = int(data["expires_at"] - time.time())
-                return token.model_copy(update={"expires_in": remaining})
-        except Exception:
-            logger.debug("Failed to load persisted token expiry", exc_info=True)
-        # No stored absolute expiry (first run after deploy, or cleared cache).
-        # Only force expires_in=-1 when the token has a refresh_token: that
-        # triggers a proactive refresh in _initialize, which will store a real
-        # absolute expiry for future restarts, at the cost of one extra round-trip.
-        # Without a refresh_token (e.g. ClickUp issues 10-year tokens) there is
-        # no way to silently recover from expiry, so forcing -1 would cause an
-        # immediate browser reauth for a token that is almost certainly still
-        # valid.  Return it unchanged instead; a 401 from the server is the
-        # correct trigger in that case.
-        if token.refresh_token:
-            return token.model_copy(update={"expires_in": -1})
-        logger.debug(
-            "No stored absolute expiry for %s and no refresh_token — "
-            "using original expires_in (%ds) to avoid unnecessary reauth",
-            self._url,
-            token.expires_in,
-        )
-        return token
-
-
 class _RefreshTokenOAuth(OAuth):
     """OAuth subclass that ensures a ``refresh_token`` is issued where possible.
 
@@ -300,26 +220,6 @@ class _RefreshTokenOAuth(OAuth):
     # piggy-backs on the existing server instead of launching a duplicate.
     _active_flows: ClassVar[dict[int, tuple[anyio.Event, OAuthCallbackResult]]] = {}
     _flow_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
-
-    def __init__(
-        self, *args: Any, _sidecar_store: AsyncKeyValue | None = None, **kwargs: Any
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        # Replace FastMCP's plain TokenStorageAdapter with our expiry-aware
-        # subclass so that set_tokens/get_tokens handle absolute expiry
-        # transparently — no separate sidecar state on _RefreshTokenOAuth needed.
-        # _sidecar_store is the same AsyncKeyValue passed as token_storage so
-        # both token data and the expiry entry share one encrypted store.
-        # When None (direct construction without _build_oauth, e.g. some tests)
-        # the adapter is not replaced; the first-request forced refresh handles
-        # the missing absolute expiry safely.
-        if _sidecar_store is not None and self._bound:
-            adapter = _ExpiryAwareAdapter(
-                async_key_value=_sidecar_store,
-                server_url=self.mcp_url,
-            )
-            self.token_storage_adapter = adapter
-            self.context.storage = adapter
 
     async def callback_handler(self) -> tuple[str, str | None]:
         """Handle OAuth callback, reusing an existing server if one is active.
@@ -421,8 +321,8 @@ class _RefreshTokenOAuth(OAuth):
         """Refresh the access token proactively using the refresh_token.
 
         This is called during ``_initialize()`` when we have cached tokens
-        that ``_ExpiryAwareAdapter`` reports as expired (or unknown expiry).
-        Instead of waiting for the SDK's
+        that FastMCP's persisted expiry reports as expired (or with no absolute
+        expiry persisted yet).  Instead of waiting for the SDK's
         ``async_auth_flow()`` to discover the token is stale (which can be
         unreliable — e.g. the MCP proxy may not validate token expiry), we
         send the refresh request immediately and update the context.
@@ -525,8 +425,8 @@ class _RefreshTokenOAuth(OAuth):
         grace combiners a transient outage within one combiner-process lifetime;
         persisting would propagate the bumped value across restarts and trick
         ``_initialize()`` into trusting an expiry the access token doesn't
-        actually have at the OAuth provider.  ``_ExpiryAwareAdapter.set_tokens``
-        is only called via ``ctx.storage.set_tokens``, which ``_apply_network_grace_window``
+        actually have at the OAuth provider.  The persisted absolute expiry is
+        only written via ``ctx.storage.set_tokens``, which ``_apply_network_grace_window``
         never invokes — so the on-disk record always reflects the most recent
         *real* refresh response.
         """
@@ -555,15 +455,14 @@ class _RefreshTokenOAuth(OAuth):
 
         Fixes two upstream issues:
 
-        1. **Stale ``expires_in``**: The upstream ``_initialize()`` recalculates
-           ``token_expiry_time`` as ``time.time() + expires_in`` — but
-           ``expires_in`` is a *relative* value from the original token response
-           (e.g. 3600 s).  When loaded from disk hours later the token appears
-           freshly minted, so ``is_token_valid()`` returns ``True`` and the SDK
-           sends the expired access token instead of refreshing first.
-           ``_ExpiryAwareAdapter.get_tokens`` corrects ``expires_in`` to be
-           relative to *now*, so ``super()._initialize()`` produces the right
-           ``token_expiry_time`` without any post-processing here.
+        1. **Stale ``expires_in``**: ``OAuthToken.expires_in`` is a *relative*
+           value from the original token response (e.g. 3600 s); naively doing
+           ``time.time() + expires_in`` on reload makes an old token look freshly
+           minted.  FastMCP (#2862) fixes this by persisting an absolute
+           ``expires_at`` side key and restoring ``token_expiry_time`` from
+           ``get_token_expiry()`` in ``super()._initialize()``.  When that key is
+           absent (a cache written before #2862) we bootstrap a single refresh
+           below to establish it.
 
         2. **Missing OAuth metadata**: The upstream ``_initialize()`` restores
            tokens and client info from disk but **not** the OAuth AS metadata.
@@ -588,10 +487,20 @@ class _RefreshTokenOAuth(OAuth):
                     exc_info=True,
                 )
 
-        # _ExpiryAwareAdapter.get_tokens already corrected expires_in, so
-        # is_token_valid() now reflects reality.  Refresh if expired but
-        # refreshable; apply a grace window on transient network failure.
-        if ctx.current_tokens and not ctx.is_token_valid() and ctx.can_refresh_token():
+        # FastMCP restores token_expiry_time from its own absolute-expiry side
+        # key (get_token_expiry), so is_token_valid() reflects reality.  Refresh
+        # when expired, OR when no absolute expiry was ever persisted (a cache
+        # written before FastMCP #2862): the loaded token's stale relative
+        # expires_in can otherwise make it look valid, so refresh once to
+        # establish a real expiry.  Only when refreshable — a token without a
+        # refresh_token (e.g. ClickUp's 10-year tokens) can't recover silently.
+        needs_bootstrap = (
+            ctx.current_tokens is not None
+            and await self.token_storage_adapter.get_token_expiry() is None
+        )
+        if ctx.current_tokens and ctx.can_refresh_token() and (
+            not ctx.is_token_valid() or needs_bootstrap
+        ):
             outcome = await self._proactive_refresh()
             if outcome == _RefreshOutcome.NETWORK_ERROR:
                 await self._apply_network_grace_window()
@@ -1195,7 +1104,6 @@ def _build_oauth(
         scopes=scope_str,
         client_name=f"mcp-combiner ({server_name})",
         token_storage=storage,
-        _sidecar_store=storage,  # same store, separate collection
         client_id=client_id,
         client_secret=client_secret,
         client_metadata_url=client_metadata_url,
