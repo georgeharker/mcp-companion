@@ -34,6 +34,7 @@ dev = [
     "pytest>=8.0",
     "pytest-anyio>=0.0.0",
     "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.4",
     "ruff>=0.8",
     "mypy>=1.10",
 ]
@@ -63,6 +64,10 @@ exclude = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Backstop against a hung test wedging CI for hours: any test exceeding this
+# fails (with a stack dump) instead of blocking. Well above any real test —
+# it exists to catch infinite hangs, not slow tests.
+timeout = 300
 markers = [
     "e2e: needs real OS resources the nix build sandbox forbids — spawns real subprocesses (combiner / mock upstreams) and/or binds a loopback socket (uvicorn); runs in ci.yml on a real runner, excluded from `flake check`",
 ]

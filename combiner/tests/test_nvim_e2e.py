@@ -26,12 +26,15 @@ from pathlib import Path
 
 import httpx
 import pytest
+from conftest import free_port
 from fastmcp import Client
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PLUGIN_ROOT = _REPO_ROOT  # rtp root (contains lua/)
 _COMBINER_DIR = _REPO_ROOT / "combiner"
-_PORT = 9743
+# A free port, not a fixed one — a hardcoded port collides with a leftover
+# process, a parallel run, or a live combiner and wedges the spawn/health poll.
+_PORT = free_port()
 _TOKEN = "abcdef01-2345-6789-abcd-ef0123456789"
 
 # e2e: spawns a real combiner and reaches nvim over loopback — excluded from the
@@ -126,7 +129,7 @@ async def test_tokenless_client_must_name_instance() -> None:
     """
     import tempfile as _tf
 
-    port = 9745
+    port = free_port()  # not a fixed port (9745 also happens to be svg-mcp's)
     token = "11111111-2222-3333-4444-555555555555"  # never bound on purpose
     tmpdir = _tf.mkdtemp(prefix="mcpc-tokenless-")
     cfg = os.path.join(tmpdir, "servers.json")
