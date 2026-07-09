@@ -687,7 +687,8 @@ entirely**. The flake exposes three packages:
 
 - `mcp-combiner` — a Python venv with the combiner and its deps (`bin/python`, `bin/mcp-combiner`).
 - `mcp-combiner-bin` — the `mcp-combiner` console script as a standalone app (this is `default`,
-  i.e. what `nix run` executes).
+  i.e. what `nix run` executes). Since v0.8.0 the bare binary is the **control CLI**
+  (`nix run . -- status`); serving takes the explicit flag: `nix run . -- --mcp --config …`.
 - `mcp-companion-nvim` — the Lua/Neovim plugin (no Python).
 
 Wire it up with `combiner.command`, pointing at the console script (the natural front door —

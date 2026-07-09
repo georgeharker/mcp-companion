@@ -127,7 +127,11 @@
               src = ./combiner;
               nativeBuildInputs = [ virtualenv-test ];
               buildPhase = ''
-                pytest -q
+                # Hermetic (unit) tier only: the e2e tier spawns real combiner and
+                # mock-server subprocesses and reaches them over loopback, which the
+                # nix build sandbox does not permit — those run in ci.yml on a real
+                # runner (scripts/test.sh e2e).
+                pytest -q -m "not e2e"
                 # Mirror the project's mypy policy (ci.yml): strict is already
                 # enabled in pyproject [tool.mypy] and scoped to the package;
                 # the test suite is intentionally not strict-typed.
