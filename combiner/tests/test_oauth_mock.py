@@ -73,9 +73,7 @@ async def oauth_mock() -> AsyncIterator[Callable[..., object]]:
     async def make(config: MockOAuthConfig | None = None) -> ServedOAuthMock:
         port = free_port()
         issuer = f"http://127.0.0.1:{port}"
-        provider = MockOAuthProvider(
-            resource_url=f"{issuer}/mcp", issuer_url=issuer, config=config
-        )
+        provider = MockOAuthProvider(resource_url=f"{issuer}/mcp", issuer_url=issuer, config=config)
         mcp_srv, _state = build_server("mock", "http", oauth=provider)
         app = provider.guard(mcp_srv.http_app())
         server = uvicorn.Server(

@@ -498,8 +498,10 @@ class _RefreshTokenOAuth(OAuth):
             ctx.current_tokens is not None
             and await self.token_storage_adapter.get_token_expiry() is None
         )
-        if ctx.current_tokens and ctx.can_refresh_token() and (
-            not ctx.is_token_valid() or needs_bootstrap
+        if (
+            ctx.current_tokens
+            and ctx.can_refresh_token()
+            and (not ctx.is_token_valid() or needs_bootstrap)
         ):
             outcome = await self._proactive_refresh()
             if outcome == _RefreshOutcome.NETWORK_ERROR:

@@ -910,8 +910,7 @@ class MockOAuthProvider:
 
     async def _send_401(self, send: Send) -> None:
         www_auth = (
-            f'Bearer resource_metadata='
-            f'"{self.issuer_url}/.well-known/oauth-protected-resource"'
+            f'Bearer resource_metadata="{self.issuer_url}/.well-known/oauth-protected-resource"'
         )
         body = json.dumps({"error": "invalid_token"}).encode()
         await send(
@@ -989,9 +988,7 @@ def main(argv: list[str] | None = None) -> None:
         import uvicorn
 
         issuer = f"http://{args.host}:{args.port}"
-        provider = MockOAuthProvider(
-            resource_url=f"{issuer}/mcp", issuer_url=issuer
-        )
+        provider = MockOAuthProvider(resource_url=f"{issuer}/mcp", issuer_url=issuer)
         mcp_srv, _state = build_server(args.name, args.transport, specs, state_dir, provider)
         app = provider.guard(mcp_srv.http_app())
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
