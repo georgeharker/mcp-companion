@@ -50,7 +50,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
+import hashlib
+import itertools
 import json
 import os
 import sys
@@ -70,7 +73,8 @@ from pydantic import PrivateAttr
 
 if TYPE_CHECKING:
     from starlette.requests import Request
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, RedirectResponse
+    from starlette.types import Receive, Scope, Send
 
 _PARAM_TYPES = ("string", "integer", "number", "boolean")
 
@@ -337,6 +341,7 @@ class MockServer:
         transport: str,
         specs: list[ToolSpec] | None = None,
         state_dir: Path | None = None,
+        oauth: MockOAuthProvider | None = None,
     ) -> None:
         self.state = MockState(server_name=name, transport=transport, state_dir=state_dir)
         if state_dir is not None:
@@ -344,11 +349,17 @@ class MockServer:
         self.mcp = FastMCP(name)
         self.mcp.add_middleware(_SessionTrackingMiddleware(self.state))
         self._tools: dict[str, MockTool] = {}
+        # Optional OAuth authorization-server capability (additive; only the
+        # extra .well-known / register / authorize / token routes are added —
+        # the tool catalog and its publication behaviour are untouched).
+        self.oauth = oauth
 
         for spec in specs if specs is not None else _default_specs():
             self._add(spec)
         self._register_builtins()
         self._register_routes()
+        if oauth is not None:
+            oauth.register_routes(self.mcp)
 
     # -- catalog control ----------------------------------------------------
 
@@ -562,14 +573,369 @@ class MockServer:
             return _JSONResponse({"ok": True})
 
 
+# ── OAuth authorization-server capability (additive) ──────────────────
+#
+# Layers a minimal, self-validating OAuth 2.1 authorization server onto the
+# mock so tests can exercise the combiner's *real* _RefreshTokenOAuth
+# end-to-end and assert the exact access / refresh tokens given to, and
+# received back from, the upstream MCP server.  None of this touches the tool
+# catalog or its publication behaviour — it only adds .well-known / register /
+# authorize / token HTTP routes plus a bearer guard on /mcp.
+
+
+@dataclass
+class MockOAuthConfig:
+    """Knobs controlling how the mock provider issues and validates tokens."""
+
+    issue_refresh_token: bool = True
+    """Include a ``refresh_token`` in the initial authorization_code response."""
+
+    rotate_refresh_token: bool = True
+    """Mint a *new* refresh_token on each refresh (vs. re-issuing the same one)."""
+
+    include_refresh_on_refresh: bool = True
+    """Include a ``refresh_token`` field at all in refresh responses.
+
+    ``False`` mimics Google, which omits it — the combiner must preserve the
+    original.  When ``False`` it overrides :attr:`rotate_refresh_token`.
+    """
+
+    access_token_ttl: int = 3600
+    """``expires_in`` (seconds) reported for every minted access token."""
+
+    verify_pkce: bool = True
+    """Verify the S256 ``code_verifier`` against the stored ``code_challenge``."""
+
+    require_bearer: bool = True
+    """401 ``/mcp`` requests that lack a currently-valid access token."""
+
+    mcp_path: str = "/mcp"
+    """Path prefix the bearer guard protects."""
+
+
+@dataclass
+class TokenRequest:
+    """One request the mock's token endpoint received."""
+
+    grant_type: str
+    client_id: str | None
+    code: str | None
+    refresh_token: str | None
+    resource: str | None
+    form: dict[str, str]
+
+
+@dataclass
+class IssuedTokens:
+    """One (access, refresh) pair the mock minted, and the grant that caused it."""
+
+    access_token: str
+    refresh_token: str | None
+    grant_type: str
+
+
+@dataclass
+class MockOAuthAudit:
+    """Everything the provider issued / received, for test assertions."""
+
+    registrations: list[dict[str, Any]] = field(default_factory=list)
+    authorize_requests: list[dict[str, str]] = field(default_factory=list)
+    token_requests: list[TokenRequest] = field(default_factory=list)
+    issued: list[IssuedTokens] = field(default_factory=list)
+    # Access token presented on each protected /mcp request (None if absent).
+    bearer_seen: list[str | None] = field(default_factory=list)
+    pkce_failures: int = 0
+
+    def token_requests_of(self, grant_type: str) -> list[TokenRequest]:
+        return [r for r in self.token_requests if r.grant_type == grant_type]
+
+    def authenticated_mcp_calls(self) -> list[str]:
+        """Access tokens that actually reached the protected endpoint."""
+        return [t for t in self.bearer_seen if t is not None]
+
+
+def _s256_challenge(code_verifier: str) -> str:
+    """Compute the S256 PKCE challenge for a verifier (base64url, no padding)."""
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _bearer_from_scope(scope: Scope) -> str | None:
+    for name, value in scope.get("headers", []):
+        if name == b"authorization":
+            decoded = bytes(value).decode("latin-1")
+            if decoded.lower().startswith("bearer "):
+                return decoded[7:]
+            return None
+    return None
+
+
+class MockOAuthProvider:
+    """A minimal, self-validating OAuth 2.1 authorization server for tests.
+
+    Pass an instance to :class:`MockServer` (or :func:`build_server`) to attach
+    its routes, then wrap the resulting ASGI app with :meth:`guard` to enforce
+    bearer auth on ``/mcp``.  The AS advertises *itself* as the authorization
+    server (ClickUp-style), so the combiner treats its 401 as authoritative.
+    """
+
+    def __init__(
+        self,
+        *,
+        resource_url: str,
+        issuer_url: str,
+        config: MockOAuthConfig | None = None,
+    ) -> None:
+        """``resource_url`` is the MCP endpoint (``http://h:p/mcp``); ``issuer_url``
+        is the origin serving the OAuth endpoints (``http://h:p``)."""
+        self.config = config or MockOAuthConfig()
+        self.audit = MockOAuthAudit()
+        self.resource_url = resource_url.rstrip("/")
+        self.issuer_url = issuer_url.rstrip("/")
+
+        self.valid_access_tokens: set[str] = set()
+        self.valid_refresh_tokens: set[str] = set()
+        self.pending_codes: dict[str, dict[str, str]] = {}
+        self.registered_clients: dict[str, dict[str, Any]] = {}
+
+        self._client_counter = itertools.count(1)
+        self._access_counter = itertools.count(1)
+        self._refresh_counter = itertools.count(1)
+        self._code_counter = itertools.count(1)
+
+    # -- minting --------------------------------------------------------
+
+    def seed_refresh_token(self, token: str) -> None:
+        """Register *token* as a valid refresh token (for refresh-only tests)."""
+        self.valid_refresh_tokens.add(token)
+
+    def _mint_access(self) -> str:
+        tok = f"at-{next(self._access_counter)}"
+        self.valid_access_tokens.add(tok)
+        return tok
+
+    def _mint_refresh(self) -> str:
+        tok = f"rt-{next(self._refresh_counter)}"
+        self.valid_refresh_tokens.add(tok)
+        return tok
+
+    def _token_payload(self, grant_type: str, *, issue_refresh: bool) -> dict[str, Any]:
+        access = self._mint_access()
+        refresh: str | None = self._mint_refresh() if issue_refresh else None
+        self.audit.issued.append(
+            IssuedTokens(access_token=access, refresh_token=refresh, grant_type=grant_type)
+        )
+        payload: dict[str, Any] = {
+            "access_token": access,
+            "token_type": "Bearer",
+            "expires_in": self.config.access_token_ttl,
+            "scope": "mock.read mock.write",
+        }
+        if refresh is not None:
+            payload["refresh_token"] = refresh
+        return payload
+
+    # -- route registration --------------------------------------------
+
+    def register_routes(self, mcp: FastMCP) -> None:
+        """Attach the discovery / register / authorize / token routes to *mcp*."""
+        prm_body = {
+            "resource": self.resource_url,
+            "authorization_servers": [self.issuer_url],
+        }
+        as_body = {
+            "issuer": self.issuer_url,
+            "authorization_endpoint": f"{self.issuer_url}/oauth/authorize",
+            "token_endpoint": f"{self.issuer_url}/oauth/token",
+            "registration_endpoint": f"{self.issuer_url}/oauth/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+            "scopes_supported": ["mock.read", "mock.write"],
+        }
+
+        # RFC 9728 discovery — the SDK probes both the path-suffixed and the
+        # bare well-known URLs; register both so discovery succeeds regardless.
+        async def prm(request: Request) -> JSONResponse:
+            from starlette.responses import JSONResponse as _JSONResponse
+
+            return _JSONResponse(prm_body)
+
+        async def asm(request: Request) -> JSONResponse:
+            from starlette.responses import JSONResponse as _JSONResponse
+
+            return _JSONResponse(as_body)
+
+        mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])(prm)
+        mcp.custom_route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])(prm)
+        mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])(asm)
+        mcp.custom_route("/.well-known/openid-configuration", methods=["GET"])(asm)
+
+        @mcp.custom_route("/oauth/register", methods=["POST"])
+        async def register(request: Request) -> JSONResponse:
+            from starlette.responses import JSONResponse as _JSONResponse
+
+            body = await request.json()
+            client_id = f"client-{next(self._client_counter)}"
+            record: dict[str, Any] = {
+                "client_id": client_id,
+                "client_id_issued_at": int(time.time()),
+                "redirect_uris": body.get("redirect_uris", []),
+                "grant_types": body.get("grant_types", ["authorization_code", "refresh_token"]),
+                "response_types": body.get("response_types", ["code"]),
+                "token_endpoint_auth_method": body.get("token_endpoint_auth_method", "none"),
+                "scope": body.get("scope", "mock.read mock.write"),
+            }
+            self.registered_clients[client_id] = record
+            self.audit.registrations.append({"request": body, "client_id": client_id})
+            return _JSONResponse(record, status_code=201)
+
+        @mcp.custom_route("/oauth/authorize", methods=["GET"])
+        async def authorize(request: Request) -> RedirectResponse | JSONResponse:
+            from starlette.responses import JSONResponse as _JSONResponse
+            from starlette.responses import RedirectResponse as _RedirectResponse
+
+            params = {k: str(v) for k, v in request.query_params.items()}
+            self.audit.authorize_requests.append(params)
+
+            redirect_uri = params.get("redirect_uri")
+            if not redirect_uri:
+                return _JSONResponse({"error": "invalid_request"}, status_code=400)
+
+            code = f"code-{next(self._code_counter)}"
+            self.pending_codes[code] = {
+                "client_id": params.get("client_id", ""),
+                "code_challenge": params.get("code_challenge", ""),
+                "redirect_uri": redirect_uri,
+            }
+            sep = "&" if "?" in redirect_uri else "?"
+            location = f"{redirect_uri}{sep}code={code}"
+            if state := params.get("state"):
+                location += f"&state={state}"
+            return _RedirectResponse(location, status_code=302)
+
+        @mcp.custom_route("/oauth/token", methods=["POST"])
+        async def token(request: Request) -> JSONResponse:
+            form = {k: str(v) for k, v in (await request.form()).items()}
+            grant_type = form.get("grant_type", "")
+            self.audit.token_requests.append(
+                TokenRequest(
+                    grant_type=grant_type,
+                    client_id=form.get("client_id"),
+                    code=form.get("code"),
+                    refresh_token=form.get("refresh_token"),
+                    resource=form.get("resource"),
+                    form=form,
+                )
+            )
+            if grant_type == "authorization_code":
+                return self._grant_authorization_code(form)
+            if grant_type == "refresh_token":
+                return self._grant_refresh_token(form)
+            from starlette.responses import JSONResponse as _JSONResponse
+
+            return _JSONResponse(
+                {"error": "unsupported_grant_type", "grant_type": grant_type}, status_code=400
+            )
+
+    # -- grant handlers -------------------------------------------------
+
+    def _grant_authorization_code(self, form: dict[str, str]) -> JSONResponse:
+        from starlette.responses import JSONResponse as _JSONResponse
+
+        code = form.get("code", "")
+        pending = self.pending_codes.pop(code, None)
+        if pending is None:
+            return _JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+        if self.config.verify_pkce and pending.get("code_challenge"):
+            verifier = form.get("code_verifier", "")
+            if _s256_challenge(verifier) != pending["code_challenge"]:
+                self.audit.pkce_failures += 1
+                return _JSONResponse(
+                    {"error": "invalid_grant", "detail": "PKCE mismatch"}, status_code=400
+                )
+
+        payload = self._token_payload(
+            "authorization_code", issue_refresh=self.config.issue_refresh_token
+        )
+        return _JSONResponse(payload)
+
+    def _grant_refresh_token(self, form: dict[str, str]) -> JSONResponse:
+        from starlette.responses import JSONResponse as _JSONResponse
+
+        presented = form.get("refresh_token", "")
+        if presented not in self.valid_refresh_tokens:
+            return _JSONResponse(
+                {"error": "invalid_grant", "detail": "unknown refresh_token"}, status_code=400
+            )
+
+        include_refresh = self.config.include_refresh_on_refresh
+        if include_refresh and not self.config.rotate_refresh_token:
+            # Re-issue the *same* refresh token: mint access only, echo old RT.
+            payload = self._token_payload("refresh_token", issue_refresh=False)
+            payload["refresh_token"] = presented
+            self.audit.issued[-1].refresh_token = presented
+        else:
+            payload = self._token_payload("refresh_token", issue_refresh=include_refresh)
+            if include_refresh:
+                # A rotated refresh token invalidates the presented one.
+                self.valid_refresh_tokens.discard(presented)
+        return _JSONResponse(payload)
+
+    # -- bearer enforcement --------------------------------------------
+
+    def guard(self, app: Any) -> Any:
+        """Wrap an ASGI *app* so protected ``/mcp`` requests need a valid bearer."""
+
+        async def wrapped(scope: Scope, receive: Receive, send: Send) -> None:
+            if (
+                scope["type"] == "http"
+                and self.config.require_bearer
+                and self._is_protected(scope.get("path", ""))
+            ):
+                token = _bearer_from_scope(scope)
+                self.audit.bearer_seen.append(token)
+                if token is None or token not in self.valid_access_tokens:
+                    await self._send_401(send)
+                    return
+            await app(scope, receive, send)
+
+        return wrapped
+
+    def _is_protected(self, path: str) -> bool:
+        p = self.config.mcp_path
+        return path == p or path.startswith(p + "/")
+
+    async def _send_401(self, send: Send) -> None:
+        www_auth = (
+            f'Bearer resource_metadata='
+            f'"{self.issuer_url}/.well-known/oauth-protected-resource"'
+        )
+        body = json.dumps({"error": "invalid_token"}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate", www_auth.encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
 def build_server(
     name: str,
     transport: str,
     specs: list[ToolSpec] | None = None,
     state_dir: Path | None = None,
+    oauth: MockOAuthProvider | None = None,
 ) -> tuple[FastMCP, MockState]:
     """Assemble the mock server; returns (FastMCP instance, observable state)."""
-    server = MockServer(name, transport, specs, state_dir)
+    server = MockServer(name, transport, specs, state_dir, oauth)
     return server.mcp, server.state
 
 
@@ -599,6 +965,15 @@ def main(argv: list[str] | None = None) -> None:
         metavar="DIR",
         help="Directory for the persistent boot counter (enables boot_count tracking)",
     )
+    parser.add_argument(
+        "--oauth",
+        action="store_true",
+        help=(
+            "Serve as a self-validating OAuth 2.1 authorization server: adds "
+            ".well-known/register/authorize/token routes and requires a valid "
+            "bearer on /mcp (HTTP transport only)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     specs: list[ToolSpec] | None = None
@@ -607,6 +982,21 @@ def main(argv: list[str] | None = None) -> None:
         specs = parse_tool_specs(text)
 
     state_dir = Path(args.state_dir) if args.state_dir else None
+
+    if args.oauth:
+        if args.transport != "http":
+            parser.error("--oauth requires --transport http")
+        import uvicorn
+
+        issuer = f"http://{args.host}:{args.port}"
+        provider = MockOAuthProvider(
+            resource_url=f"{issuer}/mcp", issuer_url=issuer
+        )
+        mcp_srv, _state = build_server(args.name, args.transport, specs, state_dir, provider)
+        app = provider.guard(mcp_srv.http_app())
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+        return
+
     mcp_srv, _state = build_server(args.name, args.transport, specs, state_dir)
 
     if args.transport == "stdio":
