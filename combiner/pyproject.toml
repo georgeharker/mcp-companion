@@ -64,7 +64,7 @@ exclude = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "e2e: spawns real subprocesses (combiner / mock upstreams); slower than unit tests",
+    "e2e: needs real OS resources the nix build sandbox forbids — spawns real subprocesses (combiner / mock upstreams) and/or binds a loopback socket (uvicorn); runs in ci.yml on a real runner, excluded from `flake check`",
 ]
 
 [tool.ruff]

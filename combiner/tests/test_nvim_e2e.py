@@ -34,7 +34,13 @@ _COMBINER_DIR = _REPO_ROOT / "combiner"
 _PORT = 9743
 _TOKEN = "abcdef01-2345-6789-abcd-ef0123456789"
 
-pytestmark = pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim not installed")
+# e2e: spawns a real combiner and reaches nvim over loopback — excluded from the
+# nix `flake check` hermetic tier (see flake.nix), runs in ci.yml's e2e tier.
+# The skipif keeps it green wherever nvim isn't installed (CI runners included).
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim not installed"),
+]
 
 
 async def _poll_health(timeout: float = 20.0) -> None:

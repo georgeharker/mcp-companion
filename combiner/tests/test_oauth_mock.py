@@ -17,9 +17,12 @@ right ones — the thing you actually rely on when the combiner manages OAuth:
 - **Persistence across restart** — a fresh OAuth instance reuses cached
   tokens/registration and refreshes silently, with no second consent.
 
-These are hermetic (no subprocess, no browser) and run in the ``not e2e`` tier:
-the browser-open + callback-server — the only part unrunnable in CI — is the
-sole thing stubbed; the real token exchange runs against the mock.
+These stub only the browser-open + callback-server (the sole part unrunnable in
+CI); the real token exchange runs against the mock served by uvicorn on a
+loopback port.  Binding that real loopback socket is what the **nix build
+sandbox forbids** — so despite having no subprocess or browser, they carry the
+``e2e`` marker and run in ci.yml's e2e tier on a real runner, not in the
+hermetic ``not e2e`` tier the nix ``flake check`` runs (see flake.nix).
 """
 
 from __future__ import annotations
@@ -46,6 +49,11 @@ from mcp_combiner.mockserver import (
     MockOAuthProvider,
     build_server,
 )
+
+# These tests bind a real loopback socket (uvicorn), which the nix build sandbox
+# forbids — so they run in the e2e tier (ci.yml, real runner), not `flake check`.
+pytestmark = pytest.mark.e2e
+
 
 # ── in-process HTTP serving of the mock OAuth server ───────────────
 
