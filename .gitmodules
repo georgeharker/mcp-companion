@@ -1,3 +1,6 @@
 [submodule "claude-mcp-combiner"]
-	path = claude-mcp-combiner
+	path = plugins/claude-mcp-combiner
 	url = https://github.com/georgeharker/claude-mcp-combiner.git
+[submodule "plugins/opencode-mcp-combiner"]
+	path = plugins/opencode-mcp-combiner
+	url = https://github.com/georgeharker/opencode-mcp-combiner.git
