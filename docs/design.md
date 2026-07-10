@@ -204,7 +204,13 @@ Key properties:
   read-compat aliases for tests.
 - **Entry point**: `mcp-combiner <command>` is a control CLI (`ctl.py`,
   httpx REST + short-lived fastmcp sessions); `mcp-combiner --mcp --config …`
-  serves. Bare `--config` still serves with a deprecation warning.
+  serves. Bare `--config` still serves with a deprecation warning. `start` /
+  `stop` / `restart` are the exception to "control an already-running combiner":
+  they refcount the combiner's *own* process via sharedserver (`use` / `unuse` /
+  `admin stop --force` + `use`), tied to the calling shell's PID — the native-CLI
+  equivalent of the Claude plugin's `start.sh` hook. `restart` mirrors
+  `:MCPRestart` (refcount-guarded, `--force` to bounce shared clients);
+  `restart-server` mirrors `:MCPRestartServer` (one upstream, over the meta-tool).
 - **Self-healing**: `connections.ConnectionManager` health-checks every 30s,
   reconnects with capped backoff (15s max for local upstreams), and after 3
   consecutive failed re-opens hard-restarts a sharedserver-backed process
@@ -236,7 +242,7 @@ mcp-companion.nvim/
 │   ├── pyproject.toml
 │   ├── mcp_combiner/
 │   │   ├── __main__.py         CLI parse/dispatch: control commands vs --mcp serve
-│   │   ├── ctl.py              Control CLI ops (status/enable/restart/session/…)
+│   │   ├── ctl.py              Control CLI ops (start/stop/restart/status/enable/restart-server/…)
 │   │   ├── asgi.py             ServeOptions + TokenRewriteMiddleware + app factory
 │   │   ├── server.py           create_combiner wiring + lifespan
 │   │   ├── runtime.py          CombinerRuntime — ALL mutable state, behind methods

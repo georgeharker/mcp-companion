@@ -86,11 +86,14 @@ design notes live in
 the same operations surface the Neovim plugin exposes:
 
 ```bash
+mcp-combiner start                     # launch the combiner via sharedserver, attached to this shell
+mcp-combiner stop                      # drop this shell's reference (decref)
+mcp-combiner restart                   # bounce the whole combiner process (like :MCPRestart)
 mcp-combiner status                    # glyph table: server, state, transport
 mcp-combiner health --json             # raw /health payload
 mcp-combiner enable <server>           # mount + connect
 mcp-combiner disable <server>          # unmount + disconnect
-mcp-combiner restart <server>          # hard bounce for combiner-owned processes
+mcp-combiner restart-server <server>   # hard bounce one upstream (like :MCPRestartServer)
 mcp-combiner reload                    # re-read config, apply the diff
 mcp-combiner tools                     # list advertised tools
 mcp-combiner call myserver_echo --args '{"message": "hi"}'
@@ -99,13 +102,45 @@ mcp-combiner session disable <server> --token <uuid>     # per-chat filter (WIP)
 mcp-combiner session allow --servers a,b --token <uuid>  # allow-list (WIP)
 ```
 
+#### Process lifecycle: `start` / `stop` / `restart`
+
+`start`, `stop`, and `restart` manage the **combiner's own process** through
+[sharedserver](https://github.com/georgeharker/sharedserver) — the native-CLI
+equivalent of the Claude plugin's `SessionStart` hook. They are distinct from
+`enable`/`disable`/`restart-server`, which drive an *already-running* combiner
+over its control API.
+
+- **`start`** runs `sharedserver use` to launch (or attach to) the combiner and
+  ties the reference to the **calling shell** — not the short-lived CLI process —
+  so the combiner outlives the command and lives as long as your shell (or until
+  `stop`). It is idempotent and refcounted: a `start` from a second shell (or a
+  Neovim/Claude client) just adds a reference to the same process. `--wait`
+  (default) polls `/health` until ready.
+- **`stop`** runs `sharedserver unuse` to drop **this shell's** reference. The
+  combiner keeps running until the last client detaches, then stops after the
+  grace period (`--grace-period`, default `30m`).
+- **`restart`** bounces the whole process: `sharedserver admin stop --force`
+  (graceful SIGTERM → SIGKILL, so the combiner decrefs its own downstreams first)
+  then a fresh `use`. If other clients are attached it refuses unless you pass
+  `--force` (they reconnect automatically) — mirroring `:MCPRestart` /
+  `:MCPRestart!`. `restart-server <name>`, by contrast, only bounces that one
+  upstream and never the combiner.
+
+`start`/`restart` accept `--config` (default: `$MCP_COMBINER_CONFIG`,
+`$CLAUDE_MCP_COMBINER_CONFIG`, then standard locations), `--name` (sharedserver
+name, default `mcp-combiner`), `--port`/`--host`, `--grace-period`, `--pid`
+(override the shell PID the reference attaches to), `--log-file`, and `--dry-run`
+(print the sharedserver command instead of running it). `start` also forwards
+extra serve flags after `--`, e.g.
+`mcp-combiner start --config … -- --no-output-validation`.
+
 > **WIP:** the session filter verbs (`enable`/`disable`/`allow`/`clear`) are a
 > work in progress — CLI invocations are transient sessions, and
 > token-addressed filters are recorded but not yet applied while the
 > session-addressing rework lands. `session status` is fully functional.
 
-All commands accept `--host`/`--port` (default `127.0.0.1:9741`) or `--url`,
-and `--json` for scripting.
+The read/drive verbs (`status`, `health`, `enable`, …) accept `--host`/`--port`
+(default `127.0.0.1:9741`) or `--url`, and `--json` for scripting.
 
 > **Migration note:** the server is now started with an explicit `--mcp`
 > flag (`mcp-combiner --mcp --config … --port …`). The historical bare

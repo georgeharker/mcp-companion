@@ -1,9 +1,13 @@
 """CLI entry point for mcp-combiner.
 
 ``mcp-combiner <command>`` is a control CLI for a running combiner
-(status/enable/disable/restart/reload/session/call/tools — see ctl.py);
-``mcp-combiner --mcp --config …`` runs the combiner server itself (the
-historical bare invocation, which still works with a deprecation warning).
+(start/stop/restart/status/enable/disable/restart-server/reload/session/call/tools
+— see ctl.py); ``mcp-combiner --mcp --config …`` runs the combiner server itself
+(the historical bare invocation, which still works with a deprecation warning).
+
+``start``/``stop``/``restart`` are process-lifecycle verbs that refcount the
+combiner's own process via sharedserver (attached to the calling shell); the
+rest drive an already-running combiner over REST/MCP.
 """
 
 from __future__ import annotations

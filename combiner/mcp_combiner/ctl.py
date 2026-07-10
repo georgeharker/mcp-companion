@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import shutil
 import sys
 from typing import Any
 
@@ -63,6 +65,324 @@ def _emit(args: argparse.Namespace, data: Any) -> None:
         print(data)
     else:
         print(json.dumps(data, indent=2, default=str))
+
+
+# ── start / stop: combiner process lifecycle via sharedserver ──────────
+#
+# These two verbs are process-lifecycle (they shell out to the ``sharedserver``
+# binary to refcount the *combiner's own* process), unlike the other verbs which
+# drive an already-running combiner over REST/MCP. They are the native-CLI
+# equivalent of the Claude plugin's ``hooks/start.sh``.
+#
+# The reference is tied to the *calling shell* (this CLI process's parent), NOT
+# to the short-lived ``mcp-combiner`` process — so the combiner outlives
+# ``mcp-combiner start`` and stops when the shell exits (or on ``mcp-combiner
+# stop``). sharedserver's ``--pid`` default is the immediate caller, which here
+# would be this CLI and would drop the reference the instant we return, so we
+# always pass ``--pid`` explicitly.
+
+
+def _resolve_config(explicit: str | None) -> str | None:
+    """Resolve the servers.json path: explicit flag, then env, then standard files.
+
+    Mirrors the plugin ``start.sh`` search order so an existing plugin setup's
+    env/config is picked up by the CLI verb too.
+    """
+    if explicit:
+        return explicit
+    for env in ("MCP_COMBINER_CONFIG", "CLAUDE_MCP_COMBINER_CONFIG"):
+        val = os.environ.get(env)
+        if val:
+            return val
+    user = os.environ.get("USER", "")
+    candidates = [
+        os.path.expanduser(f"~/.cache/secrets/{user}.mcpservers.json"),
+        os.path.expanduser("~/.config/mcp-combiner/servers.json"),
+        os.path.expanduser("~/.config/mcp/servers.json"),
+    ]
+    return next((c for c in candidates if os.path.isfile(c)), None)
+
+
+def _combiner_serve_argv(config: str, host: str, port: int, extra: list[str]) -> list[str]:
+    """Build the ``mcp-combiner --mcp …`` serve command sharedserver will run.
+
+    Prefers the installed ``mcp-combiner`` entry point (absolute path, so it works
+    detached from the current venv activation); falls back to ``python -m
+    mcp_combiner`` using the running interpreter.
+    """
+    exe = shutil.which("mcp-combiner")
+    base = [exe] if exe else [sys.executable, "-m", "mcp_combiner"]
+    return [*base, "--mcp", "--config", config, "--port", str(port), "--host", host, *extra]
+
+
+def _build_start_cmd(
+    binary: str,
+    *,
+    name: str,
+    pid: int,
+    grace_period: str,
+    serve_argv: list[str],
+    log_file: str | None = None,
+) -> list[str]:
+    """Build the ``sharedserver use`` argv that launches the combiner attached to *pid*."""
+    cmd = [
+        binary,
+        "use",
+        name,
+        "--pid",
+        str(pid),
+        "--grace-period",
+        grace_period,
+        "--metadata",
+        f"cli-{pid}",
+    ]
+    if log_file:
+        cmd += ["--log-file", log_file]
+    cmd.append("--")
+    cmd += serve_argv
+    return cmd
+
+
+def _build_stop_cmd(binary: str, *, name: str, pid: int) -> list[str]:
+    """Build the ``sharedserver unuse`` argv that drops *pid*'s reference."""
+    return [binary, "unuse", name, "--pid", str(pid)]
+
+
+async def _poll_health(host: str, port: int, timeout: float) -> bool:
+    """Poll the combiner's /health until it returns 200 or *timeout* expires."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    url = f"http://{host}:{port}/health"
+    async with httpx.AsyncClient() as http:
+        while time.monotonic() < deadline:
+            try:
+                r = await http.get(url, timeout=2.0)
+                if r.status_code == 200:
+                    return True
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0.5)
+    return False
+
+
+async def cmd_start(args: argparse.Namespace) -> int:
+    from mcp_combiner.sharedserver import _require_binary
+
+    config = _resolve_config(args.config)
+    if not config:
+        print(
+            "start: no config file found. Pass --config PATH, set MCP_COMBINER_CONFIG, "
+            "or create ~/.config/mcp-combiner/servers.json.",
+            file=sys.stderr,
+        )
+        return 2
+    if not os.path.isfile(config):
+        print(f"start: config file not found: {config}", file=sys.stderr)
+        return 2
+
+    # Attach the reference to the calling shell (this CLI's parent), not the CLI.
+    pid = args.pid if args.pid is not None else os.getppid()
+
+    extra = list(args.serve_args or [])
+    if extra and extra[0] == "--":  # argparse REMAINDER keeps the separator
+        extra = extra[1:]
+    serve_argv = _combiner_serve_argv(config, args.host, args.port, extra)
+
+    try:
+        binary = _require_binary()
+    except FileNotFoundError as exc:
+        print(f"start: {exc}", file=sys.stderr)
+        return 1
+
+    cmd = _build_start_cmd(
+        binary,
+        name=args.name,
+        pid=pid,
+        grace_period=args.grace_period,
+        serve_argv=serve_argv,
+        log_file=args.log_file,
+    )
+    if args.dry_run:
+        print(" ".join(cmd))
+        return 0
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    out, err = await proc.communicate()
+    if proc.returncode != 0:
+        print(f"start: sharedserver use failed (exit {proc.returncode})", file=sys.stderr)
+        if err and err.strip():
+            print("  " + err.decode().strip(), file=sys.stderr)
+        return 1
+    if out and out.strip():
+        print(out.decode().strip())
+
+    url = f"http://{args.host}:{args.port}/mcp"
+    if args.wait:
+        ready = await _poll_health(args.host, args.port, 30.0)
+        state = "ready" if ready else "starting (not yet healthy)"
+    else:
+        state = "attached"
+    print(f"combiner '{args.name}' {state} — {url} (ref pid {pid}, grace {args.grace_period})")
+    return 0
+
+
+async def cmd_stop(args: argparse.Namespace) -> int:
+    from mcp_combiner.sharedserver import _require_binary
+
+    pid = args.pid if args.pid is not None else os.getppid()
+    try:
+        binary = _require_binary()
+    except FileNotFoundError as exc:
+        print(f"stop: {exc}", file=sys.stderr)
+        return 1
+
+    cmd = _build_stop_cmd(binary, name=args.name, pid=pid)
+    if args.dry_run:
+        print(" ".join(cmd))
+        return 0
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    out, err = await proc.communicate()
+    if proc.returncode != 0:
+        print(f"stop: sharedserver unuse failed (exit {proc.returncode})", file=sys.stderr)
+        if err and err.strip():
+            print("  " + err.decode().strip(), file=sys.stderr)
+        return 1
+    if out and out.strip():
+        print(out.decode().strip())
+    print(
+        f"combiner '{args.name}' reference dropped (pid {pid}); it stops when the last "
+        f"client detaches and the grace period lapses."
+    )
+    return 0
+
+
+async def _sharedserver_refcount(binary: str, name: str) -> int | None:
+    """Current refcount for *name* via ``sharedserver info --json``.
+
+    Returns ``None`` if the server isn't running or the output can't be parsed.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        binary,
+        "info",
+        name,
+        "--json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate()
+    if proc.returncode != 0 or not out:
+        return None
+    try:
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(data, list):  # tolerate an array-shaped payload
+        data = next((d for d in data if isinstance(d, dict) and d.get("name") == name), None)
+    rc = data.get("refcount") if isinstance(data, dict) else None
+    return rc if isinstance(rc, int) else None
+
+
+async def cmd_restart_combiner(args: argparse.Namespace) -> int:
+    """Bounce the whole combiner process (mirrors ``:MCPRestart`` / ``:MCPRestart!``).
+
+    A plain decref would NOT restart a sole-client combiner — it just drops the
+    refcount to 0 and the watcher enters its grace window with the process still
+    running, so a re-``use`` re-attaches the SAME process. Instead we
+    ``admin stop --force`` (SIGTERM, then SIGKILL) so the combiner runs its
+    lifespan shutdown and decrefs its OWN downstreams first, then ``use`` a fresh
+    process attached to the calling shell. Other clients reconnect on their next
+    stream/health cycle.
+    """
+    from mcp_combiner.sharedserver import _require_binary
+
+    try:
+        binary = _require_binary()
+    except FileNotFoundError as exc:
+        print(f"restart: {exc}", file=sys.stderr)
+        return 1
+
+    name = args.name
+    refcount = await _sharedserver_refcount(binary, name)
+    if refcount is not None and refcount > 1 and not args.force:
+        print(
+            f"restart: combiner '{name}' has {refcount} clients attached; restarting "
+            f"bounces the process for all of them. Re-run with --force.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.force and refcount is not None and refcount > 1:
+        print(
+            f"restart: force-restarting '{name}' ({refcount - 1} other client(s) will reconnect)",
+            file=sys.stderr,
+        )
+
+    config = _resolve_config(args.config)
+    if not config:
+        print(
+            "restart: no config file found. Pass --config PATH, set MCP_COMBINER_CONFIG, "
+            "or create ~/.config/mcp-combiner/servers.json.",
+            file=sys.stderr,
+        )
+        return 2
+    if not os.path.isfile(config):
+        print(f"restart: config file not found: {config}", file=sys.stderr)
+        return 2
+
+    pid = args.pid if args.pid is not None else os.getppid()
+    serve_argv = _combiner_serve_argv(config, args.host, args.port, [])
+    stop_cmd = [binary, "admin", "stop", "--force", name]
+    start_cmd = _build_start_cmd(
+        binary,
+        name=name,
+        pid=pid,
+        grace_period=args.grace_period,
+        serve_argv=serve_argv,
+        log_file=args.log_file,
+    )
+    if args.dry_run:
+        print(" ".join(stop_cmd))
+        print(" ".join(start_cmd))
+        return 0
+
+    # 1) Graceful stop (escalates to SIGKILL). A non-zero exit (e.g. "not
+    #    running") is fine — we're about to start a fresh one regardless.
+    proc = await asyncio.create_subprocess_exec(
+        *stop_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    out, _ = await proc.communicate()
+    if out and out.strip():
+        print(out.decode().strip())
+
+    # 2) Start a fresh process attached to the calling shell. `admin stop` waits
+    #    for teardown to converge before returning, so the port is already free.
+    proc = await asyncio.create_subprocess_exec(
+        *start_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    out, err = await proc.communicate()
+    if proc.returncode != 0:
+        print(f"restart: sharedserver use failed (exit {proc.returncode})", file=sys.stderr)
+        if err and err.strip():
+            print("  " + err.decode().strip(), file=sys.stderr)
+        return 1
+    if out and out.strip():
+        print(out.decode().strip())
+
+    url = f"http://{args.host}:{args.port}/mcp"
+    if args.wait:
+        ready = await _poll_health(args.host, args.port, 30.0)
+        state = "ready" if ready else "starting (not yet healthy)"
+    else:
+        state = "attached"
+    print(
+        f"combiner '{name}' restarted, {state} — {url} (ref pid {pid}, grace {args.grace_period})"
+    )
+    return 0
 
 
 _STATE_GLYPH = {
@@ -116,7 +436,8 @@ async def cmd_disable(args: argparse.Namespace) -> int:
     return 0
 
 
-async def cmd_restart(args: argparse.Namespace) -> int:
+async def cmd_restart_server(args: argparse.Namespace) -> int:
+    """Restart a single MCP upstream (like :MCPRestartServer) — never the combiner."""
     _emit(args, await _call_meta(args, "combiner__restart_server", {"server_name": args.server}))
     return 0
 
@@ -189,6 +510,127 @@ def add_ctl_parsers(subparsers: "argparse._SubParsersAction[argparse.ArgumentPar
         p.add_argument("--port", type=int, default=9741, help="Combiner port (default: 9741)")
         p.add_argument("--json", action="store_true", help="Raw JSON output")
 
+    # start / stop — process lifecycle via sharedserver, refcounted to the
+    # calling shell (not this CLI). Idempotent: a second `start` from another
+    # shell just adds a reference; the combiner stops after the last `stop`
+    # (or the last referencing shell exits) plus the grace period.
+    p = subparsers.add_parser(
+        "start",
+        help="Launch the combiner via sharedserver, attached to the calling shell "
+        "(refcounted). Idempotent — extra starts just add references.",
+    )
+    p.add_argument(
+        "--config",
+        default=None,
+        help="Path to servers.json (default: $MCP_COMBINER_CONFIG, "
+        "$CLAUDE_MCP_COMBINER_CONFIG, then standard locations)",
+    )
+    p.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=9741, help="Port to bind (default: 9741)")
+    p.add_argument("--name", default="mcp-combiner", help="sharedserver name to register under")
+    p.add_argument(
+        "--grace-period",
+        dest="grace_period",
+        default="30m",
+        help="Keep the combiner alive this long after the last client detaches (default: 30m)",
+    )
+    p.add_argument(
+        "--pid",
+        type=int,
+        default=None,
+        help="Client PID to attach the reference to (default: the calling shell)",
+    )
+    p.add_argument(
+        "--log-file", dest="log_file", default=None, help="Combiner stdout/stderr log path"
+    )
+    p.add_argument(
+        "--wait",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Poll /health until the combiner is ready (default: wait)",
+    )
+    p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print the sharedserver command instead of running it",
+    )
+    p.add_argument(
+        "serve_args",
+        nargs=argparse.REMAINDER,
+        help="Extra serve args passed through to the combiner after `--` "
+        "(e.g. -- --no-output-validation --schema-fix empty_object)",
+    )
+    p.set_defaults(func=cmd_start, url=None)
+
+    p = subparsers.add_parser(
+        "stop",
+        help="Drop this shell's reference to the combiner (decref). It stops when "
+        "the last reference is gone and the grace period lapses.",
+    )
+    p.add_argument("--name", default="mcp-combiner", help="sharedserver name it was started under")
+    p.add_argument(
+        "--pid",
+        type=int,
+        default=None,
+        help="Client PID whose reference to drop (default: the calling shell — this CLI's parent)",
+    )
+    p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print the sharedserver command instead of running it",
+    )
+    p.set_defaults(func=cmd_stop, url=None)
+
+    p = subparsers.add_parser(
+        "restart",
+        help="Restart the whole combiner: bounce the process (like :MCPRestart). "
+        "Use --force when other clients are attached. For one upstream, use restart-server.",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Bounce the combiner even if other clients are attached (they reconnect)",
+    )
+    p.add_argument(
+        "--config",
+        default=None,
+        help="servers.json for the fresh combiner (default: $MCP_COMBINER_CONFIG, "
+        "$CLAUDE_MCP_COMBINER_CONFIG, then standard locations)",
+    )
+    p.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=9741, help="Port to bind (default: 9741)")
+    p.add_argument("--name", default="mcp-combiner", help="sharedserver name")
+    p.add_argument(
+        "--grace-period",
+        dest="grace_period",
+        default="30m",
+        help="Grace period for the fresh process (default: 30m)",
+    )
+    p.add_argument(
+        "--pid",
+        type=int,
+        default=None,
+        help="Client PID to attach the fresh process to (default: the calling shell)",
+    )
+    p.add_argument(
+        "--log-file", dest="log_file", default=None, help="Combiner stdout/stderr log path"
+    )
+    p.add_argument(
+        "--wait",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Poll /health until the combiner is ready (default: wait)",
+    )
+    p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print the sharedserver commands instead of running them",
+    )
+    p.set_defaults(func=cmd_restart_combiner, url=None)
+
     p = subparsers.add_parser("status", help="Show combiner + per-server status")
     _common(p)
     p.set_defaults(func=cmd_status)
@@ -200,7 +642,12 @@ def add_ctl_parsers(subparsers: "argparse._SubParsersAction[argparse.ArgumentPar
     for name, fn, help_ in (
         ("enable", cmd_enable, "Enable a server (mount + connect)"),
         ("disable", cmd_disable, "Disable a server (unmount + disconnect)"),
-        ("restart", cmd_restart, "Restart a server (hard bounce for owned processes)"),
+        (
+            "restart-server",
+            cmd_restart_server,
+            "Restart a single MCP upstream (hard bounce for owned processes) — "
+            "like :MCPRestartServer. Does NOT restart the combiner.",
+        ),
     ):
         p = subparsers.add_parser(name, help=help_)
         p.add_argument("server", help="Server name from the combiner config")
