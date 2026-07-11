@@ -142,6 +142,9 @@ class TestMonitorRePrime:
         import mcp_combiner.connections as conns
 
         monkeypatch.setattr(conns, "_HEALTH_CHECK_INTERVAL", 0.0)
+        # Fail on the first miss so this test still asserts the reconnect path
+        # directly (the strike tolerance is covered by TestMonitorHealthCheck).
+        monkeypatch.setattr(conns, "_HEALTH_FAILURES_BEFORE_RECONNECT", 1)
 
         mgr = ConnectionManager()
 
@@ -150,7 +153,11 @@ class TestMonitorRePrime:
 
         client = SimpleNamespace(is_connected=lambda: True, list_tools=stale, ping=stale)
         conn = SimpleNamespace(
-            name="a", _auth_failed=False, client_ref=[client], _tools_ready=False
+            name="a",
+            _auth_failed=False,
+            client_ref=[client],
+            _tools_ready=False,
+            _consec_ping_failures=0,
         )
 
         reconnected = asyncio.Event()
@@ -171,6 +178,128 @@ class TestMonitorRePrime:
                 pass
 
         assert reconnected.is_set()
+
+
+class TestMonitorHealthCheck:
+    """The keepalive ping tolerates transient misses: a single slow/dropped ping
+    on a still-connected session (e.g. a token refresh stalling on a high-latency
+    link) must NOT tear the session down — only _HEALTH_FAILURES_BEFORE_RECONNECT
+    consecutive misses trigger a reconnect, and any success clears the count."""
+
+    async def test_transient_ping_miss_does_not_reconnect(self, monkeypatch):
+        import asyncio
+
+        import mcp_combiner.connections as conns
+
+        monkeypatch.setattr(conns, "_HEALTH_CHECK_INTERVAL", 0.0)
+        monkeypatch.setattr(conns, "_HEALTH_FAILURES_BEFORE_RECONNECT", 3)
+
+        mgr = ConnectionManager()
+
+        # Ping fails the first two calls, then succeeds forever after.
+        calls = {"n": 0}
+
+        async def flaky_ping():
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise TimeoutError
+            return None
+
+        client = SimpleNamespace(is_connected=lambda: True, ping=flaky_ping)
+        conn = SimpleNamespace(
+            name="a",
+            _auth_failed=False,
+            client_ref=[client],
+            _tools_ready=True,  # skip the re-prime branch, go straight to ping
+            _consec_ping_failures=0,
+        )
+
+        reconnected = asyncio.Event()
+
+        async def fake_reconnect(_conn):
+            reconnected.set()
+
+        monkeypatch.setattr(mgr, "_reconnect", fake_reconnect)
+
+        task = asyncio.create_task(mgr._monitor(conn))
+        try:
+            # Let it spin through the two misses and several successes.
+            for _ in range(200):
+                if calls["n"] >= 5:
+                    break
+                await asyncio.sleep(0.001)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Two misses (< threshold) followed by a success never reconnects, and a
+        # success resets the strike count.
+        assert not reconnected.is_set()
+        assert conn._consec_ping_failures == 0
+
+    async def test_reconnects_after_threshold_consecutive_misses(self, monkeypatch):
+        import asyncio
+
+        import mcp_combiner.connections as conns
+
+        monkeypatch.setattr(conns, "_HEALTH_CHECK_INTERVAL", 0.0)
+        monkeypatch.setattr(conns, "_HEALTH_FAILURES_BEFORE_RECONNECT", 3)
+
+        mgr = ConnectionManager()
+
+        misses = {"n": 0}
+
+        async def always_fail():
+            misses["n"] += 1
+            raise TimeoutError
+
+        client = SimpleNamespace(is_connected=lambda: True, ping=always_fail)
+        conn = SimpleNamespace(
+            name="a",
+            _auth_failed=False,
+            client_ref=[client],
+            _tools_ready=True,
+            _consec_ping_failures=0,
+        )
+
+        reconnected = asyncio.Event()
+
+        async def fake_reconnect(_conn):
+            reconnected.set()
+
+        monkeypatch.setattr(mgr, "_reconnect", fake_reconnect)
+
+        task = asyncio.create_task(mgr._monitor(conn))
+        try:
+            await asyncio.wait_for(reconnected.wait(), timeout=2.0)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Reconnected only after the third consecutive miss, not the first.
+        assert reconnected.is_set()
+        assert misses["n"] >= 3
+
+    async def test_ping_timeout_and_failures_are_env_configurable(self, monkeypatch):
+        import importlib
+
+        import mcp_combiner.connections as conns
+
+        monkeypatch.setenv("MCP_COMBINER_HEALTH_PING_TIMEOUT", "45")
+        monkeypatch.setenv("MCP_COMBINER_HEALTH_FAILURES", "7")
+        importlib.reload(conns)
+        try:
+            assert conns._HEALTH_PING_TIMEOUT == 45.0
+            assert conns._HEALTH_FAILURES_BEFORE_RECONNECT == 7
+        finally:
+            monkeypatch.undo()
+            importlib.reload(conns)
 
 
 def _reconnect_conn(*, shared_server: str | None, url: str = "http://127.0.0.1:1/mcp"):

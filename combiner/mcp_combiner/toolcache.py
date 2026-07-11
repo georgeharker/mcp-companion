@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -37,7 +38,12 @@ UPSTREAM_TOOL_LIST_TIMEOUT = 5.0  # seconds
 
 # How long to keep priming a just-restarted stdio/sharedserver proxy's tools/list
 # before giving up (the respawned process needs a moment to start serving).
-_LOCAL_TOOLS_READY_TIMEOUT = 30.0  # seconds
+# Tunable via env — an OAuth upstream warming up over a high-latency link can
+# need well past the default; unset it and the historical 30s is unchanged.
+try:
+    _LOCAL_TOOLS_READY_TIMEOUT = float(os.environ["MCP_COMBINER_TOOLS_READY_TIMEOUT"])
+except (KeyError, ValueError):
+    _LOCAL_TOOLS_READY_TIMEOUT = 30.0  # seconds
 _LOCAL_TOOLS_READY_ATTEMPT = 5.0  # per-attempt bound, so a hung list can't block
 
 

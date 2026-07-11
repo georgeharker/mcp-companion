@@ -69,6 +69,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    """Integer knob override (MCP_COMBINER_* env); defaults unchanged."""
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
 _INITIAL_BACKOFF = _env_float("MCP_COMBINER_INITIAL_BACKOFF", 2.0)  # seconds
 _MAX_BACKOFF = _env_float("MCP_COMBINER_MAX_BACKOFF", 60.0)
 # Localhost/sharedserver upstreams cap much lower: dialing the loopback is
@@ -82,7 +90,18 @@ _BACKOFF_MULTIPLIER = 2.0
 _BACKING_RESTART_AFTER = 3
 # Seconds between keepalive pings.
 _HEALTH_CHECK_INTERVAL = _env_float("MCP_COMBINER_HEALTH_INTERVAL", 30.0)
-_TOOLS_READY_TIMEOUT = 30.0  # seconds to await a just-connected upstream's first tools/list
+# Per-ping timeout for the keepalive health-check. On a high-latency link — e.g.
+# an OAuth upstream whose ping rides a token refresh out to the provider — a
+# perfectly live session can take several seconds to answer, so this is tunable.
+_HEALTH_PING_TIMEOUT = _env_float("MCP_COMBINER_HEALTH_PING_TIMEOUT", 10.0)
+# Consecutive health-check ping misses tolerated before the monitor tears down
+# and reconnects a still-"connected" session. >1 stops a single slow/dropped
+# ping (a transient timeout on a laggy network) from amputating a working
+# upstream — it re-probes next interval instead. Set to 1 for fail-on-first-miss
+# (the historical behaviour).
+_HEALTH_FAILURES_BEFORE_RECONNECT = _env_int("MCP_COMBINER_HEALTH_FAILURES", 3)
+# Seconds to await a just-connected upstream's first tools/list.
+_TOOLS_READY_TIMEOUT = _env_float("MCP_COMBINER_TOOLS_READY_TIMEOUT", 30.0)
 
 # How long the factory waits for an in-flight connect before giving up.
 _FACTORY_WAIT_TIMEOUT = 60.0  # seconds
@@ -139,6 +158,11 @@ class _ManagedConnection:
     # _BACKING_RESTART_AFTER a sharedserver-backed upstream gets its backing
     # process hard-restarted (see _reconnect). Reset on any successful open.
     _consec_failures: int = field(default=0, repr=False)
+    # Consecutive health-check ping misses on a still-connected session. The
+    # monitor only reconnects once this reaches _HEALTH_FAILURES_BEFORE_RECONNECT,
+    # so one slow ping (e.g. a token refresh stalling on a high-latency link)
+    # doesn't tear down a working upstream. Reset on any successful ping.
+    _consec_ping_failures: int = field(default=0, repr=False)
 
 
 class ConnectionManager:
@@ -669,17 +693,41 @@ class ConnectionManager:
                     # is_connected(), so without the ping this branch would
                     # re-prime forever and never reconnect.
 
-                # Lightweight health-check: MCP ping
+                # Lightweight health-check: MCP ping. One miss doesn't condemn
+                # the session — a slow-but-alive upstream (e.g. a ping riding a
+                # token refresh on a high-latency link) would otherwise be torn
+                # down and re-OAuth'd every interval. Require
+                # _HEALTH_FAILURES_BEFORE_RECONNECT consecutive misses first; a
+                # single success clears the count. is_connected() above already
+                # catches a genuinely dropped socket, so this branch is only for
+                # slow / stale-but-open sessions where patience is warranted.
                 try:
-                    await asyncio.wait_for(client.ping(), timeout=10.0)
+                    await asyncio.wait_for(client.ping(), timeout=_HEALTH_PING_TIMEOUT)
                 except Exception as e:
+                    conn._consec_ping_failures += 1
+                    if conn._consec_ping_failures < _HEALTH_FAILURES_BEFORE_RECONNECT:
+                        logger.warning(
+                            "Health-check ping miss %d/%d for '%s': %s (%s) — "
+                            "re-probing next interval",
+                            conn._consec_ping_failures,
+                            _HEALTH_FAILURES_BEFORE_RECONNECT,
+                            conn.name,
+                            type(e).__name__,
+                            e or "no message",
+                        )
+                        continue
                     logger.warning(
-                        "Health-check failed for '%s': %s (%s) — reconnecting",
+                        "Health-check failed for '%s': %s (%s) — %d consecutive "
+                        "misses, reconnecting",
                         conn.name,
                         type(e).__name__,
                         e or "no message",
+                        conn._consec_ping_failures,
                     )
+                    conn._consec_ping_failures = 0
                     await self._reconnect(conn)
+                else:
+                    conn._consec_ping_failures = 0
         except asyncio.CancelledError:
             return
 
