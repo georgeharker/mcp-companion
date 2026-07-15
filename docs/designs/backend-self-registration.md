@@ -193,15 +193,35 @@ export MCP_COMBINER_SERVES_JUPYTER=1
 ```
 
 - Emits one `export` per **enabled** server in the loaded config — servers the
-  combiner will actually serve. Disabled entries are omitted, so a disabled backend
-  correctly falls back to standalone.
+  combiner will actually serve. Disabled entries are omitted, so a backend marked
+  `disabled: true` correctly falls back to standalone.
 - Emits **per-backend vars only**, never the blunt `MCP_COMBINER` global: precision
   is the entire point, and it lets a non-proxied backend stay standalone.
 - Name mapping is the same as the contract (upper-case, `-` → `_`).
-- Reads config only; starts nothing, connects to nothing.
 
-Suggested flags: `--shell sh|fish` for syntax, `--config PATH` to override
-discovery.
+### Implementation notes
+
+It slots into the existing control-verb machinery (`ctl.py`, added in v0.8.3):
+
+- Register in `ctl.add_ctl_parsers()` alongside `status` / `health` / `reload` /
+  `tools`; dispatch is `ctl.run()` → `asyncio.run(args.func(args))`, so the handler
+  is an `async def … -> int` like its siblings, even though it awaits nothing.
+- Reuse **`_resolve_config(args.config)`** for discovery — it already honours
+  `--config`, then `MCP_COMBINER_CONFIG` / `CLAUDE_MCP_COMBINER_CONFIG`, then the
+  standard files, mirroring the plugin's `start.sh` search order.
+- Use **`CombinerConfig.get_enabled_servers()`** for the list; it already filters
+  `ServerConfig.disabled`, which is exactly the semantic above — no new filtering.
+- Emit via `_emit()` so `--json` comes for free (it prints `str` data verbatim).
+
+**It must be offline.** Unlike `status` / `health` / `tools`, `env-disable` reads
+config and **never connects** — `ctl.run()`'s `httpx.ConnectError` path must not be
+reachable from it. This is a hard requirement, not an optimisation: the verb is
+evaluated from `zshenv` at *shell startup*, routinely before any combiner exists,
+and on machines where one may never start. A version that needs the combiner
+running would deadlock the very bootstrap it feeds.
+
+Suggested flags: `--config PATH` (passed to `_resolve_config`), `--shell sh|fish`
+for syntax.
 
 **Startup cost.** `eval "$(mcp-combiner env-disable)"` in `zshenv` runs a Python CLI
 on **every shell spawn** — a real per-shell latency tax. Prefer generating a static
