@@ -62,6 +62,15 @@ A backend plugin that the combiner may proxy:
    (we serve it).
 3. **Guards every write** — steady state must perform *zero* `claude mcp` writes
    (see constraint 5). Only a first run or a real mode flip may write.
+4. **Keeps the guard's *check* cheap.** Measured: `claude mcp get` is **~1.7s**
+   versus **~35ms** to read the config JSON directly, and the check runs on every
+   session start where it is pure overhead. Read
+   `$CLAUDE_CONFIG_DIR/.claude.json` (falling back to `~/.claude.json`) for the
+   *check*; keep every *mutation* on the supported `claude mcp add|remove`. Since
+   that path is not ours to depend on, fail safe: treat unreadable/unparseable as
+   "can't tell" and fall back to `claude mcp get`. Guessing "absent" would re-add
+   and reload MCP every session — the very failure the guard prevents. Reference
+   hook (cribsheet) measures ~45ms steady state.
 
 ```sh
 if combiner_serves cribsheet; then
