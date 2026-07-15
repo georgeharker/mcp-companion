@@ -147,19 +147,35 @@ combiner_serves() {                     # $1 = backend name, e.g. cribsheet
 }
 ```
 
-## Where the switch is set
+## The switch is a global toggle, not a per-session one
 
-It must be set **before** Claude Code starts (constraint 4):
+**This is a design constraint, not an incidental property.** The switch describes
+*how this machine gets its MCPs*, and it must be set once, machine-wide:
 
-- **interactive** — `zshenv` (see the caching note under `env-disable`).
-- **neovim / codecompanion / ACP** — the wrapper in `lua/mcp_companion/cc/init.lua`
-  already spawns the agent as `env MCP_COMPANION_COMBINER_URL=<url> <cmd>`. It
-  should inject the switch set on the same wrap; those sessions are combiner-served
-  by construction, so this is exactly where that fact is known.
+```sh
+# ~/.zshenv — set once; every shell, and everything they spawn, inherits it
+export MCP_COMBINER=1
+```
 
-Note `MCP_COMPANION_COMBINER_URL` is **not** a usable signal — it is a URL
-*override*, unset in the common case where the combiner is very much active (the
-plugin's `.mcp.json` default supplies `:9741`).
+It must be set **before** Claude Code starts (constraint 4), and `zshenv` satisfies
+that for every path — interactive shells, neovim, and the ACP/codecompanion agents
+neovim spawns all inherit it. **Nothing needs to inject it per session.**
+
+**Do not vary it per session.** The registry it drives (`claude mcp --scope user`)
+is global, so two concurrent sessions disagreeing about the mode would thrash —
+each one's hook converging the *shared* registry against its own env, undoing the
+other at every start. The switch and the state it controls are both global; keeping
+them at the same scope is what makes the convergence in the contract sound.
+
+A machine is therefore in exactly one mode. A backend that disagrees with the
+global is expressed with `MCP_COMBINER_SERVES_<NAME>` — still a global statement
+about that backend, not a per-session one.
+
+Note `MCP_COMPANION_COMBINER_URL` is **not** a usable signal for any of this — it is
+a URL *override* (the ACP wrapper sets it per session to a scoped token URL), and it
+is unset in the common case where the combiner is very much active, because the
+plugin's `.mcp.json` default supplies `:9741`. It answers "which combiner endpoint",
+never "is a combiner serving me".
 
 ## `mcp-combiner env-disable`
 
@@ -199,11 +215,10 @@ mcp-combiner env-disable > ~/.cache/mcp-combiner/env.sh
 
 ## Risks
 
-- **Global state from a per-session signal.** `claude mcp --scope user` is global;
-  the switch is per-session env. Two concurrent sessions in *different* modes will
-  thrash, each undoing the other at startup. Acceptable while a machine is
-  consistently one mode — the main reason not to adopt this blindly. Project scope
-  avoids it but needs approval and pollutes repos.
+- **Global toggle only** — the switch is machine-wide by design; varying it per
+  session is unsupported and will thrash the shared user-scope registry. Project
+  scope would allow per-repo modes but needs approval and pollutes repos, so it is
+  explicitly not offered.
 - **Plugins writing global MCP config** is unusual and surprising; each adopter must
   say so prominently in its README.
 - **Uninstall leaves a stray entry** — removing a plugin does not unregister its
