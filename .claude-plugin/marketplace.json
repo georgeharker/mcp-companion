@@ -1,0 +1,16 @@
+{
+  "name": "mcp-companion",
+  "description": "mcp-combiner — an MCP aggregator fronting many MCP servers behind one Streamable HTTP endpoint, shared across Claude Code, OpenCode, and Neovim via sharedserver.",
+  "owner": {
+    "name": "George Harker",
+    "email": "george@georgeharker.com"
+  },
+  "plugins": [
+    {
+      "name": "claude-mcp-combiner",
+      "source": "./plugins/claude-mcp-combiner",
+      "description": "Zero-config sharedserver wrapper for mcp-combiner that also auto-registers the combiner's HTTP endpoint as an MCP server. SessionStart attaches; SessionEnd detaches.",
+      "version": "0.5.1"
+    }
+  ]
+}
