@@ -163,6 +163,20 @@ curl -X POST http://127.0.0.1:9741/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
 ```
 
+### Plugins (standalone Claude Code & OpenCode)
+
+Outside CodeCompanion, install a plugin so your agent runs and registers the
+combiner itself (one refcounted process shared across clients). Both plugins live
+in this repo — **[`plugins/`](./plugins/README.md)**:
+
+- **Claude Code:** `/plugin marketplace add georgeharker/mcp-companion` →
+  `/plugin install claude-mcp-combiner@mcp-companion`
+- **OpenCode:** add `"@geohar/opencode-mcp-combiner@latest"` to your `opencode.json`
+  `plugin` list
+
+See **[plugins/README.md](./plugins/README.md)** for options and the host-owned
+(`MCP_COMPANION_COMBINER_URL`) behaviour.
+
 ---
 
 ## MCP Server Config
