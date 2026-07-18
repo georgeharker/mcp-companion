@@ -1,0 +1,52 @@
+{
+    "name": "@geohar/opencode-mcp-combiner",
+    "version": "0.2.0",
+    "description": "OpenCode plugin: run the mcp-combiner MCP aggregator via sharedserver and register its endpoint with OpenCode.",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "clean": "rm -rf dist",
+        "typecheck": "tsc --noEmit",
+        "prepublishOnly": "npm run clean && npm run build"
+    },
+    "keywords": [
+        "opencode",
+        "opencode-plugin",
+        "mcp",
+        "mcp-combiner",
+        "sharedserver",
+        "plugin"
+    ],
+    "author": "George Harker <george@georgeharker.com>",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/georgeharker/mcp-companion.git",
+        "directory": "plugins/opencode-mcp-combiner"
+    },
+    "bugs": {
+        "url": "https://github.com/georgeharker/mcp-companion/issues"
+    },
+    "homepage": "https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode-mcp-combiner#readme",
+    "publishConfig": {
+        "access": "public"
+    },
+    "peerDependencies": {
+        "@opencode-ai/plugin": ">=1.3.0"
+    },
+    "devDependencies": {
+        "@opencode-ai/plugin": "^1.3.0",
+        "@types/node": "^22.0.0",
+        "typescript": "^5.6.0"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}

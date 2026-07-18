@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Wrapper: resolves the sharedserver binary in standard locations.
+# Mirrors the resolution order documented in opencode-sharedserver's README:
+#   1. $SHAREDSERVER_BIN
+#   2. PATH (skipping ourselves to avoid recursion)
+#   3. ~/.cargo/bin, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin
+
+set -eu
+
+if [[ -n "${SHAREDSERVER_BIN:-}" && -x "$SHAREDSERVER_BIN" ]]; then
+  exec "$SHAREDSERVER_BIN" "$@"
+fi
+
+if real="$(command -v sharedserver 2>/dev/null)" && [[ -x "$real" && "$real" != "$0" ]]; then
+  exec "$real" "$@"
+fi
+
+for candidate in \
+  "$HOME/.cargo/bin/sharedserver" \
+  "$HOME/.local/bin/sharedserver" \
+  "/opt/homebrew/bin/sharedserver" \
+  "/usr/local/bin/sharedserver"; do
+  if [[ -x "$candidate" ]]; then
+    exec "$candidate" "$@"
+  fi
+done
+
+echo "claude-sharedserver: sharedserver binary not found." >&2
+echo "  Install with: cargo install sharedserver" >&2
+echo "  Or set SHAREDSERVER_BIN to a custom path." >&2
+exit 127

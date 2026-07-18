@@ -1,0 +1,55 @@
+name: Release (opencode-mcp-combiner)
+
+# Publishes the @geohar/opencode-mcp-combiner npm plugin. Its version is INDEPENDENT
+# of the combiner (PyPI mcp-combiner), so it uses its OWN scoped tag rather than the
+# combiner's `v*`:
+#
+#   git tag opencode-mcp-combiner-v0.1.1 && git push origin opencode-mcp-combiner-v0.1.1
+#
+# Mirrors release.yml's shape: tag-triggered, trusted publishing (OIDC, no secrets),
+# an environment gate. npm equivalent of PyPI Trusted Publishing:
+#
+#   One-time setup at https://www.npmjs.com/ → the package → Settings → Trusted
+#   Publisher, with:
+#       repository:   georgeharker/mcp-companion
+#       workflow:     release-opencode-plugin.yml
+#       environment:  npm
+#   Then create a GitHub environment named "npm" (repo Settings → Environments).
+#
+# No NPM_TOKEN needed once the trusted publisher is configured.
+
+on:
+  push:
+    tags: ["opencode-mcp-combiner-v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write          # OIDC: trusted publishing + provenance
+      contents: read
+    defaults:
+      run:
+        working-directory: plugins/opencode-mcp-combiner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          # NB: no registry-url — it writes an .npmrc expecting NODE_AUTH_TOKEN,
+          # which shadows OIDC trusted publishing and makes `npm publish` 404.
+      - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+      - name: Verify tag matches package version
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#opencode-mcp-combiner-v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag …-v$tag does not match plugin version $pkg — bump plugins/opencode-mcp-combiner/package.json"
+            exit 1
+          fi
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - name: Publish to npm (trusted publishing + provenance)
+        run: npm publish --provenance --access public
