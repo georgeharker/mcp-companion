@@ -37,7 +37,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
+          # NB: no registry-url — it writes an .npmrc expecting NODE_AUTH_TOKEN,
+          # which shadows OIDC trusted publishing and makes `npm publish` 404.
       - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
         run: npm install -g npm@latest
       - name: Verify tag matches package version
