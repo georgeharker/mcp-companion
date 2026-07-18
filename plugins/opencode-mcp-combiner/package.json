@@ -28,12 +28,13 @@
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/georgeharker/opencode-mcp-combiner.git"
+        "url": "git+https://github.com/georgeharker/mcp-companion.git",
+        "directory": "plugins/opencode-mcp-combiner"
     },
     "bugs": {
-        "url": "https://github.com/georgeharker/opencode-mcp-combiner/issues"
+        "url": "https://github.com/georgeharker/mcp-companion/issues"
     },
-    "homepage": "https://github.com/georgeharker/opencode-mcp-combiner#readme",
+    "homepage": "https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode-mcp-combiner#readme",
     "publishConfig": {
         "access": "public"
     },
