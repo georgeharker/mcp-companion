@@ -32,32 +32,43 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 die() { echo "error: $*" >&2; exit 1; }
 
+# bash 3.2 — what macOS still ships as /bin/bash — has no `mapfile`, and the
+# `declare -n` nameref that would replace it only arrived in 4.3. Read lines into
+# a named array the portable way instead, so this script runs on a stock Mac and
+# not just one with a Homebrew bash on PATH.
+#   Usage: read_lines <arrayname> < <(cmd)
+read_lines() { # $1 = array name
+  local __arr="$1" __line
+  eval "$__arr=()"
+  while IFS= read -r __line; do eval "$__arr+=(\"\$__line\")"; done
+}
+
 # ---- locate manifests -------------------------------------------------------
 MANIFESTS=()   # every file that gets the new version
 TARGETS=()     # parallel: "toml" | "json"
 
 # pyproject.toml: the project's own (root OR a package subdir, e.g. combiner/),
 # excluding vendored/submodule copies (vendor/, node_modules/).
-mapfile -t _py < <(find "$ROOT" -name pyproject.toml \
+read_lines _py < <(find "$ROOT" -name pyproject.toml \
                    -not -path '*/vendor/*' -not -path '*/node_modules/*' -not -path '*/target/*' -not -path '*/.git/*' 2>/dev/null \
                    | while read -r f; do grep -qE '^version *= *"' "$f" && echo "$f"; done)
 if [ "${#_py[@]}" -eq 1 ]; then MANIFESTS+=("${_py[0]}"); TARGETS+=("toml")
 elif [ "${#_py[@]}" -gt 1 ]; then die "multiple versioned pyproject.toml found; pick one: ${_py[*]}"; fi
 
 # Cargo.toml: the one with a top-level [package] version (rust/ or root). Skip target/.
-mapfile -t _cg < <(find "$ROOT" -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
+read_lines _cg < <(find "$ROOT" -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
                    | while read -r f; do grep -qE '^version *= *"' "$f" && echo "$f"; done)
 CARGO=""
 if [ "${#_cg[@]}" -eq 1 ]; then CARGO="${_cg[0]}"; MANIFESTS+=("$CARGO"); TARGETS+=("toml")
 elif [ "${#_cg[@]}" -gt 1 ]; then die "multiple versioned Cargo.toml found; pick one: ${_cg[*]}"; fi
 
-mapfile -t _pj < <(find "$ROOT" -path '*/.claude-plugin/plugin.json' -not -path '*/node_modules/*' 2>/dev/null)
+read_lines _pj < <(find "$ROOT" -path '*/.claude-plugin/plugin.json' -not -path '*/node_modules/*' 2>/dev/null)
 [ "${#_pj[@]}" -eq 1 ] || die "expected exactly one .claude-plugin/plugin.json, found ${#_pj[@]}: ${_pj[*]:-none}"
 PLUGIN_JSON="${_pj[0]}"; MANIFESTS+=("$PLUGIN_JSON"); TARGETS+=("json")
 
 OPENCODE_PKG="$ROOT/plugins/opencode/package.json"
 if [ ! -f "$OPENCODE_PKG" ]; then
-  mapfile -t _oc < <(find "$ROOT/plugins" -maxdepth 2 -name package.json -not -path '*/node_modules/*' 2>/dev/null)
+  read_lines _oc < <(find "$ROOT/plugins" -maxdepth 2 -name package.json -not -path '*/node_modules/*' 2>/dev/null)
   [ "${#_oc[@]}" -eq 1 ] || die "could not uniquely locate the opencode package.json"
   OPENCODE_PKG="${_oc[0]}"
 fi
