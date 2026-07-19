@@ -236,6 +236,11 @@ class ToolProcessingMiddleware(Middleware):
     ) -> list[Tool]:
         """Fetch upstream, sanitize, filter, populate the global cache."""
 
+        # Snapshot before listing: if anything clears the cache while we're
+        # fetching (a prime confirming a just-warmed server, a config event),
+        # this fetch's result predates that change and must not re-validate
+        # the cache — see set_cache_if_current.
+        generation = RUNTIME.tools.generation
         try:
             raw = list(await call_next(context))
         except Exception as e:
@@ -265,8 +270,16 @@ class ToolProcessingMiddleware(Middleware):
         # they are appended after _filter_tools rather than run through it again.
         merged = _merge_stale_server_tools(filtered, time.time())
 
-        RUNTIME.tools.set_cache(merged, time.time())
-        logger.info("tools/list: cached %d tools", len(merged))
+        if RUNTIME.tools.set_cache_if_current(merged, time.time(), generation):
+            logger.info("tools/list: cached %d tools", len(merged))
+        else:
+            # Invalidated mid-fetch: serve this (pre-clear) result to our
+            # caller but leave the cache cleared, so the sessions notified by
+            # the invalidation re-fetch live truth instead of this snapshot.
+            logger.info(
+                "tools/list: cache invalidated mid-fetch — serving %d tools uncached",
+                len(merged),
+            )
         return merged
 
     @staticmethod

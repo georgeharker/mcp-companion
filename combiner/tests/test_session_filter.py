@@ -16,6 +16,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.toolcache import PrimeOutcome
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -375,14 +376,12 @@ class TestStaleServerTools:
         self._saved = (RUNTIME.config, RUNTIME.conn_manager)
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
-        srv._local_tools_ready.clear()
 
     def teardown_method(self):
         srv = self._srv
         RUNTIME.config, RUNTIME.conn_manager = self._saved
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
-        srv._local_tools_ready.clear()
 
     @staticmethod
     def _tool(name: str):
@@ -439,7 +438,6 @@ class TestStaleServerTools:
 
         srv._server_tool_cache["beta"] = [self._tool("beta_one")]
         srv._server_tool_seen["beta"] = 1000.0
-
         merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
         assert self._names(merged) == ["alpha_one"]
         assert "beta" not in srv._server_tool_cache
@@ -452,7 +450,6 @@ class TestStaleServerTools:
 
         srv._server_tool_cache["beta"] = [self._tool("beta_one")]
         srv._server_tool_seen["beta"] = 1000.0
-
         now = 1000.0 + RUNTIME.tools.stale_grace + 1
         merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=now)
         assert self._names(merged) == ["alpha_one"]
@@ -470,7 +467,6 @@ class TestStaleServerTools:
 
         srv._server_tool_cache["beta"] = [self._tool("beta_one")]
         srv._server_tool_seen["beta"] = 1000.0
-
         merged = srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
         assert self._names(merged) == ["alpha_one"]
         assert "beta" not in srv._server_tool_cache
@@ -491,34 +487,87 @@ class TestStaleServerTools:
         finally:
             srv._failed_servers.pop("beta", None)
 
-    def test_present_server_marked_tools_ready(self):
-        """A server that returns tools in a fresh fetch is confirmed 'ready'."""
+    def test_present_server_gains_confirmed_slice(self):
+        """A server that returns tools in a fresh fetch gains a confirmed
+        slice — presence in the store IS the tools-ready bit."""
         srv = self._srv
         RUNTIME.config = self._config()
         RUNTIME.conn_manager = None
-        assert srv._local_tools_ready.get("alpha") is None
+        assert "alpha" not in srv._server_tool_cache
         srv._merge_stale_server_tools([self._tool("alpha_one")], now=1000.0)
-        assert srv._local_tools_ready.get("alpha") is True
+        assert "alpha" in srv._server_tool_cache
 
-    def test_evicted_server_loses_ready(self):
-        """A dropped (disabled/expired) server also loses its ready flag."""
+    def test_promotion_publishes_notify_only_once(self, monkeypatch):
+        """A server first observed with tools in a fetch (a new confirmation)
+        is a publication: one notify-only broadcast. Re-observing the same
+        list is broadcast-silent — repeated fetches cannot notify-loop."""
+        import mcp_combiner.toolcache as toolcache_mod
+
         srv = self._srv
-        RUNTIME.config = self._config(beta_disabled=True)
+        RUNTIME.config = self._config()
         RUNTIME.conn_manager = None
-        srv._server_tool_cache["beta"] = [self._tool("beta_one")]
-        srv._server_tool_seen["beta"] = 1000.0
-        srv._local_tools_ready["beta"] = True
-        srv._merge_stale_server_tools([self._tool("alpha_one")], now=1005.0)
-        assert "beta" not in srv._local_tools_ready
+        notifies: list[int] = []
+        monkeypatch.setattr(toolcache_mod, "notify_tool_list_changed", lambda: notifies.append(1))
+
+        srv._merge_stale_server_tools([self._tool("alpha_one")], now=1000.0)
+        assert notifies == [1]  # promotion published
+        srv._merge_stale_server_tools([self._tool("alpha_one")], now=1001.0)
+        assert notifies == [1]  # unchanged list: silent
+
+    def test_replacement_publishes(self, monkeypatch):
+        """A confirmed slice replaced by a *different* list from a fetch is 'a
+        new tool list back from the MCP' — publish again."""
+        import mcp_combiner.toolcache as toolcache_mod
+
+        srv = self._srv
+        RUNTIME.config = self._config()
+        RUNTIME.conn_manager = None
+        notifies: list[int] = []
+        monkeypatch.setattr(toolcache_mod, "notify_tool_list_changed", lambda: notifies.append(1))
+
+        srv._merge_stale_server_tools([self._tool("alpha_one")], now=1000.0)
+        srv._merge_stale_server_tools([self._tool("alpha_two")], now=1001.0)
+        assert notifies == [1, 1]
+
+    def test_reordered_list_is_not_a_replacement(self):
+        """store_slice compares content order-insensitively: a reordered but
+        identical list is not a publication event."""
+        assert RUNTIME.tools.store_slice(
+            "alpha", [self._tool("a_one"), self._tool("a_two")], 1000.0
+        )
+        assert not RUNTIME.tools.store_slice(
+            "alpha", [self._tool("a_two"), self._tool("a_one")], 1001.0
+        )
+
+    def test_schema_only_change_is_a_replacement(self):
+        """A tool whose SCHEMA changes (names unchanged) is still 'a new tool
+        list back from the MCP' — downstream clients cache schemas, so this
+        must publish."""
+        from fastmcp.tools.function_tool import FunctionTool
+
+        def _with_params(params):
+            return FunctionTool(fn=lambda: None, name="a_one", description="", parameters=params)
+
+        assert RUNTIME.tools.store_slice(
+            "alpha", [_with_params({"type": "object", "properties": {}})], 1000.0
+        )
+        assert RUNTIME.tools.store_slice(
+            "alpha",
+            [_with_params({"type": "object", "properties": {"x": {"type": "string"}}})],
+            1001.0,
+        )
 
 
 # ── stdio/sharedserver started → ready lifecycle ───────────────────
 
 
 class TestLocalToolsReady:
-    """`prime_server_tools`: the started → ready transition — invoke tools/list
-    on the server's mounted provider; on answer, store the slice, mark ready,
-    and broadcast. On timeout: no store, no broadcast, stays 'started'."""
+    """`prime_server_tools`: the started → ready transition attempt — invoke
+    tools/list on the server's mounted provider and record the outcome in the
+    confirmed-tools store. Non-empty answer → READY (published iff the list is
+    new or changed in content); non-answering or answered-empty lists are
+    retried until timeout → EMPTY/FAILED (nothing stored, nothing broadcast,
+    stays 'started')."""
 
     @staticmethod
     def _combiner_with_provider(name: str, list_tools) -> object:
@@ -531,14 +580,22 @@ class TestLocalToolsReady:
         mounts._registry(combiner)[name] = [SimpleNamespace(list_tools=list_tools)]
         return combiner
 
-    async def test_prime_retries_stores_then_invalidates(self):
-        """Retries a not-yet-serving server; stores the slice, marks ready, and
-        invalidates only once tools/list answers."""
+    @staticmethod
+    def _cleanup(server: str) -> None:
         import mcp_combiner.server as srv
 
-        srv._local_tools_ready.pop("beta", None)
+        srv._server_tool_cache.pop(server, None)
+        srv._server_tool_seen.pop(server, None)
+
+    async def test_prime_retries_stores_then_invalidates(self, monkeypatch):
+        """Retries a not-yet-serving server; stores the slice (confirming it
+        ready) and invalidates only once tools/list answers."""
+        import mcp_combiner.server as srv
+        import mcp_combiner.toolcache as toolcache_mod
+
         calls: list[int] = []
         state = {"n": 0}
+        monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
         async def list_tools():
             state["n"] += 1
@@ -547,47 +604,170 @@ class TestLocalToolsReady:
             return [TestStaleServerTools._tool("beta_one")]
 
         combiner = self._combiner_with_provider("beta", list_tools)
-        import mcp_combiner.toolcache as toolcache_mod
-
-        orig = toolcache_mod.invalidate_tool_cache
-        toolcache_mod.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
         try:
             ok = await srv.prime_server_tools(combiner, "beta", timeout=10.0, interval=0.0)
-            assert ok is True
-            assert srv._local_tools_ready.get("beta") is True
-            # The primed list IS the stored slice (namespaced provider shape).
+            assert ok is PrimeOutcome.READY
+            # The primed list IS the stored slice (namespaced provider shape),
+            # and its presence is the tools-ready bit.
             assert [str(t.name) for t in srv._server_tool_cache["beta"]] == ["beta_one"]
             assert calls == [1]  # broadcast exactly once, after the list returned
         finally:
-            toolcache_mod.invalidate_tool_cache = orig  # type: ignore[assignment]
-            srv._local_tools_ready.pop("beta", None)
-            srv._server_tool_cache.pop("beta", None)
-            srv._server_tool_seen.pop("beta", None)
+            self._cleanup("beta")
 
-    async def test_prime_timeout_no_store_no_invalidate(self):
+    async def test_prime_timeout_no_store_no_invalidate(self, monkeypatch):
         """If the server never answers tools/list, nothing is stored, nothing is
         broadcast, and it stays 'started' (not ready)."""
         import mcp_combiner.server as srv
+        import mcp_combiner.toolcache as toolcache_mod
 
-        srv._local_tools_ready.pop("gamma", None)
         calls: list[int] = []
+        monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
         async def list_tools():
             raise ConnectionError("never up")
 
         combiner = self._combiner_with_provider("gamma", list_tools)
+        ok = await srv.prime_server_tools(combiner, "gamma", timeout=0.05, interval=0.0)
+        assert ok is PrimeOutcome.FAILED
+        assert "gamma" not in srv._server_tool_cache
+        assert calls == []
+
+    async def test_prime_empty_answers_retry_until_timeout(self, monkeypatch):
+        """A successful but EMPTY tools/list is not readiness: it joins the
+        retry contract (another query after each interval). All-empty until
+        the deadline → EMPTY: nothing stored, nothing published."""
+        import mcp_combiner.server as srv
         import mcp_combiner.toolcache as toolcache_mod
 
-        orig = toolcache_mod.invalidate_tool_cache
-        toolcache_mod.invalidate_tool_cache = lambda: calls.append(1)  # type: ignore[assignment]
+        calls: list[int] = []
+        listed = {"n": 0}
+        monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
+
+        async def list_tools():
+            listed["n"] += 1
+            return []
+
+        combiner = self._combiner_with_provider("delta", list_tools)
         try:
-            ok = await srv.prime_server_tools(combiner, "gamma", timeout=0.05, interval=0.0)
-            assert ok is False
-            assert srv._local_tools_ready.get("gamma") is None
-            assert "gamma" not in srv._server_tool_cache
+            ok = await srv.prime_server_tools(combiner, "delta", timeout=0.05, interval=0.0)
+            assert ok is PrimeOutcome.EMPTY
+            assert "delta" not in srv._server_tool_cache  # nothing stored
+            assert calls == []  # an unconfirmed server is never announced
+            assert listed["n"] > 1  # empty answers were retried, not accepted
+        finally:
+            self._cleanup("delta")
+
+    async def test_prime_empty_then_populated_publishes_once(self, monkeypatch):
+        """The warming case: empty answers followed by a real list — the
+        eventual populated answer is stored and IS the (single) trailing
+        publication."""
+        import mcp_combiner.server as srv
+        import mcp_combiner.toolcache as toolcache_mod
+
+        calls: list[int] = []
+        state = {"n": 0}
+        monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
+
+        async def list_tools():
+            state["n"] += 1
+            if state["n"] < 3:
+                return []
+            return [TestStaleServerTools._tool("delta_one")]
+
+        combiner = self._combiner_with_provider("delta", list_tools)
+        try:
+            ok = await srv.prime_server_tools(combiner, "delta", timeout=10.0, interval=0.0)
+            assert ok is PrimeOutcome.READY
+            assert [str(t.name) for t in srv._server_tool_cache["delta"]] == ["delta_one"]
+            assert calls == [1]
+        finally:
+            self._cleanup("delta")
+
+    async def test_prime_empty_answer_preserves_confirmed_slice(self, monkeypatch):
+        """Empty answers against an already-confirmed server (e.g. mid-restart)
+        leave the last-known-good slice untouched — the store only ever holds
+        real lists, so there is nothing to clobber it with."""
+        import mcp_combiner.server as srv
+        import mcp_combiner.toolcache as toolcache_mod
+
+        RUNTIME.tools.store_slice("beta", [TestStaleServerTools._tool("beta_one")], 1000.0)
+        calls: list[int] = []
+        monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
+
+        async def list_tools():
+            return []
+
+        combiner = self._combiner_with_provider("beta", list_tools)
+        try:
+            ok = await srv.prime_server_tools(combiner, "beta", timeout=0.05, interval=0.0)
+            assert ok is PrimeOutcome.EMPTY
+            assert [str(t.name) for t in srv._server_tool_cache["beta"]] == ["beta_one"]
             assert calls == []
         finally:
-            toolcache_mod.invalidate_tool_cache = orig  # type: ignore[assignment]
+            self._cleanup("beta")
+
+    async def test_reprime_unchanged_list_is_silent(self, monkeypatch):
+        """Re-priming a confirmed server that answers the same tool set stores
+        the refresh but is NOT a publication event — no broadcast."""
+        import mcp_combiner.server as srv
+        import mcp_combiner.toolcache as toolcache_mod
+
+        RUNTIME.tools.store_slice("beta", [TestStaleServerTools._tool("beta_one")], 1000.0)
+        calls: list[int] = []
+        monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
+
+        async def list_tools():
+            return [TestStaleServerTools._tool("beta_one")]
+
+        combiner = self._combiner_with_provider("beta", list_tools)
+        try:
+            ok = await srv.prime_server_tools(combiner, "beta", timeout=10.0, interval=0.0)
+            assert ok is PrimeOutcome.READY
+            assert calls == []
+        finally:
+            self._cleanup("beta")
+
+    async def test_reprime_changed_list_publishes(self, monkeypatch):
+        """Re-priming a confirmed server that answers a DIFFERENT tool set is a
+        replacement — 'a new tool list back from the MCP' — publish once."""
+        import mcp_combiner.server as srv
+        import mcp_combiner.toolcache as toolcache_mod
+
+        RUNTIME.tools.store_slice("beta", [TestStaleServerTools._tool("beta_one")], 1000.0)
+        calls: list[int] = []
+        monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
+
+        async def list_tools():
+            return [TestStaleServerTools._tool("beta_two")]
+
+        combiner = self._combiner_with_provider("beta", list_tools)
+        try:
+            ok = await srv.prime_server_tools(combiner, "beta", timeout=10.0, interval=0.0)
+            assert ok is PrimeOutcome.READY
+            assert [str(t.name) for t in srv._server_tool_cache["beta"]] == ["beta_two"]
+            assert calls == [1]
+        finally:
+            self._cleanup("beta")
+
+
+def test_cache_fill_loses_to_mid_fetch_invalidation():
+    """The invalidate-vs-inflight-fetch race: a clear that lands while a fetch
+    is running bumps the generation, so the fetch's set_cache_if_current is
+    refused — the cache stays cleared and the notified sessions' re-fetch
+    lists live truth instead of a freshly-stamped pre-clear snapshot."""
+    saved = (RUNTIME.tools.cache, RUNTIME.tools.cache_time, RUNTIME.tools.generation)
+    try:
+        gen = RUNTIME.tools.generation
+        RUNTIME.tools.clear_cache()  # the mid-fetch invalidation
+        assert not RUNTIME.tools.set_cache_if_current([], 1000.0, gen)
+        assert RUNTIME.tools.cache is None  # stale fill refused
+
+        # No intervening clear → the fill applies.
+        gen = RUNTIME.tools.generation
+        assert RUNTIME.tools.set_cache_if_current([], 1000.0, gen)
+        assert RUNTIME.tools.cache == []
+    finally:
+        RUNTIME.tools.cache, RUNTIME.tools.cache_time, RUNTIME.tools.generation = saved
 
 
 def test_stale_tool_grace_configurable():

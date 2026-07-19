@@ -120,6 +120,34 @@ class _ResourceNotifyHandler(TaskNotificationHandler):
             lambda s: s.send_resource_list_changed(), f"resources/list_changed ({self._server})"
         )
 
+    async def on_tool_list_changed(
+        self, notification: mcp.types.ToolListChangedNotification
+    ) -> None:
+        """The upstream's own tool ready-edge: re-prime THIS server only.
+
+        Not a blind downstream forward — that would invite clients to re-fetch
+        into a cache whose slice for this server may still be stale. The shared
+        prime path re-lists through the mounted provider, records the outcome
+        in the confirmed-tools store, and publishes exactly once iff the slice
+        was newly confirmed or replaced by different content (an upstream
+        that warmed up from an empty boot answer converges here).
+
+        ``self._server`` is closed over per handler instance, so server A's
+        upstream session can only ever re-prime A. The per-chat ``target`` is
+        deliberately ignored: tool slices are combiner-global, so any needed
+        publication is a broadcast decided by the gated prime.
+        """
+        try:
+            from mcp_combiner.toolcache import _on_upstream_tools_ready
+
+            logger.info("tools/list_changed from upstream '%s' — re-priming", self._server)
+            _on_upstream_tools_ready(self._server)
+        except Exception:
+            # Never raise into the client receive loop.
+            logger.debug(
+                "Failed to handle tools/list_changed for '%s'", self._server, exc_info=True
+            )
+
     async def _forward(self, send: Callable[[ServerSession], Awaitable[None]], desc: str) -> None:
         if self._target_ref is not None:
             # Per-chat: notify only this chat's session (skip if it's gone).

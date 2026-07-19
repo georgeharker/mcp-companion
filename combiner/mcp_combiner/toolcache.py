@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import time
+from enum import Enum
 from typing import Any
 
 from fastmcp import FastMCP
@@ -32,6 +33,20 @@ from mcp_combiner.runtime import RUNTIME
 from mcp_combiner.schemafix import _sanitize_tools
 
 logger = logging.getLogger("mcp-combiner")
+
+
+class PrimeOutcome(str, Enum):
+    """Result of one started→ready prime attempt (see prime_server_tools)."""
+
+    #: A real tool list came back; the slice is confirmed (published iff changed).
+    READY = "ready"
+    #: The upstream kept ANSWERING an empty list until the deadline — nothing
+    #: stored, nothing published. Convergence comes from the monitor's re-probe
+    #: (HTTP), the next aggregate fetch, or the upstream's own tools/list_changed.
+    EMPTY = "empty"
+    #: tools/list never answered within the deadline; server stays started.
+    FAILED = "failed"
+
 
 # Timeout for individual upstream server queries during tools/list
 UPSTREAM_TOOL_LIST_TIMEOUT = 5.0  # seconds
@@ -213,23 +228,39 @@ def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
     """Re-inject last-known-good tools for servers that are only transiently absent.
 
     Refreshes the per-server slice cache for every server present in *fresh*,
-    then appends the cached slice for any *known* server that dropped out of
-    this fetch while merely reconnecting — within ``RUNTIME.tools.stale_grace``. Servers
-    that are removed from config, disabled, auth-failed, or past the grace
-    window are dropped and evicted, so we never advertise uncallable tools.
+    then appends the cached slice for any *known* (confirmed) server that
+    dropped out of this fetch while merely reconnecting — within
+    ``RUNTIME.tools.stale_grace``. Servers that are removed from config,
+    disabled, auth-failed, or past the grace window are dropped and evicted,
+    so we never advertise uncallable tools. Only confirmed lists ever enter
+    the store (an empty prime stores nothing), so everything here is
+    last-known-good by construction.
 
     This is the hysteresis that stops one server's reconnect (which clears the
     whole cache) from blanking another server that happens to be mid-reconnect.
+
+    Publication: a server observed here with tools that had no confirmed slice
+    before (promotion — e.g. an isolate=true server that answered empty at
+    boot and has now warmed up), or whose confirmed list changed in content,
+    is a "new tool list back from the MCP". One notify-only broadcast is
+    scheduled for the batch, AFTER the caller stores the merged result in the
+    aggregate cache — sessions that re-fetch hit the fresh cache, so no clear
+    is involved and re-broadcast cannot loop (an unchanged list returns False
+    from store_slice).
     """
     per_fresh, _local = _partition_by_server(fresh)
 
-    # Every server that returned tools this fetch is live: refresh its slice and
-    # confirm it "ready" (tools listable) for the stdio/sharedserver tri-state.
+    # Every server that returned tools this fetch is live: refresh its slice
+    # and note whether that constitutes a publication.
+    changed: list[str] = []
     for server, slice_ in per_fresh.items():
-        RUNTIME.tools.store_slice(server, slice_, now)
+        if RUNTIME.tools.store_slice(server, slice_, now):
+            changed.append(server)
 
     result = list(fresh)
     if RUNTIME.config is None:
+        if changed:
+            _schedule_promotion_notify(changed)
         return result
 
     present = set(per_fresh)
@@ -264,23 +295,35 @@ def _merge_stale_server_tools(fresh: list[Tool], now: float) -> list[Tool]:
         else:
             # Removed, disabled, auth-failed, or grace expired — let it drop.
             RUNTIME.tools.evict_slice(server)
+    if changed:
+        _schedule_promotion_notify(changed)
     return result
 
 
-def invalidate_tool_cache() -> None:
-    """Invalidate the tool cache, forcing a refresh on next tools/list.
+def _schedule_promotion_notify(servers: list[str]) -> None:
+    """Publish (notify-only) for slices promoted/replaced during a fetch merge.
 
-    Also sends ``notifications/tools/list_changed`` to all connected MCP
-    clients so they re-fetch the tool list immediately. Only call this once the
-    affected upstream is actually reachable — see ``clear_tool_cache`` for the
-    silent variant to use while a connection is still coming up.
+    Scheduled as a task so it runs after the in-flight fetch completes and the
+    merged result has been stored in the aggregate cache — the sessions this
+    notification pokes will re-fetch into that fresh cache.
     """
-    clear_tool_cache()
+    logger.info(
+        "tools/list: publishing slice change for %s (promoted or replaced)",
+        ", ".join(sorted(servers)),
+    )
+    notify_tool_list_changed()
 
-    # Fire-and-forget notification to all connected sessions.
-    # We schedule this as a task because invalidate_tool_cache() is called
-    # from sync contexts (e.g. ConnectionManager.on_tools_ready callback).
-    # The task is stored in _notification_tasks to prevent GC before completion.
+
+def notify_tool_list_changed() -> None:
+    """Broadcast ``tools/list_changed`` WITHOUT clearing the aggregate cache.
+
+    The notify-only publication flavor: use when the cache already reflects
+    the change (the aggregate-fetch merge fills ``set_cache`` with the fresh
+    result right after promoting slices). Notified sessions re-fetch and hit
+    that fresh cache; nothing is discarded.
+    """
+    # Fire-and-forget: callers are sync (merge tail, callbacks). The task ref
+    # is kept in notification_tasks to prevent GC before completion.
     try:
         loop = asyncio.get_running_loop()
         task = loop.create_task(_notify_tool_list_changed())
@@ -291,30 +334,56 @@ def invalidate_tool_cache() -> None:
         pass
 
 
+def invalidate_tool_cache() -> None:
+    """Invalidate the tool cache, forcing a refresh on next tools/list.
+
+    Also sends ``notifications/tools/list_changed`` to all connected MCP
+    clients so they re-fetch the tool list immediately. This is a
+    *publication* — under the slice-state design it may only be driven by a
+    ready-transition, a ready slice being replaced by a new list from the
+    MCP, or a config-level event (enable/disable/restart/reload). See
+    ``clear_tool_cache`` for the silent variant and
+    ``notify_tool_list_changed`` for the notify-only flavor.
+    """
+    clear_tool_cache()
+    notify_tool_list_changed()
+
+
 async def prime_server_tools(
     combiner: FastMCP,
     name: str,
     timeout: float = _LOCAL_TOOLS_READY_TIMEOUT,
     interval: float = 1.0,
-) -> bool:
-    """Invoke ``tools/list`` on *name*'s mounted provider(s); on answer, store
-    the slice, mark the server ready, and broadcast the change.
+) -> PrimeOutcome:
+    """Invoke ``tools/list`` on *name*'s mounted provider(s) and record the
+    outcome in the confirmed-tools store.
 
-    This is the started → ready transition for a single server, and it is NOT
-    automatic — a mounted server sits at "started" until something calls this
-    (startup, enable, restart, or the HTTP connection's tools-ready callback).
-    A just-(re)spawned process is not immediately serving, so we retry until
-    *timeout*.
+    This is the started → ready transition attempt for a single server, and it
+    is NOT automatic — a mounted server sits at "started" until something
+    calls this (startup, enable, restart, the HTTP connection's tools-ready
+    callback, or an upstream ``tools/list_changed``). A just-(re)spawned
+    process is not immediately serving, so a non-answering OR answered-empty
+    list is retried every *interval* until *timeout* — an empty 200 from a
+    warming upstream (isolate=true servers at boot do this deterministically)
+    is not readiness, and the retry is what guarantees a bounded trailing
+    publication once the upstream's registry fills.
 
     Listing goes through the mounted provider (see mounts.get_server_providers),
     so the returned tools carry fastmcp's own namespacing — the exact shape an
-    aggregate fetch produces. On success the slice is sanitized + filtered and
-    stored in the per-server cache (so the tools are already known, not just
-    known-to-exist), THEN the tool cache is invalidated, which broadcasts
-    ``tools/list_changed``. Nothing is broadcast before the list returns, so
-    clients are never told to re-fetch into a half-up server. Returns True on
-    success; False on timeout (the server stays started-not-ready, no
-    broadcast).
+    aggregate fetch produces. Outcomes:
+
+    - Non-empty ``raw`` → READY: the sanitized + filtered slice is stored and,
+      iff that confirmed a new server or changed the list's content, ONE
+      ``tools/list_changed`` publication fires (clear + notify). An unchanged
+      re-prime is broadcast-silent. Gating is on ``raw`` (pre-filter), so a
+      tool_filter that legitimately filters to zero still confirms.
+    - Only empty answers until *timeout* → EMPTY: nothing stored, nothing
+      published — the last-known-good slice (if any) is untouched. Late
+      convergence comes from the monitor's re-probe (HTTP), the next
+      aggregate fetch (merge promotion), or the upstream's own
+      ``tools/list_changed``.
+    - No answer within *timeout* → FAILED: server stays started, no store, no
+      broadcast.
     """
     from mcp_combiner.mounts import get_server_providers
 
@@ -324,7 +393,7 @@ async def prime_server_tools(
         providers = get_server_providers(combiner, name)
         if not providers:
             logger.warning("prime: '%s' has no mounted providers — nothing to list", name)
-            return False
+            return PrimeOutcome.FAILED
 
         async def _list_all(provs: list[Any]) -> list[Tool]:
             out: list[Tool] = []
@@ -343,22 +412,44 @@ async def prime_server_tools(
                     timeout,
                     e,
                 )
-                return False
+                return PrimeOutcome.FAILED
+            await asyncio.sleep(interval)
+            continue
+
+        if not raw:
+            # Answered, but empty: the upstream is up before its tool registry
+            # is usable. Not readiness — retry like a non-answer, so the
+            # eventual populated answer IS the trailing publication.
+            if loop.time() >= deadline:
+                logger.info(
+                    "prime: '%s' answered only empty tools/list within %.0fs — "
+                    "deferring (nothing stored or published; tools appear via "
+                    "monitor re-probe, the next fetch, or upstream list_changed)",
+                    name,
+                    timeout,
+                )
+                return PrimeOutcome.EMPTY
             await asyncio.sleep(interval)
             continue
 
         filtered = _filter_tools(_sanitize_tools(raw))
-        RUNTIME.tools.store_slice(name, filtered, time.time())
-        logger.info(
-            "prime: '%s' listed %d tool(s) — slice stored, invalidating cache",
-            name,
-            len(filtered),
-        )
-        invalidate_tool_cache()
-        return True
+        if RUNTIME.tools.store_slice(name, filtered, time.time()):
+            logger.info(
+                "prime: '%s' listed %d tool(s) — slice ready, publishing",
+                name,
+                len(filtered),
+            )
+            invalidate_tool_cache()
+        else:
+            logger.info(
+                "prime: '%s' listed %d tool(s) — unchanged, no publication",
+                name,
+                len(filtered),
+            )
+        return PrimeOutcome.READY
 
 
-def spawn_prime(combiner: FastMCP, name: str) -> asyncio.Task[bool]:
+def spawn_prime(combiner: FastMCP, name: str) -> asyncio.Task[PrimeOutcome]:
     """Run prime_server_tools in the background, keeping a strong task ref."""
     task = asyncio.get_running_loop().create_task(prime_server_tools(combiner, name))
     RUNTIME.prime_tasks.add(task)
@@ -367,29 +458,37 @@ def spawn_prime(combiner: FastMCP, name: str) -> asyncio.Task[bool]:
 
 
 def _on_upstream_tools_ready(name: str) -> None:
-    """ConnectionManager tools-ready callback: prime, store, then broadcast.
+    """Tools-ready / tools-changed callback: run the shared, gated prime.
 
-    The connection's own probe just confirmed the upstream answers tools/list,
-    so run the shared prime — it re-lists through the mounted provider (warm
-    connection), stores the namespaced slice, and invalidates. This keeps HTTP
-    and stdio on ONE started → ready path. If the prime can't run (combiner not
-    up yet, no loop) or fails, fall back to the bare invalidation the callback
-    used to do — the probe did confirm listability, so announcing is safe.
+    Fired by the ConnectionManager probe (the upstream answers tools/list),
+    the reconnect monitor, and the upstream ``tools/list_changed`` handler.
+    Runs the shared prime — it re-lists through the mounted provider (warm
+    connection) and records the outcome in the confirmed-tools store; whether
+    anything is *published* is decided there (new confirmation or content
+    replacement only). This keeps HTTP and stdio on ONE started → ready path.
+
+    If the prime cannot run at all (combiner not up yet, no loop), fall back
+    to a SILENT cache clear: no list was confirmed, so nothing may be
+    published — the next fetch serves live truth and its merge promotion
+    publishes if warranted.
     """
     combiner = RUNTIME.combiner
     if combiner is None:
-        invalidate_tool_cache()
+        clear_tool_cache()
         return
 
-    async def _prime_or_announce() -> None:
-        if not await prime_server_tools(combiner, name):
-            invalidate_tool_cache()
+    async def _prime_gated() -> None:
+        if await prime_server_tools(combiner, name) is not PrimeOutcome.READY:
+            # No confirmed list came back (never answered, or only empty
+            # answers) — clear silently so the next fetch re-lists live;
+            # publication waits for a confirmed list.
+            clear_tool_cache()
 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        invalidate_tool_cache()
+        clear_tool_cache()
         return
-    task = loop.create_task(_prime_or_announce())
+    task = loop.create_task(_prime_gated())
     RUNTIME.prime_tasks.add(task)
     task.add_done_callback(RUNTIME.prime_tasks.discard)

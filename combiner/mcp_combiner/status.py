@@ -45,9 +45,12 @@ def build_server_status(
         # subprocess has crashed. No connection lifecycle tracks this, so the
         # failure mark is the down signal until a successful call clears it.
         state = "disconnected"
-    elif RUNTIME.tools.local_tools_ready.get(name):
-        # stdio / non-connection-managed server whose tools are confirmed
-        # listable (seen in a fetch, or a priming list succeeded).
+    elif name in RUNTIME.tools.server_tools:
+        # stdio / non-connection-managed server with a confirmed slice — a
+        # real tools/list answered (seen in a fetch, or a priming list
+        # succeeded). A warming server that only answered empty stores
+        # nothing, so it deliberately reads "connected", never green-ready
+        # with no tools.
         state = "ready"
     else:
         # Mounted/started but tools not yet confirmed — the same "connected"

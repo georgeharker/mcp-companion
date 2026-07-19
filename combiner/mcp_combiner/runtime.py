@@ -140,9 +140,31 @@ class SessionRegistry:
         return self.pending_token_filters.pop(token, None)
 
 
+def _tool_fingerprint(tool: "Tool") -> str:
+    """Stable content digest of one tool definition.
+
+    Covers everything a downstream client caches from tools/list — name,
+    description, input/output schema — so a schema-only change counts as "a
+    new tool list came back from the MCP" (a publication) even when no name
+    changed. ``default=str`` keeps exotic field values from breaking the dump.
+    """
+    import json
+
+    return json.dumps(
+        {
+            "name": str(tool.name),
+            "description": getattr(tool, "description", None),
+            "parameters": getattr(tool, "parameters", None),
+            "output_schema": getattr(tool, "output_schema", None),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
 @dataclass
 class ToolCacheState:
-    """tools/list cache + per-server hysteresis + local readiness state.
+    """tools/list cache + per-server hysteresis + confirmed-tools store.
 
     All WRITES go through the methods below; the containers stay public for
     reads (and for the server.py compatibility aliases).
@@ -153,17 +175,24 @@ class ToolCacheState:
     cache_time: float = 0.0
     # Per-server last-known-good slices + when each was last seen live
     # (the stale-tool hysteresis that stops cross-server flapping).
+    # Presence in server_tools is the validity bit: an entry exists iff a REAL
+    # tool list came back from that MCP ("confirmed"). An empty/unanswered
+    # prime stores nothing, so the store only ever holds publishable lists —
+    # last-known-good survives a warming restart by construction. Mirrors
+    # _ManagedConnection._tools_ready for servers WITHOUT a ConnectionManager
+    # entry.
     server_tools: dict[str, list[Tool]] = field(default_factory=dict)
     server_seen: dict[str, float] = field(default_factory=dict)
-    # started→ready tri-state for servers WITHOUT a ConnectionManager entry
-    # (stdio / sharedserver), mirroring _ManagedConnection._tools_ready.
-    local_tools_ready: dict[str, bool] = field(default_factory=dict)
     # How long a reconnecting server's last-known tools stay advertised after
     # it stops appearing in fresh fetches (the hysteresis window). Overridable
     # via create_combiner(stale_tool_grace=…) / --stale-tool-grace.
     stale_grace: float = 30.0
     # Lazy liveness: server name -> last error message from a failed call.
     failed_servers: dict[str, str] = field(default_factory=dict)
+    # Bumped on every clear. A fetch that started before a clear must not
+    # re-validate the cache with its (pre-clear) result — see
+    # ``set_cache_if_current``.
+    generation: int = 0
 
     # -- aggregate cache -----------------------------------------------------
 
@@ -171,23 +200,50 @@ class ToolCacheState:
         self.cache = tools
         self.cache_time = now
 
+    def set_cache_if_current(self, tools: list[Tool], now: float, generation: int) -> bool:
+        """Fill the cache only if no clear happened since *generation* was read.
+
+        Closes the invalidate-vs-inflight-fetch race: a prime (or config
+        event) that clears + notifies mid-fetch must win — the stale fetch
+        result is still returned to its caller, but the cache stays cleared so
+        the notified sessions' re-fetch lists live instead of hitting a
+        freshly-stamped pre-clear list. Returns False when the fill was
+        skipped.
+        """
+        if generation != self.generation:
+            return False
+        self.set_cache(tools, now)
+        return True
+
     def clear_cache(self) -> None:
         self.cache = None
         self.cache_time = 0.0
+        self.generation += 1
 
-    # -- per-server slices (hysteresis) --------------------------------------
+    # -- per-server slices (hysteresis + confirmed store) ---------------------
 
-    def store_slice(self, server: str, tools: list[Tool], now: float) -> None:
-        """Record a server's live tool slice and confirm it tools-ready."""
+    def store_slice(self, server: str, tools: list[Tool], now: float) -> bool:
+        """Record a confirmed tool list for *server*.
+
+        Returns True iff this is a publication event: the server had no
+        confirmed slice before (a ready-transition), or its confirmed list
+        differs in CONTENT — name, description, or schema — from the new one
+        (a replacement: "a new tool list came back from the MCP"). An
+        unchanged list only refreshes ``server_seen`` and returns False, so
+        repeated fetches/primes are broadcast-silent. Comparison is
+        order-insensitive.
+        """
+        was_confirmed = server in self.server_tools
+        old = sorted(_tool_fingerprint(t) for t in self.server_tools.get(server, []))
+        new = sorted(_tool_fingerprint(t) for t in tools)
         self.server_tools[server] = tools
         self.server_seen[server] = now
-        self.local_tools_ready[server] = True
+        return not was_confirmed or old != new
 
     def evict_slice(self, server: str) -> None:
-        """Forget a server's slice + readiness (removed/disabled/expired)."""
+        """Forget a server's confirmed slice (removed/disabled/expired)."""
         self.server_tools.pop(server, None)
         self.server_seen.pop(server, None)
-        self.local_tools_ready.pop(server, None)
 
     # -- lazy failure bookkeeping ---------------------------------------------
 
@@ -250,7 +306,7 @@ def reset() -> None:
     r.tools.cache_time = 0.0
     r.tools.server_tools.clear()
     r.tools.server_seen.clear()
-    r.tools.local_tools_ready.clear()
+    r.tools.generation = 0
     r.tools.stale_grace = 30.0
     r.tools.failed_servers.clear()
     r.prime_tasks.clear()

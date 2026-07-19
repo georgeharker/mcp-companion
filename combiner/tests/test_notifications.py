@@ -27,6 +27,7 @@ from mcp.types import (
     ServerNotification,
     TaskStatusNotification,
     TaskStatusNotificationParams,
+    ToolListChangedNotification,
 )
 from pydantic import AnyUrl
 
@@ -83,6 +84,12 @@ def _updated(uri: str) -> ServerNotification:
 def _list_changed() -> ServerNotification:
     return ServerNotification(
         ResourceListChangedNotification(method="notifications/resources/list_changed")
+    )
+
+
+def _tools_changed() -> ServerNotification:
+    return ServerNotification(
+        ToolListChangedNotification(method="notifications/tools/list_changed")
     )
 
 
@@ -296,6 +303,26 @@ class TestForwarding:
         handler = _ResourceNotifyHandler(client, "svg-mcp", target=target)
         await handler(_list_changed())
         assert target.list_changed == 1
+
+    async def test_tool_list_changed_triggers_reprime_not_forward(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The upstream's own tool ready-edge: routed through the gated prime
+        for THIS server (which decides any publication), NOT blind-forwarded
+        to the downstream target — so clients are never told to re-fetch into
+        a cache whose slice for this server may still be stale."""
+        import mcp_combiner.toolcache as toolcache_mod
+
+        reprimed: list[str] = []
+        monkeypatch.setattr(toolcache_mod, "_on_upstream_tools_ready", reprimed.append)
+
+        client = _FakeClient()
+        target = _FakeSession()
+        handler = _ResourceNotifyHandler(client, "svg-mcp", target=target)
+        await handler(_tools_changed())  # full dispatch chain
+
+        assert reprimed == ["svg-mcp"]  # server A's session can only re-prime A
+        assert target.list_changed == 0  # no blind downstream forward
 
     async def test_no_resource_notification_is_passthrough(self) -> None:
         """A server that emits no resource notifications: dispatch a task notif —

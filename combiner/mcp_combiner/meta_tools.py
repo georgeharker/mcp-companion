@@ -213,6 +213,7 @@ def register_meta_tools(
             )
 
         from mcp_combiner.toolcache import (
+            PrimeOutcome,
             clear_tool_cache,
             invalidate_tool_cache,
             prime_server_tools,
@@ -286,8 +287,14 @@ def register_meta_tools(
             # the respawn and re-list the stale/empty set (issue: restart not
             # surfacing new tools).
             clear_tool_cache()
-            if await prime_server_tools(combiner, server_name):
+            outcome = await prime_server_tools(combiner, server_name)
+            if outcome is PrimeOutcome.READY:
                 ready_note = ""
+            elif outcome is PrimeOutcome.EMPTY:
+                ready_note = (
+                    "; server answers but lists no tools yet — they appear "
+                    "(and are announced) once its registry is live"
+                )
             else:
                 ready_note = "; server not yet listable — tools appear once it is live"
 

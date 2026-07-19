@@ -104,15 +104,13 @@ _prime_tasks: set[asyncio.Task[Any]] = RUNTIME.prime_tasks
 _server_tool_cache: dict[str, list[Tool]] = RUNTIME.tools.server_tools
 _server_tool_seen: dict[str, float] = RUNTIME.tools.server_seen
 
-# Tools-ready state for stdio / sharedserver servers — those WITHOUT a persistent
-# HTTP connection tracked by ConnectionManager. This mirrors ConnectionManager's
-# ``_tools_ready`` so a mounted proxy gets the SAME started → ready tri-state: a
-# freshly mounted or restarted proxy is "started" (process/proxy up, tools not
-# yet confirmed) — NOT assumed ready — until a tools/list confirms its tools are
-# listable. Set True when the server appears in a fresh fetch
-# (_merge_stale_server_tools) or a priming list succeeds (prime_server_tools);
-# dropped when the server is evicted from the slice cache (_merge_stale_server_tools).
-_local_tools_ready: dict[str, bool] = RUNTIME.tools.local_tools_ready
+# Confirmed-tools store: presence of a server in _server_tool_cache IS its
+# tools-ready bit (bi-state — mirrors ConnectionManager's ``_tools_ready``).
+# A freshly mounted or restarted proxy is "started" (absent); an entry exists
+# only once a REAL tools/list answered — via a fresh fetch
+# (_merge_stale_server_tools) or a priming list (prime_server_tools). An
+# answered-empty prime stores nothing, so a warming server never reads ready
+# and its last-known-good slice survives a restart by construction.
 
 
 # --- Session registry for ToolListChanged notifications ---

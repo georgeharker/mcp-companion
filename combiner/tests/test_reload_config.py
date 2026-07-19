@@ -256,10 +256,21 @@ async def test_restart_stdio_primes_before_broadcast(
     order: list[str] = []
 
     # The prime lists tools through the MOUNTED PROVIDER (mount registry), not
-    # the raw proxy — record the invocation there.
+    # the raw proxy — record the invocation there. Answer a REAL tool: the
+    # publication is gated on a non-empty list (and this one differs from the
+    # pre-restart slice, so it is a replacement → broadcast).
+    from fastmcp.tools.function_tool import FunctionTool
+
     async def _list_tools(self: Any) -> list[Any]:
         order.append("list_tools")
-        return []
+        return [
+            FunctionTool(
+                fn=lambda: None,
+                name="crib_ping",
+                description="",
+                parameters={"type": "object", "properties": {}},
+            )
+        ]
 
     monkeypatch.setattr(FakeProvider, "list_tools", _list_tools)
     monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
@@ -268,10 +279,9 @@ async def test_restart_stdio_primes_before_broadcast(
     monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
     monkeypatch.setattr(toolcache_mod, "clear_tool_cache", lambda: order.append("clear"))
 
-    # Pre-restart: crib had a cached slice and read "ready".
+    # Pre-restart: crib had a confirmed (empty-after-filter) slice → "ready".
     srv._server_tool_cache["crib"] = []
     srv._server_tool_seen["crib"] = 1.0
-    srv._local_tools_ready["crib"] = True
 
     register_meta_tools(combiner, config, conn, ss)
     mount_server_provider(combiner, object(), "crib")
@@ -283,11 +293,76 @@ async def test_restart_stdio_primes_before_broadcast(
         assert order.index("list_tools") < order.index("invalidate")
         # Cache cleared silently before the ready-gated broadcast.
         assert order.index("clear") < order.index("list_tools")
-        # Re-confirmed ready. Unified with reconnect: the slice is NOT evicted —
-        # it is kept (grace) and refreshed by the fresh fetch after tools-ready.
-        assert srv._local_tools_ready.get("crib") is True
+        # Re-confirmed. Unified with reconnect: the slice is NOT evicted — it
+        # is kept (grace) and replaced by the fresh list once tools answer.
         assert "crib" in srv._server_tool_cache
     finally:
-        srv._local_tools_ready.pop("crib", None)
+        srv._server_tool_cache.pop("crib", None)
+        srv._server_tool_seen.pop("crib", None)
+
+
+async def test_restart_stdio_empty_answer_keeps_slice_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restarted server that only answers EMPTY tools/list (respawned
+    process, registry not yet populated) must neither broadcast nor clobber
+    the last-known-good confirmed slice — hysteresis keeps serving it until a
+    real list arrives (prime retry, monitor re-probe, or merge promotion
+    publishes then)."""
+    import mcp_combiner.server as srv
+
+    cfg_path = tmp_path / "servers.json"
+    _write(cfg_path, {"crib": {"command": "true"}})
+    config = CombinerConfig.load(str(cfg_path))
+
+    combiner = FakeCombiner()
+    conn = FakeConnManager()
+    ss = FakeSSManager(sharedserver_backed={"crib"})
+
+    order: list[str] = []
+
+    async def _list_tools(self: Any) -> list[Any]:
+        order.append("list_tools")
+        return []
+
+    monkeypatch.setattr(FakeProvider, "list_tools", _list_tools)
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
+    monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
+    monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
+    monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
+    monkeypatch.setattr(toolcache_mod, "clear_tool_cache", lambda: order.append("clear"))
+
+    # Keep the empty-answer retry window short — the real prime retries an
+    # answered-empty list until its (default 30s) deadline.
+    real_prime = toolcache_mod.prime_server_tools
+
+    async def fast_prime(combiner_, name_, timeout=None, interval=None):
+        return await real_prime(combiner_, name_, timeout=0.05, interval=0.0)
+
+    monkeypatch.setattr(toolcache_mod, "prime_server_tools", fast_prime)
+
+    from fastmcp.tools.function_tool import FunctionTool
+
+    good = FunctionTool(
+        fn=lambda: None,
+        name="crib_ping",
+        description="",
+        parameters={"type": "object", "properties": {}},
+    )
+    srv._server_tool_cache["crib"] = [good]
+    srv._server_tool_seen["crib"] = 1.0
+
+    register_meta_tools(combiner, config, conn, ss)
+    mount_server_provider(combiner, object(), "crib")
+
+    try:
+        result = await combiner.tools["combiner__restart_server"]("crib")
+        assert "restarted" in result
+        assert "no tools yet" in result  # the EMPTY outcome is surfaced
+        # An answered-but-empty list is never a publication.
+        assert "invalidate" not in order
+        # The last-known-good confirmed slice survives the empty answers.
+        assert [str(t.name) for t in srv._server_tool_cache["crib"]] == ["crib_ping"]
+    finally:
         srv._server_tool_cache.pop("crib", None)
         srv._server_tool_seen.pop("crib", None)

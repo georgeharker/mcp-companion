@@ -29,16 +29,36 @@ def _fake_conn(name: str, client: object) -> SimpleNamespace:
 
 class TestSignalToolsReady:
     async def test_signals_ready_when_list_succeeds(self):
-        """A successful priming tools/list fires on_tools_ready exactly once."""
+        """A priming tools/list that answers WITH tools fires on_tools_ready
+        exactly once."""
+        ready: list[str] = []
+
+        async def list_tools():
+            return [SimpleNamespace(name="alpha_one")]
+
+        mgr = ConnectionManager(on_tools_ready=lambda name: ready.append(name))
+        conn = _fake_conn("alpha", SimpleNamespace(list_tools=list_tools))
+        await mgr._signal_tools_ready(conn)
+
+        assert ready == ["alpha"]
+        assert conn._tools_ready is True
+
+    async def test_empty_answer_defers_ready(self):
+        """An answered-but-EMPTY tools/list is a warming upstream, not
+        readiness: _tools_ready stays unset so the health monitor's
+        connected-but-not-ready branch keeps re-running this probe (another
+        tools/list after each interval), and on_tools_ready does not fire."""
         ready: list[str] = []
 
         async def list_tools():
             return []
 
         mgr = ConnectionManager(on_tools_ready=lambda name: ready.append(name))
-        await mgr._signal_tools_ready(_fake_conn("alpha", SimpleNamespace(list_tools=list_tools)))
+        conn = _fake_conn("alpha", SimpleNamespace(list_tools=list_tools))
+        await mgr._signal_tools_ready(conn)
 
-        assert ready == ["alpha"]
+        assert ready == []
+        assert getattr(conn, "_tools_ready", False) is False
 
     async def test_does_not_signal_when_list_fails(self):
         """If priming tools/list raises, readiness is NOT signalled (tools unconfirmed)."""
@@ -105,8 +125,16 @@ class TestMonitorRePrime:
         fired: list[str] = []
         mgr = ConnectionManager(on_tools_ready=lambda name: fired.append(name))
 
+        # A warming upstream: answers empty for a while, then serves its tools.
+        # The monitor must keep re-probing through the empty answers (each one
+        # defers tools-ready) and confirm only on the populated one.
+        state = {"n": 0}
+
         async def list_tools():
-            return []
+            state["n"] += 1
+            if state["n"] < 3:
+                return []
+            return [SimpleNamespace(name="a_one")]
 
         async def ping():
             return None
@@ -132,6 +160,52 @@ class TestMonitorRePrime:
         # Re-primed: reached ready and fired on_tools_ready (at least once).
         assert conn._tools_ready is True
         assert "a" in fired
+
+    async def test_monitor_probe_gives_up_eventually(self, monkeypatch):
+        """A persistently deferring upstream (forever-empty tools/list) is not
+        re-probed forever: past the give-up window the monitor stops listing
+        it (reconnect or upstream list_changed re-arms), while the keepalive
+        ping keeps running."""
+        import asyncio
+
+        import mcp_combiner.connections as conns
+
+        monkeypatch.setattr(conns, "_HEALTH_CHECK_INTERVAL", 0.0)
+        monkeypatch.setattr(conns, "_TOOLS_PROBE_GIVEUP", 0.0)  # give up after 1st defer
+
+        mgr = ConnectionManager(on_tools_ready=lambda name: None)
+        listed = {"n": 0}
+        pings = {"n": 0}
+
+        async def list_tools():
+            listed["n"] += 1
+            return []
+
+        async def ping():
+            pings["n"] += 1
+            return None
+
+        client = SimpleNamespace(is_connected=lambda: True, list_tools=list_tools, ping=ping)
+        conn = SimpleNamespace(
+            name="a", _auth_failed=False, client_ref=[client], _tools_ready=False
+        )
+
+        task = asyncio.create_task(mgr._monitor(conn))
+        try:
+            for _ in range(200):
+                if getattr(conn, "_tools_probe_gave_up", False) and pings["n"] > listed["n"] + 2:
+                    break
+                await asyncio.sleep(0.001)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        assert listed["n"] == 1  # probed once, then gave up
+        assert conn._tools_probe_gave_up is True
+        assert pings["n"] > listed["n"]  # keepalive unaffected
 
     async def test_monitor_reconnects_when_prime_fails_on_stale_session(self, monkeypatch):
         """A session that claims is_connected() but can't serve tools/list (the
@@ -513,20 +587,21 @@ class TestBuildServerStatus:
 
     def test_stdio_server_tristate(self):
         """A stdio server is 'connected' (started) until its tools are confirmed
-        listable, then 'ready' — the same tri-state HTTP servers get. Mounting
-        alone is NOT assumed ready."""
+        listable, then 'ready' — the same lifecycle HTTP servers get. Presence
+        of a confirmed slice IS the ready bit; mounting alone (no slice — e.g.
+        a warming server that only ever answered empty) is NOT assumed ready."""
         import mcp_combiner.server as srv
         from mcp_combiner.server import build_server_status
 
         cfg = self._config()
         # 'everything' is a stdio server in the fixture, not connection-managed.
-        srv._local_tools_ready.pop("everything", None)
+        srv._server_tool_cache.pop("everything", None)
         try:
             assert build_server_status(cfg, ConnectionManager(), "everything").state == "connected"
-            srv._local_tools_ready["everything"] = True
+            srv._server_tool_cache["everything"] = []
             assert build_server_status(cfg, ConnectionManager(), "everything").state == "ready"
         finally:
-            srv._local_tools_ready.pop("everything", None)
+            srv._server_tool_cache.pop("everything", None)
 
     def test_http_server_reflects_connection_lifecycle(self):
         from mcp_combiner.server import build_server_status
@@ -547,7 +622,7 @@ class TestBuildServerStatus:
 
         cfg = self._config()
         srv._failed_servers.pop("everything", None)
-        srv._local_tools_ready["everything"] = True
+        srv._server_tool_cache["everything"] = []
         try:
             # Healthy, tools-confirmed stdio server → ready.
             assert build_server_status(cfg, ConnectionManager(), "everything").state == "ready"
@@ -557,7 +632,7 @@ class TestBuildServerStatus:
             assert got == "disconnected"
         finally:
             srv._failed_servers.pop("everything", None)
-            srv._local_tools_ready.pop("everything", None)
+            srv._server_tool_cache.pop("everything", None)
 
     def test_call_failure_overrides_optimistic_http_ready(self):
         """A recorded failure downgrades an otherwise-'ready' HTTP server."""

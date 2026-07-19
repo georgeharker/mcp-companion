@@ -94,6 +94,14 @@ _HEALTH_CHECK_INTERVAL = _env_float("MCP_COMBINER_HEALTH_INTERVAL", 30.0)
 # an OAuth upstream whose ping rides a token refresh out to the provider — a
 # perfectly live session can take several seconds to answer, so this is tunable.
 _HEALTH_PING_TIMEOUT = _env_float("MCP_COMBINER_HEALTH_PING_TIMEOUT", 10.0)
+# Backoff for the connected-but-not-tools-ready re-probe (a deferring upstream
+# that answers tools/list empty, or one whose prime keeps failing). The probe
+# starts at the health interval, doubles up to the cap, and gives up entirely
+# after the give-up window — a persistently tool-less upstream shouldn't be
+# re-listed forever. A reconnect resets the schedule; the upstream's own
+# tools/list_changed converges it regardless.
+_TOOLS_PROBE_BACKOFF_MAX = _env_float("MCP_COMBINER_TOOLS_PROBE_BACKOFF_MAX", 300.0)
+_TOOLS_PROBE_GIVEUP = _env_float("MCP_COMBINER_TOOLS_PROBE_GIVEUP", 1800.0)
 # Consecutive health-check ping misses tolerated before the monitor tears down
 # and reconnects a still-"connected" session. >1 stops a single slow/dropped
 # ping (a transient timeout on a laggy network) from amputating a working
@@ -154,6 +162,13 @@ class _ManagedConnection:
     # can be up while the tool set is still warming. Drives the lifecycle_state
     # "connected" → "ready" transition. Cleared on reconnect / call failure.
     _tools_ready: bool = field(default=False, repr=False)
+    # Not-ready re-probe schedule (see _monitor): current backoff, the
+    # monotonic time before which no probe runs, and when the deferring
+    # started (0.0 = fresh — probe immediately, no give-up clock running).
+    _tools_probe_backoff: float = field(default=0.0, repr=False)
+    _next_tools_probe: float = field(default=0.0, repr=False)
+    _tools_probe_started: float = field(default=0.0, repr=False)
+    _tools_probe_gave_up: bool = field(default=False, repr=False)
     # Consecutive failed _open attempts from the reconnect monitor. At
     # _BACKING_RESTART_AFTER a sharedserver-backed upstream gets its backing
     # process hard-restarted (see _reconnect). Reset on any successful open.
@@ -563,16 +578,19 @@ class ConnectionManager:
         the fallbacks.
 
         This handles upstreams whose first ``tools/list`` *blocks* until their
-        tool set is ready. An upstream that instead returns an empty list and
-        later emits ``notifications/tools/list_changed`` needs that notification
-        propagated too — the upstream message handler (not yet installed) should
-        also call ``on_tools_ready``.
+        tool set is ready. An upstream that instead ANSWERS an empty list is
+        still warming — its registry isn't usable yet — so tools-ready is
+        deferred: ``_tools_ready`` stays False and the health monitor re-runs
+        this probe every interval (another tools/list after a delay) until a
+        populated answer confirms it. The upstream handler's
+        ``on_tool_list_changed`` re-prime (see notifications.py) is the
+        push-flavored edge for upstreams that announce themselves.
         """
         client = conn.client_ref[0]
         if client is None or self._on_tools_ready is None:
             return
         try:
-            await asyncio.wait_for(client.list_tools(), timeout=_TOOLS_READY_TIMEOUT)
+            tools = await asyncio.wait_for(client.list_tools(), timeout=_TOOLS_READY_TIMEOUT)
         except Exception as e:
             logger.warning(
                 "Priming tools/list for '%s' failed (%s: %s) — deferring "
@@ -582,8 +600,22 @@ class ConnectionManager:
                 e or "no message",
             )
             return
+        if not tools:
+            # Answered-empty is not readiness. Leaving _tools_ready False
+            # keeps the monitor's "connected but tools not ready" branch
+            # re-probing until the upstream actually serves its tools.
+            logger.info(
+                "Priming tools/list for '%s' answered empty — deferring "
+                "tools-ready (monitor re-probes each interval)",
+                conn.name,
+            )
+            return
         conn._tools_ready = True
-        logger.info("Tools ready for '%s' — signalling cache invalidation", conn.name)
+        logger.info(
+            "Tools ready for '%s' — %d tool(s), signalling cache invalidation",
+            conn.name,
+            len(tools),
+        )
         try:
             self._on_tools_ready(conn.name)
         except Exception:
@@ -615,7 +647,12 @@ class ConnectionManager:
 
         # Tools are no longer known-listable while we're down: drop to
         # "connected"/"disconnected" until a fresh connect re-confirms them.
+        # A fresh session also restarts the not-ready probe schedule from zero.
         conn._tools_ready = False
+        conn._tools_probe_backoff = 0.0
+        conn._next_tools_probe = 0.0
+        conn._tools_probe_started = 0.0
+        conn._tools_probe_gave_up = False
 
         # Close the old stack — this ends the previous ``async with client:``
         try:
@@ -675,23 +712,46 @@ class ConnectionManager:
                     continue
 
                 # Connected but tools never confirmed listable — the session came
-                # up while the upstream was still warming, or a restart's initial
-                # prime failed. Re-prime so it reaches "ready" and fires
-                # on_tools_ready (which invalidates + broadcasts the now-current
-                # tool set). Without this the conn stays stuck at "connected"
-                # forever: the monitor otherwise only acts on a *drop*, so a
-                # sharedserver process restart whose first tools/list raced the
-                # respawn would never surface its (possibly changed) tools.
+                # up while the upstream was still warming (answers empty, or a
+                # restart's initial prime failed). Re-prime so it reaches
+                # "ready" and fires on_tools_ready (which invalidates +
+                # broadcasts the now-current tool set) — but on an exponential
+                # backoff with a give-up: a persistently deferring upstream is
+                # re-listed at a decaying cadence, not hammered every interval
+                # forever. A reconnect resets the schedule; the upstream's own
+                # tools/list_changed converges it regardless. The ping below
+                # still runs every interval either way, so a stale session
+                # (upstream restarted; the old session 404s every call) is
+                # reconnected on the normal cadence.
                 if not conn._tools_ready:
-                    logger.info("'%s' connected but tools not ready — re-priming", conn.name)
-                    await self._signal_tools_ready(conn)
-                    if conn._tools_ready:
-                        continue
-                    # Prime failed while the session claims connected — fall
-                    # through to the ping. A stale session (upstream restarted;
-                    # the old session 404s every call) still reports
-                    # is_connected(), so without the ping this branch would
-                    # re-prime forever and never reconnect.
+                    now_m = asyncio.get_running_loop().time()
+                    started = getattr(conn, "_tools_probe_started", 0.0)
+                    if started and now_m - started >= _TOOLS_PROBE_GIVEUP:
+                        if not getattr(conn, "_tools_probe_gave_up", False):
+                            conn._tools_probe_gave_up = True
+                            logger.warning(
+                                "'%s' still not tools-ready after %.0fs — giving up "
+                                "re-probing (reconnect or upstream list_changed re-arms)",
+                                conn.name,
+                                _TOOLS_PROBE_GIVEUP,
+                            )
+                    elif now_m >= getattr(conn, "_next_tools_probe", 0.0):
+                        logger.info("'%s' connected but tools not ready — re-priming", conn.name)
+                        await self._signal_tools_ready(conn)
+                        if conn._tools_ready:
+                            conn._tools_probe_backoff = 0.0
+                            conn._next_tools_probe = 0.0
+                            conn._tools_probe_started = 0.0
+                            conn._tools_probe_gave_up = False
+                            continue
+                        if not started:
+                            conn._tools_probe_started = now_m
+                        conn._tools_probe_backoff = min(
+                            _TOOLS_PROBE_BACKOFF_MAX,
+                            (getattr(conn, "_tools_probe_backoff", 0.0) * 2)
+                            or _HEALTH_CHECK_INTERVAL,
+                        )
+                        conn._next_tools_probe = now_m + conn._tools_probe_backoff
 
                 # Lightweight health-check: MCP ping. One miss doesn't condemn
                 # the session — a slow-but-alive upstream (e.g. a ping riding a

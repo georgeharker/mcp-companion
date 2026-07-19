@@ -127,10 +127,9 @@ async def test_restart_leaves_one_live_provider(
 
             assert len(combiner.providers) == base + 1
 
-            # The restart's prime stored the namespaced slice (started → ready
-            # model: the tools/list answer IS the stored tool set).
+            # The restart's prime stored the namespaced slice (its presence IS
+            # the tools-ready bit; the tools/list answer IS the stored set).
             assert [str(t.name) for t in server_mod._server_tool_cache["crib"]] == ["crib_ping"]
-            assert server_mod._local_tools_ready.get("crib") is True
 
             # The proxied call resolves through the NEW proxy, not a stale one.
             pong = await client.call_tool("crib_ping", {})
@@ -139,4 +138,3 @@ async def test_restart_leaves_one_live_provider(
     finally:
         server_mod._server_tool_cache.pop("crib", None)
         server_mod._server_tool_seen.pop("crib", None)
-        server_mod._local_tools_ready.pop("crib", None)
