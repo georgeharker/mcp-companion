@@ -167,15 +167,22 @@ curl -X POST http://127.0.0.1:9741/mcp \
 
 Outside CodeCompanion, install a plugin so your agent runs and registers the
 combiner itself (one refcounted process shared across clients). Both plugins live
-in this repo — **[`plugins/`](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)**:
+in this repo — **[`plugins/`](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)**.
+
+Prerequisites (once, for either plugin): `uv tool install mcp-combiner` (PyPI),
+`cargo install sharedserver`, and a `servers.json` at
+`~/.config/mcp-combiner/servers.json` (see [MCP Server Config](#mcp-server-config)).
+Then:
 
 - **Claude Code:** `/plugin marketplace add georgeharker/mcp-companion` →
-  `/plugin install mcp-combiner@mcp-companion`
+  `/plugin install mcp-combiner@mcp-companion` → restart the session; verify
+  with `/mcp` (an `mcp-combiner` server with prefixed tools).
 - **OpenCode:** add `"@geohar/opencode-mcp-combiner@latest"` to your `opencode.json`
-  `plugin` list
+  `plugin` list.
 
-See **[plugins/README.md](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)** for options and the host-owned
-(`MCP_COMPANION_COMBINER_URL`) behaviour.
+See **[plugins/README.md](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)** for the full walkthrough (config discovery order, env
+knobs, troubleshooting) and the host-owned (`MCP_COMPANION_COMBINER_URL`)
+behaviour.
 
 ---
 

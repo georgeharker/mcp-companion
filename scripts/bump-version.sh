@@ -7,6 +7,7 @@
 #   - Cargo.toml                ([package] version = "X.Y.Z")        — if present
 #   - the Claude Code plugin    plugins/*/.claude-plugin/plugin.json ("version")
 #   - the opencode plugin       plugins/opencode/package.json        ("version")
+#   - the marketplace listing   .claude-plugin/marketplace.json      (plugins[].version)
 # and creates ONE release tag:
 #   - vX.Y.Z                    (the unified release trigger for PyPI / npm / crate)
 #
@@ -73,6 +74,15 @@ if [ ! -f "$OPENCODE_PKG" ]; then
   OPENCODE_PKG="${_oc[0]}"
 fi
 MANIFESTS+=("$OPENCODE_PKG"); TARGETS+=("json")
+
+# The repo marketplace listing (.claude-plugin/marketplace.json) pins the Claude
+# plugin's version in its plugins[] entry — it advertises the installable
+# version to `/plugin marketplace`, so it must move in lockstep too. Its single
+# "version" key is the plugin entry's (the manifest itself is unversioned).
+MARKETPLACE_JSON="$ROOT/.claude-plugin/marketplace.json"
+if [ -f "$MARKETPLACE_JSON" ] && grep -qE '"version" *:' "$MARKETPLACE_JSON"; then
+  MANIFESTS+=("$MARKETPLACE_JSON"); TARGETS+=("json")
+fi
 
 # ---- args -------------------------------------------------------------------
 do_commit=1; do_tag=1; dry_run=0; arg=""

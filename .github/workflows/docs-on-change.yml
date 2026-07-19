@@ -8,6 +8,8 @@ on:
     paths:
       - "README.md"
       - "index.md"
+      - "plugins/README.md"
+      - "plugins/opencode/README.md"
       - "docs/schemas/project.schema.json"
       - "_quarto.yml"
       - ".github/workflows/docs-on-change.yml"
