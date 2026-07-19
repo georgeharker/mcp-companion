@@ -36,8 +36,13 @@ die() { echo "error: $*" >&2; exit 1; }
 MANIFESTS=()   # every file that gets the new version
 TARGETS=()     # parallel: "toml" | "json"
 
-PYPROJECT="$ROOT/pyproject.toml"
-[ -f "$PYPROJECT" ] && { MANIFESTS+=("$PYPROJECT"); TARGETS+=("toml"); }
+# pyproject.toml: the project's own (root OR a package subdir, e.g. combiner/),
+# excluding vendored/submodule copies (vendor/, node_modules/).
+mapfile -t _py < <(find "$ROOT" -name pyproject.toml \
+                   -not -path '*/vendor/*' -not -path '*/node_modules/*' -not -path '*/target/*' -not -path '*/.git/*' 2>/dev/null \
+                   | while read -r f; do grep -qE '^version *= *"' "$f" && echo "$f"; done)
+if [ "${#_py[@]}" -eq 1 ]; then MANIFESTS+=("${_py[0]}"); TARGETS+=("toml")
+elif [ "${#_py[@]}" -gt 1 ]; then die "multiple versioned pyproject.toml found; pick one: ${_py[*]}"; fi
 
 # Cargo.toml: the one with a top-level [package] version (rust/ or root). Skip target/.
 mapfile -t _cg < <(find "$ROOT" -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
@@ -127,9 +132,22 @@ fi
 for i in "${!MANIFESTS[@]}"; do write_ver "${MANIFESTS[$i]}" "${TARGETS[$i]}" "$new"; done
 echo "updated ${#MANIFESTS[@]} manifests -> $new"
 
+# Keep any Cargo.lock next to a bumped Cargo.toml in sync (the crate's own
+# self-version entry, so a `--locked` build/publish doesn't fail).
+LOCKS=()
+for i in "${!MANIFESTS[@]}"; do
+  [ "${TARGETS[$i]}" = "toml" ] || continue
+  m="${MANIFESTS[$i]}"; case "$m" in */Cargo.toml) : ;; *) continue ;; esac
+  lock="${m%/Cargo.toml}/Cargo.lock"; [ -f "$lock" ] || continue
+  cname="$(grep -E '^name *= *"' "$m" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+  [ -n "$cname" ] || continue
+  sed -i "/^name = \"$cname\"\$/{n;s/^version = \"[^\"]*\"\$/version = \"$new\"/}" "$lock"
+  LOCKS+=("$lock"); echo "  synced $(basename "$lock") ($cname -> $new)"
+done
+
 [ "$do_commit" = 0 ] && { echo "files updated; skipped commit (--no-commit)"; exit 0; }
 
-git -C "$ROOT" add "${MANIFESTS[@]}"
+git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"}
 git -C "$ROOT" commit -m "release: $TAG — lockstep version across all manifests"
 echo "committed."
 
