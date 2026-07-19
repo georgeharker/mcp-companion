@@ -6,6 +6,24 @@
 
 set -u
 
+# --- Instructions ----------------------------------------------------------------
+# Tell the session that combined tools arrive name-prefixed, and to discover what is
+# available rather than assume. Emitted as SessionStart additionalContext on EVERY exit
+# path (several branches below exit early, so a trap rather than a tail fall-through),
+# mirroring the sibling svg-mcp / cribsheet plugins' instructions.txt pattern.
+# Canonical source: CLAUDE.md.example at the repo root, which instructions.txt symlinks.
+# NOTE: stdout IS the hook's JSON payload — every other line in this script goes to
+# stderr so it cannot corrupt it.
+_emit_instructions() {
+  local txt="${CLAUDE_PLUGIN_ROOT}/instructions.txt"
+  if [[ -f "$txt" ]] && command -v jq >/dev/null 2>&1; then
+    jq -Rs '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.}}' <"$txt"
+  elif [[ -f "$txt" ]]; then
+    cat "$txt"
+  fi
+}
+trap _emit_instructions EXIT
+
 # --- Skip when the combiner was launched for us ----------------------------------
 # When Claude Code is spawned by CodeCompanion / mcp-companion, the host editor
 # has already started (and refcounts, via sharedserver) the combiner process, and

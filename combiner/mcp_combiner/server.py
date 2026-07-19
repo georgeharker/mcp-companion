@@ -375,7 +375,28 @@ def create_combiner(
 
     combiner = FastMCP(
         name="mcp-combiner",
-        instructions="MCP Combiner — proxies multiple MCP servers through a single endpoint.",
+        # Client-agnostic counterpart to the editor plugins' instructions.txt
+        # (CLAUDE.md.example at the repo root), which can name each client's own
+        # extra prefix. Keep the two in step.
+        instructions=(
+            "MCP Combiner — proxies multiple MCP servers through a single endpoint.\n"
+            "\n"
+            "Two prefixes stack. This combiner prefixes every proxied tool with the "
+            "upstream server it came from — `<server>_<tool>`, e.g. "
+            "`github_search_code`, `svg-mcp_add_rect` — and your client prefixes this "
+            "endpoint in turn (Claude Code `mcp__…mcp-combiner__github_search_code`). "
+            "So a tool will not appear under the bare name its own docs use: match on "
+            "the tail of a tool name, never the whole string. The combiner's own "
+            "controls are a namespace like any other server: `combiner__status`, "
+            "`combiner__restart_server`, …\n"
+            "\n"
+            "Before concluding a capability is missing, look: scan the tool list for a "
+            "`<server>_` prefix that fits, or call `combiner__status` for every "
+            "configured server and its lifecycle state. The set is not fixed either — "
+            "`combiner__enable_server` (persistent) and "
+            "`combiner__session_enable_server` (this chat only) bring a disabled "
+            "server's tools online."
+        ),
         # Tri-state input-schema validation. None → fastmcp's own default
         # (off — inputs are coerced, not strictly validated); True → force
         # strict validation on; False → force it off. This is the only switch

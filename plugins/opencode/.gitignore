@@ -3,3 +3,6 @@ dist/
 bun.lock
 package-lock.json
 *.tgz
+
+# generated at prepack from ../../CLAUDE.md.example
+instructions.txt

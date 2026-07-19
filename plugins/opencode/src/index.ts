@@ -13,9 +13,10 @@
 // best-effort "make sure something is listening there" half. See README.md.
 
 import { spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode-ai/plugin"
 
 type Options = {
@@ -59,6 +60,8 @@ type Options = {
 
     /** Show TUI toasts for attach/health outcomes. Default `true`. */
     notify?: boolean
+    /** Append the tool-discovery directive to the system prompt. Default `true`. */
+    instructions?: boolean
 }
 
 type LogFn = (level: "info" | "warn" | "error", message: string) => void
@@ -72,6 +75,26 @@ const DEFAULT_GRACE = "30m"
 // The `--mcp` serve flag was introduced in combiner 0.8.0; older versions serve
 // with a bare `--config`. Version-gated so this plugin works across the boundary.
 const MIN_MCP_VERSION: [number, number, number] = [0, 8, 0]
+
+// ── the tool-discovery directive ───────────────────────────────────
+// Appended to the system prompt so the agent knows combined tools arrive under a
+// `<server>_` prefix, and looks (the tool list, `combiner__status`) before deciding a
+// capability is absent. The analogue of the Claude Code plugin's SessionStart
+// additionalContext, which reads the same text. Canonical source: CLAUDE.md.example at
+// the repo root (plugins/claude/instructions.txt symlinks it). A release-time `prepack`
+// copies that file to this package's root as instructions.txt (see package.json
+// `prepack`/`files`); we read the copy ONCE here so the published npm package is
+// self-contained without duplicating the text in source. A dev/unbuilt run (no copy
+// present) falls back to an empty string and simply injects nothing.
+const COMBINER_DIRECTIVE: string = (() => {
+    try {
+        // dist/index.js lives in dist/; the packed copy ships at the package root.
+        const here = dirname(fileURLToPath(import.meta.url))
+        return readFileSync(join(here, "..", "instructions.txt"), "utf8")
+    } catch {
+        return ""
+    }
+})()
 
 // ── sharedserver binary resolution (ported from opencode-sharedserver) ──
 
@@ -346,7 +369,19 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
         cfg.mcp[mcpName] = { type: "remote", url, enabled: true }
         log("info", `registered mcp "${mcpName}" → ${url}`)
     }
-    const hooks = { config: configHook }
+    // The directive: appended to the system prompt each session (analogue of the CC
+    // plugin's SessionStart additionalContext). Contributed unconditionally — the
+    // combiner's tools are reachable whether or not this plugin owns the process.
+    const wantInstructions = opts.instructions !== false
+    const systemHook = async (_input: unknown, output: { system: string[] }) => {
+        if (!wantInstructions || !COMBINER_DIRECTIVE) return
+        output.system.push(COMBINER_DIRECTIVE)
+    }
+
+    const hooks = {
+        config: configHook,
+        "experimental.chat.system.transform": systemHook,
+    }
 
     const env: NodeJS.ProcessEnv = { ...process.env }
     if (opts.lockdir) env.SHAREDSERVER_LOCKDIR = opts.lockdir
