@@ -237,6 +237,20 @@ async def test_agent_calls_neovim_tool_through_combiner(combiner_and_nvim: None)
         assert "neovim_list_buffers" in names, f"neovim tools not surfaced; saw {sorted(names)}"
         assert "neovim_read_buffer" in names
 
+        # Tools surface when the instance's manifest is captured — BEFORE the
+        # editor's separate bind POST lands, so "tools visible" does not imply
+        # "session bound". Wait for the binding this test is about before
+        # exercising it (unbound routing is covered by the tokenless test).
+        bound = None
+        for _ in range(40):
+            listed = await client.call_tool("neovim_list_instances", {})
+            ltext = "".join(b.text for b in listed.content if getattr(b, "type", None) == "text")
+            bound = json.loads(ltext).get("bound")
+            if bound:
+                break
+            await asyncio.sleep(0.25)
+        assert bound, "token binding never became visible to the session"
+
         # Call back into the live editor through the combiner.
         result = await client.call_tool("neovim_read_buffer", {"buffer": 1})
         text = "".join(

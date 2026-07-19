@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -54,6 +53,44 @@ from mcp_combiner.mockserver import (
 # These tests bind a real loopback socket (uvicorn), which the nix build sandbox
 # forbids — so they run in the e2e tier (ci.yml, real runner), not `flake check`.
 pytestmark = pytest.mark.e2e
+
+
+class _NoSignalServer(uvicorn.Server):
+    """A uvicorn Server that never touches process-global signal handlers.
+
+    Running many uvicorn instances in one pytest process is not what uvicorn's
+    ``capture_signals`` was built for: each server swaps the process SIGINT/
+    SIGTERM handlers for its own bound ``handle_exit`` and restores them only
+    on a clean, LIFO unwind — overlapping servers scramble them. Worse,
+    sse-starlette's shutdown watcher *introspects* ``signal.getsignal(SIGTERM)
+    .__self__`` to find "the" uvicorn server and mirrors that server's
+    ``should_exit`` into the process-global, never-reset
+    ``AppStatus.should_exit`` — so one test's teardown (``should_exit = True``
+    observed by a still-polling watcher) permanently poisons every later SSE
+    response in the process: headers go out, the body drains instantly, and
+    the MCP client hangs forever awaiting an InitializeResult that never
+    arrives. Tests drive shutdown via ``should_exit``/cancellation, so signal
+    capture is pure liability here.
+    """
+
+    @contextlib.contextmanager
+    def capture_signals(self):  # noqa: ANN201 - matches uvicorn's signature
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_sse_appstatus():
+    """Reset sse-starlette's process-global shutdown latch around every test.
+
+    ``AppStatus.should_exit`` is module-global and never reset once True (see
+    _NoSignalServer). Belt-and-braces alongside _NoSignalServer: even if some
+    other path sets it, no test inherits a poisoned latch.
+    """
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.should_exit = False
+    yield
+    AppStatus.should_exit = False
 
 
 # ── in-process HTTP serving of the mock OAuth server ───────────────
@@ -85,7 +122,7 @@ async def oauth_mock() -> AsyncIterator[Callable[..., object]]:
         provider = MockOAuthProvider(resource_url=f"{issuer}/mcp", issuer_url=issuer, config=config)
         mcp_srv, _state = build_server("mock", "http", oauth=provider)
         app = provider.guard(mcp_srv.http_app())
-        server = uvicorn.Server(
+        server = _NoSignalServer(
             uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
         )
         task = asyncio.create_task(server.serve())
@@ -105,6 +142,13 @@ async def oauth_mock() -> AsyncIterator[Callable[..., object]]:
         server.should_exit = True
         with contextlib.suppress(Exception):
             await asyncio.wait_for(task, timeout=5.0)
+        if not task.done():
+            # A server that ignored should_exit must not outlive its test —
+            # a leaked serve task is exactly the cross-test poison this file
+            # was suffering from (see _NoSignalServer).
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
 
 
 @pytest.fixture
@@ -423,14 +467,12 @@ class TestPersistence:
         refreshed_access = mock.provider.audit.issued[-1].access_token
         assert refreshed_access in mock.provider.audit.authenticated_mcp_calls()
 
-    @pytest.mark.skipif(
-        os.environ.get("GITHUB_ACTIONS") == "true",
-        reason="Quarantined from CI (runs locally). Ordering-dependent hang: passes in "
-        "isolation but blocks as the last oauth test — a leaked/incomplete MCP streaming "
-        "connection accumulates across the suite ('ASGI callable returned without "
-        "completing response'), so this 3-session test's request never gets a reply. "
-        "Not a product bug; pending root-cause of the FastMCP/uvicorn/anyio leak.",
-    )
+    # Previously quarantined from CI for an ordering-dependent hang ("ASGI
+    # callable returned without completing response"). Root-caused: not a
+    # product bug — sse-starlette's process-global AppStatus.should_exit
+    # latch, poisoned by an earlier test's uvicorn teardown via signal-handler
+    # introspection. Fixed by _NoSignalServer + the _reset_sse_appstatus
+    # autouse fixture, so it runs everywhere again.
     async def test_cache_without_persisted_expiry_bootstraps_one_refresh(
         self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
     ) -> None:
