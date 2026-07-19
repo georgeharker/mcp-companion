@@ -111,7 +111,7 @@ function splitArgs(value: string | undefined): string[] {
     return value.split(/\s+/).filter((s) => s.length > 0)
 }
 
-/** Resolve how to invoke the combiner, mirroring claude-mcp-combiner's priority:
+/** Resolve how to invoke the combiner, mirroring the Claude mcp-combiner plugin's priority:
  *  explicit option → env command → `mcp-combiner` on PATH →
  *  `uv run --project <checkout> python -m mcp_combiner`. */
 function resolveCombiner(opts: Options, env: NodeJS.ProcessEnv): Command | undefined {
@@ -156,7 +156,7 @@ function combinerNeedsMcpFlag(cmd: Command, env: NodeJS.ProcessEnv): boolean {
     return ver ? gte(ver, MIN_MCP_VERSION) : true
 }
 
-// ── servers.json resolution (mirrors claude-mcp-combiner probing) ──
+// ── servers.json resolution (mirrors the Claude mcp-combiner plugin probing) ──
 
 function resolveConfig(opts: Options, env: NodeJS.ProcessEnv): string | undefined {
     if (opts.config) return opts.config

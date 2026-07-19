@@ -170,7 +170,7 @@ combiner itself (one refcounted process shared across clients). Both plugins liv
 in this repo — **[`plugins/`](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)**:
 
 - **Claude Code:** `/plugin marketplace add georgeharker/mcp-companion` →
-  `/plugin install claude-mcp-combiner@mcp-companion`
+  `/plugin install mcp-combiner@mcp-companion`
 - **OpenCode:** add `"@geohar/opencode-mcp-combiner@latest"` to your `opencode.json`
   `plugin` list
 
@@ -724,7 +724,7 @@ reinstall; `:MCPInstall /path/to/venv` targets a specific venv).
 
 **Sharing the combiner with standalone Claude Code.** Only relevant if you opt into a shared
 `combiner.venv`. Put its `bin/` on `PATH` (or `uv tool install <plugin>/combiner` for a global
-`mcp-combiner`), and the [`claude-mcp-combiner`](https://github.com/georgeharker/claude-mcp-combiner)
+`mcp-combiner`), and the [`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude)
 plugin will find `mcp-combiner` directly — Neovim and standalone Claude then share one combiner
 process.
 

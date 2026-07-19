@@ -9,8 +9,8 @@ Both plugins live **in this repo** (previously separate repos, now retired):
 
 | plugin | dir | for |
 |---|---|---|
-| `claude-mcp-combiner` | [`plugins/claude-mcp-combiner`](./claude-mcp-combiner) | Claude Code |
-| `@geohar/opencode-mcp-combiner` | [`plugins/opencode-mcp-combiner`](./opencode-mcp-combiner) | OpenCode |
+| `mcp-combiner` | [`plugins/claude`](./claude) | Claude Code |
+| `@geohar/opencode-mcp-combiner` | [`plugins/opencode`](./opencode) | OpenCode |
 
 Both attach to (or start) the combiner under the sharedserver name
 `mcp-combiner`, so every client shares one refcounted process. When the host
@@ -18,13 +18,13 @@ editor already owns the combiner (CodeCompanion spawns the agent with
 `MCP_COMPANION_COMBINER_URL` set), each plugin **registers only** and does not
 launch — the host owns the lifecycle at its matching version.
 
-## Claude Code — `claude-mcp-combiner`
+## Claude Code — `mcp-combiner`
 
 Installed from this repo's marketplace:
 
 ```
 /plugin marketplace add georgeharker/mcp-companion
-/plugin install claude-mcp-combiner@mcp-companion
+/plugin install mcp-combiner@mcp-companion
 ```
 
 A `SessionStart` hook runs `sharedserver use … -- mcp-combiner --mcp --config … --port …`
@@ -49,7 +49,7 @@ via the `config` hook, and drives sharedserver the same way as the Claude plugin
 Options (all optional): `mcpName`, `url`, `register`, `manage`, `binary`,
 `lockdir`, `name`, `gracePeriod`, `logFile`, `command`/`args`/`checkout`,
 `config`, `port` (9741), `host`, `notify`. See
-[`plugins/opencode-mcp-combiner/README.md`](./opencode-mcp-combiner/README.md)
+[`plugins/opencode/README.md`](./opencode/README.md)
 for the full table.
 
 `$MCP_COMPANION_COMBINER_URL` (host-owned) or `manage: false` → register-only.

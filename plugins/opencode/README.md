@@ -6,7 +6,7 @@ aggregator available to OpenCode: it starts the combiner (supervised by
 HTTP MCP endpoint with OpenCode.
 
 It is the OpenCode counterpart of the Claude Code plugin
-[`claude-mcp-combiner`](https://github.com/georgeharker/claude-mcp-combiner), and
+[`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude), and
 shares the same combiner and the same `sharedserver` instance — so OpenCode,
 Claude Code, and Neovim can all talk to **one** refcounted combiner process.
 
@@ -102,7 +102,7 @@ In priority order: `command` option → `$OPENCODE_MCP_COMBINER_COMMAND`
 
 If **`$MCP_COMPANION_COMBINER_URL`** is set, an editor/host (e.g. Neovim) already
 owns and refcounts the combiner. The plugin then **only registers** that URL and
-never starts or stops the process — the same early-exit as `claude-mcp-combiner`.
+never starts or stops the process — the same early-exit as the Claude Code `mcp-combiner` plugin.
 Equivalent to setting `manage: false` with an explicit `url`.
 
 ## Environment variables

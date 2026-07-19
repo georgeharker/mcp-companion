@@ -4,7 +4,7 @@ An **MCP aggregator** — fronts multiple MCP servers behind a single Streamable
 one connection exposes every backend server's tools. Built on
 [FastMCP](https://github.com/jlowin/fastmcp). Shareable across clients (via `sharedserver`), it
 powers the [mcp-companion](https://github.com/georgeharker/mcp-companion) Neovim plugin and the
-[`claude-mcp-combiner`](https://github.com/georgeharker/claude-mcp-combiner) Claude Code plugin, and works standalone with any MCP client.
+[`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude) Claude Code plugin, and works standalone with any MCP client.
 
 > PyPI package · command · import package: **`mcp-combiner`** / `mcp-combiner` / `mcp_combiner`.
 

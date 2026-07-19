@@ -125,7 +125,7 @@ M.defaults = {
         -- Optional venv to install/run the combiner from. Unset (default): a
         -- plugin-local venv (<plugin>/combiner/.venv) is created and used —
         -- self-contained. Set a shared venv to let other clients reuse the install
-        -- (put its bin/ on PATH so the claude-mcp-combiner plugin finds `mcp-combiner`).
+        -- (put its bin/ on PATH so the mcp-combiner Claude Code plugin finds `mcp-combiner`).
         -- A user-set venv must already exist — the plugin only `uv pip install`s
         -- into it (additive) and will never `uv venv` (wipe) a venv it doesn't own:
         --   venv = "~/.venv"

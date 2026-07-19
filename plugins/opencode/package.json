@@ -29,12 +29,12 @@
     "repository": {
         "type": "git",
         "url": "git+https://github.com/georgeharker/mcp-companion.git",
-        "directory": "plugins/opencode-mcp-combiner"
+        "directory": "plugins/opencode"
     },
     "bugs": {
         "url": "https://github.com/georgeharker/mcp-companion/issues"
     },
-    "homepage": "https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode-mcp-combiner#readme",
+    "homepage": "https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode#readme",
     "publishConfig": {
         "access": "public"
     },

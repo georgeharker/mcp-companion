@@ -42,7 +42,7 @@ resolve_combiner_command() {
   # Migration aid: this project was renamed `mcp-bridge` → `mcp-combiner`. If only the old
   # command is on PATH, keep working but loudly tell the user to reinstall under the new name.
   if command -v mcp-bridge >/dev/null 2>&1; then
-    echo "claude-mcp-combiner: ⚠ using the OLD 'mcp-bridge' command — it was renamed to 'mcp-combiner'." >&2
+    echo "mcp-combiner: ⚠ using the OLD 'mcp-bridge' command — it was renamed to 'mcp-combiner'." >&2
     echo "  Reinstall: uv tool uninstall mcp-bridge && uv tool install mcp-combiner" >&2
     echo "  (and rename any CLAUDE_MCP_BRIDGE_* env vars to CLAUDE_MCP_COMBINER_*)." >&2
     combiner_cmd=("mcp-bridge")
@@ -64,7 +64,7 @@ resolve_combiner_command() {
 
 combiner_cmd=()
 if ! resolve_combiner_command; then
-  echo "claude-mcp-combiner: cannot find the 'mcp-combiner' command." >&2
+  echo "mcp-combiner: cannot find the 'mcp-combiner' command." >&2
   echo "  Set CLAUDE_MCP_COMBINER_COMMAND, install with 'uv tool install mcp-combiner'," >&2
   echo "  or check out https://github.com/georgeharker/mcp-companion.nvim." >&2
   exit 0
@@ -84,7 +84,7 @@ if [[ -z "$config" ]]; then
   done
 fi
 if [[ -z "$config" || ! -f "$config" ]]; then
-  echo "claude-mcp-combiner: no mcp-servers config found." >&2
+  echo "mcp-combiner: no mcp-servers config found." >&2
   echo "  Set CLAUDE_MCP_COMBINER_CONFIG or create ~/.config/mcp-combiner/servers.json." >&2
   exit 0
 fi
@@ -119,7 +119,7 @@ find_claude_pid() {
 if client_pid=$(find_claude_pid); then
   :
 else
-  echo "claude-mcp-combiner: no 'claude' process in parent chain; falling back to PPID=$PPID" >&2
+  echo "mcp-combiner: no 'claude' process in parent chain; falling back to PPID=$PPID" >&2
   client_pid="$PPID"
 fi
 
@@ -156,7 +156,7 @@ ss_args=(use "$name" --pid "$client_pid" --metadata "claude-$client_pid" --grace
 ss_args+=(-- "${combiner_cmd[@]}" "${serve_flag[@]}" --config "$config" --port "$port")
 
 if ! out="$("$ss_bin" "${ss_args[@]}" 2>&1)"; then
-  echo "claude-mcp-combiner: sharedserver use failed (exit $?):" >&2
+  echo "mcp-combiner: sharedserver use failed (exit $?):" >&2
   [[ -n "$out" ]] && echo "$out" | sed 's/^/  /' >&2
 elif [[ -n "$out" ]]; then
   echo "$out" | sed 's/^/  /' >&2

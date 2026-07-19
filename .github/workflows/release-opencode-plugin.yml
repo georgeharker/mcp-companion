@@ -1,10 +1,11 @@
 name: Release (opencode-mcp-combiner)
 
-# Publishes the @geohar/opencode-mcp-combiner npm plugin. Its version is INDEPENDENT
-# of the combiner (PyPI mcp-combiner), so it uses its OWN scoped tag rather than the
-# combiner's `v*`:
+# Publishes the @geohar/opencode-mcp-combiner npm plugin on the unified release tag
+# (v*), in lockstep with the whole repo — one vX.Y.Z tag releases the nvim plugin,
+# the Claude Code plugin, and this npm package together. Release: bump every manifest
+# with scripts/bump-version.sh <version>, then push the vX.Y.Z tag:
 #
-#   git tag opencode-mcp-combiner-v0.1.1 && git push origin opencode-mcp-combiner-v0.1.1
+#   scripts/bump-version.sh <version> && git push && git push origin v<version>
 #
 # Mirrors release.yml's shape: tag-triggered, trusted publishing (OIDC, no secrets),
 # an environment gate. npm equivalent of PyPI Trusted Publishing:
@@ -20,7 +21,7 @@ name: Release (opencode-mcp-combiner)
 
 on:
   push:
-    tags: ["opencode-mcp-combiner-v*"]
+    tags: ["v*"]
 
 jobs:
   publish:
@@ -31,7 +32,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: plugins/opencode-mcp-combiner
+        working-directory: plugins/opencode
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,9 +45,9 @@ jobs:
       - name: Verify tag matches package version
         run: |
           pkg="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME#opencode-mcp-combiner-v}"
+          tag="${GITHUB_REF_NAME#v}"
           if [ "$pkg" != "$tag" ]; then
-            echo "::error::tag …-v$tag does not match plugin version $pkg — bump plugins/opencode-mcp-combiner/package.json"
+            echo "::error::tag …-v$tag does not match plugin version $pkg — bump plugins/opencode/package.json"
             exit 1
           fi
       - run: npm install --no-audit --no-fund
