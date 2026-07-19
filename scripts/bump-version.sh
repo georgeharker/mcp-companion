@@ -82,10 +82,23 @@ read_ver() { # $1=file $2=kind
   esac
 }
 write_ver() { # $1=file $2=kind $3=new
-  case "$2" in
-    toml) sed -i -E "0,/^version *= *\"[^\"]+\"/s//version = \"$3\"/" "$1" ;;
-    json) sed -i -E "0,/\"version\" *: *\"[^\"]+\"/s//\"version\": \"$3\"/" "$1" ;;
-  esac
+  # NB: python3, not `sed -i -E "0,/re/s//../"`. That form is doubly GNU-only —
+  # BSD/macOS sed reads `-i`'s argument as the backup suffix (so `-E` became one,
+  # littering *-E files) and rejects the `0,/re/` address. The net effect on macOS
+  # was a SILENT no-op: "updated N manifests" while every version stayed put, and
+  # the follow-up commit then failed with "nothing added to commit". Replacing only
+  # the first match, and erroring when there is none, keeps that failure loud.
+  python3 - "$1" "$2" "$3" <<'PY'
+import re, sys
+path, kind, new = sys.argv[1:4]
+pat = {"toml": r'^version *= *"[^"]+"', "json": r'"version" *: *"[^"]+"'}[kind]
+rep = {"toml": f'version = "{new}"', "json": f'"version": "{new}"'}[kind]
+src = open(path).read()
+out, n = re.subn(pat, rep.replace("\\", "\\\\"), src, count=1, flags=re.M)
+if n != 1:
+    sys.exit(f"error: no {kind} version field matched in {path}")
+open(path, "w").write(out)
+PY
 }
 
 highest() { printf '%s\n' "$@" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1; }
@@ -141,7 +154,9 @@ for i in "${!MANIFESTS[@]}"; do
   lock="${m%/Cargo.toml}/Cargo.lock"; [ -f "$lock" ] || continue
   cname="$(grep -E '^name *= *"' "$m" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
   [ -n "$cname" ] || continue
-  sed -i "/^name = \"$cname\"\$/{n;s/^version = \"[^\"]*\"\$/version = \"$new\"/}" "$lock"
+  # `-i.bak` + rm: portable across GNU and BSD sed (bare `-i` differs — see write_ver).
+  sed -i.bak "/^name = \"$cname\"\$/{n;s/^version = \"[^\"]*\"\$/version = \"$new\"/;}" "$lock"
+  rm -f "$lock.bak"
   LOCKS+=("$lock"); echo "  synced $(basename "$lock") ($cname -> $new)"
 done
 
