@@ -18,6 +18,7 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode-ai/plugin"
+import { resolveSharedserver } from "./sharedserver-resolve.js"
 
 type Options = {
     // ── Registration ──────────────────────────────────────────────
@@ -101,27 +102,30 @@ const COMBINER_DIRECTIVE: string = (() => {
 
 // ── sharedserver binary resolution (ported from opencode-sharedserver) ──
 
-const CANDIDATE_BINARIES = [
-    "sharedserver",
-    join(homedir(), ".cargo", "bin", "sharedserver"),
-    join(homedir(), ".local", "bin", "sharedserver"),
-    "/usr/local/bin/sharedserver",
-    "/opt/homebrew/bin/sharedserver",
-]
+// Resolution lives in a module vendored byte-identical from georgeharker/sharedserver
+// (scripts/sync-vendored.sh), so the Claude hook's bin/sharedserver and this plugin
+// answer "which sharedserver, and why" identically. Floor-only against the latest
+// release: mcp-companion consumes sharedserver rather than shipping it.
+const SHAREDSERVER_MIN_VERSION = "0.6.7"
 
-function resolveBinary(override: string | undefined, env: NodeJS.ProcessEnv): string | undefined {
-    const candidates = [override, env.SHAREDSERVER_BIN, ...CANDIDATE_BINARIES].filter(
-        (v): v is string => typeof v === "string" && v.length > 0,
+function resolveBinary(
+    override: string | undefined,
+    env: NodeJS.ProcessEnv,
+    log?: LogFn,
+    toast?: ToastFn,
+): string | undefined {
+    return resolveSharedserver(
+        {
+            label: "mcp-combiner",
+            minVersion: SHAREDSERVER_MIN_VERSION,
+            installerUrl:
+                "https://github.com/georgeharker/sharedserver/releases/latest/download/sharedserver-installer.sh",
+        },
+        override,
+        env,
+        log,
+        toast,
     )
-    for (const candidate of candidates) {
-        if (candidate.includes("/")) {
-            if (existsSync(candidate)) return candidate
-            continue
-        }
-        const probe = spawnSync(candidate, ["--version"], { stdio: "ignore", env })
-        if (probe.status === 0) return candidate
-    }
-    return undefined
 }
 
 // ── combiner command resolution ────────────────────────────────────
@@ -546,7 +550,7 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
         return hooks
     }
 
-    const binary = resolveBinary(opts.binary, env)
+    const binary = resolveBinary(opts.binary, env, log, toast)
     if (!binary) {
         const msg = "sharedserver binary not found; set `binary`/`$SHAREDSERVER_BIN`, or use manage:false"
         log("error", msg)

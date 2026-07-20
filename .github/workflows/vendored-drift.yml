@@ -1,0 +1,39 @@
+name: Vendored drift
+
+# The sharedserver resolver under plugins/claude/bin/ is a byte-identical copy of the
+# one in georgeharker/sharedserver. There is no way to share it — marketplace symlinks
+# do not cross repos, plugin dependencies control installation but not hook order, and
+# OpenCode has no dependency mechanism at all.
+#
+# A copy is fine. An UNDETECTED copy is not: that is how the shared bump-version.sh
+# silently diverged across four repos and had the same fix applied three times. This
+# job re-runs the sync and fails if anything changed.
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  # Upstream can move without anything changing here, so also check on a schedule —
+  # otherwise a drifted copy stays green until someone happens to touch the repo.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Re-sync vendored files
+        run: scripts/sync-vendored.sh
+
+      - name: Fail if the working tree changed
+        run: |
+          if ! git diff --quiet; then
+            echo "::error::vendored files are out of date — run scripts/sync-vendored.sh and commit"
+            git --no-pager diff --stat
+            git --no-pager diff
+            exit 1
+          fi
+          echo "vendored files match upstream $(cat plugins/.sharedserver-version)"
