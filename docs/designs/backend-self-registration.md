@@ -40,6 +40,24 @@ so record them rather than re-discover them.
    URL yields **✘ Failed to connect**, a red error row, not the "not configured"
    placeholder the docs describe. There is no way to switch a server off from env
    via config.
+   - **Nesting does not error — it silently mangles.** Measured live: with
+     `NEST_OUTER` unset and `NEST_INNER=9999`,
+     `${NEST_OUTER:-http://127.0.0.1:${NEST_INNER:-7000}/nested}` expanded to
+     `http://127.0.0.1:${NEST_INNER:-7000/nested}`. The parser scans to the **first**
+     `}`, so it read the default as `http://127.0.0.1:${NEST_INNER:-7000`, substituted
+     that, then appended the leftover `/nested}` as literal text — and the result is
+     **not re-scanned**, leaving a literal `${…}` in the URL. So the failure mode is a
+     malformed endpoint and a confusing connection error, not a diagnostic. This is
+     exactly the trap anyone reaching for the "obvious" fix falls into.
+   - **Consequence for the combiner plugin.** Its `.mcp.json` must keep the
+     whole-string form `${MCP_COMPANION_COMBINER_URL:-http://127.0.0.1:9741/mcp}`,
+     because the host injects a *tokened* URL (`/mcp/<token>`) whose host, port and
+     path all differ — a port-only interpolation cannot express it, and combining
+     both would require the nesting above. That literal `9741` is therefore
+     structural, not laziness, and choosing a different port REQUIRES setting
+     `MCP_COMPANION_COMBINER_URL` as well as `CLAUDE_MCP_COMBINER_PORT`. Which in
+     turn is why the hooks must not read a set URL as "someone else owns this"
+     unless no port was named — see `plugins/claude/hooks/start.sh`.
 3. **Hooks cannot change the current session's MCP set.** It is fixed at startup; a
    hook's config write lands for the *next* session.
 4. **No plugin can configure another.** Expansion reads the environment Claude Code

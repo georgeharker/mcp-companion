@@ -169,10 +169,12 @@ Outside CodeCompanion, install a plugin so your agent runs and registers the
 combiner itself (one refcounted process shared across clients). Both plugins live
 in this repo — **[`plugins/`](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)**.
 
-Prerequisites (once, for either plugin): `uv tool install mcp-combiner` (PyPI),
+Prerequisites (once, for either plugin): [`uv`](https://docs.astral.sh/uv/),
 `cargo install sharedserver`, and a `servers.json` at
 `~/.config/mcp-combiner/servers.json` (see [MCP Server Config](#mcp-server-config)).
-Then:
+
+**You do not need to install the combiner itself** — with `uv` present the plugins fetch a
+pinned release from PyPI on demand. Then:
 
 - **Claude Code:** `/plugin marketplace add georgeharker/mcp-companion` →
   `/plugin install mcp-combiner@mcp-companion` → restart the session; verify
@@ -671,7 +673,6 @@ dependency of mcp-companion so load order is correct:
         "olimorris/codecompanion.nvim",
         "georgeharker/sharedserver",
     },
-    build = "cd combiner && uv sync --frozen",
     config = function()
         require("mcp_companion").setup({
             combiner = {
@@ -700,18 +701,25 @@ require("codecompanion").setup({
 ### Combiner runtime (Python venv)
 
 The Python combiner runs from a venv. On `setup()` the plugin **ensures it's installed**
-via `uv` if it isn't already (`uv venv <target>` + `uv pip install -e <plugin>/combiner`).
-This is async, idempotent, and a no-op once installed — so the `build = "cd combiner && uv
-sync --frozen"` step above is now **optional**.
+via `uv` if it isn't already. This is async, idempotent, and a no-op once installed — so no
+lazy.nvim `build` step is needed (the plugin now runs the equivalent `uv sync` itself).
 
-**Where it installs:**
+**Where it installs — and how, which differs by who owns the venv:**
 
-- **Default (unset `combiner.venv`):** a **plugin-local** venv at `<plugin>/combiner/.venv` —
-  self-contained, nothing leaks into your environment.
-- **Set `combiner.venv = "~/.venv"`** (or any path): install/run from **that** venv, so it
-  can be **shared** with other clients (see below). A user-set venv must **already exist** —
-  the plugin only `uv pip install`s into it (additive) and will **never** `uv venv` (wipe) a
-  venv it doesn't own.
+- **Default (unset `combiner.venv`) — the out-of-the-box mode.** A **plugin-local** venv at
+  `<plugin>/combiner/.venv`, populated with `uv sync --frozen --no-dev --inexact`. Self-contained,
+  nothing leaks into your environment, and dependencies come from the committed `uv.lock`, so
+  you get exactly the versions the release was tested with. `uv` creates and manages this venv.
+- **Set `combiner.venv = "~/.venv"`** (or any path) **— the mode to use when developing.**
+  Install/run from **that** venv, so it can be **shared** with other clients (see below). A
+  user-set venv must **already exist**: the plugin only `uv pip install -e`s into it (additive)
+  and will **never** point an environment-managing command (`uv sync`, `uv venv`) at a venv it
+  doesn't own — that would prune packages it didn't put there. Note the tradeoff: this path
+  re-resolves against the index rather than the lockfile, so deps are **not** lock-pinned.
+
+Either way the install is **editable**, so edits to `combiner/` take effect without reinstalling.
+The plugin reinstalls only when `pyproject.toml` or `uv.lock` change (tracked by a hash stamp in
+the venv), since those are what an editable install cannot pick up on its own.
 
 `combiner.python_cmd` resolution order: an explicit custom path → the configured `venv` (once
 the combiner is installed there) → the plugin-local `combiner/.venv` → `python3`.
@@ -738,7 +746,7 @@ process.
 ### Nix
 
 A `flake.nix` is provided for Nix users. Because the Nix store is read-only, the runtime
-`uv venv` / `uv pip install` flow can't work — instead the flake builds the combiner ahead of
+`uv sync` / `uv pip install` flow can't work — instead the flake builds the combiner ahead of
 time and you point the plugin at the prebuilt executable, which **skips the auto-install
 entirely**. The flake exposes three packages:
 

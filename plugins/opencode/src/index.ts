@@ -72,9 +72,12 @@ type OcClient = Parameters<Plugin>[0]["client"]
 const DEFAULT_PORT = 9741
 const DEFAULT_NAME = "mcp-combiner"
 const DEFAULT_GRACE = "30m"
-// The `--mcp` serve flag was introduced in combiner 0.8.0; older versions serve
-// with a bare `--config`. Version-gated so this plugin works across the boundary.
-const MIN_MCP_VERSION: [number, number, number] = [0, 8, 0]
+// The `--mcp` serve flag was introduced in combiner 0.8.0; older versions serve with a
+// bare `--config`. That same boundary is the floor for trusting a PATH install: below it
+// we would rather fetch a known-good release via uvx than limp along on a stale one.
+// Deliberately NOT the lockstep release version — it moves only when this plugin starts
+// depending on newer combiner behaviour.
+const MIN_COMBINER_VERSION: [number, number, number] = [0, 8, 0]
 
 // ── the tool-discovery directive ───────────────────────────────────
 // Appended to the system prompt so the agent knows combined tools arrive under a
@@ -123,38 +126,52 @@ function resolveBinary(override: string | undefined, env: NodeJS.ProcessEnv): st
 
 // ── combiner command resolution ────────────────────────────────────
 
-type Command = { cmd: string; args: string[] }
+/** How to invoke the combiner. `args` are the STRUCTURAL arguments that identify what to
+ *  run (`mcp-combiner@0.9.4` for uvx, `run --project … -m mcp_combiner` for a checkout) —
+ *  the user's own extras are appended only at spawn time, never during probing. `version`
+ *  caches what resolution already learned, so the serve-flag gate need not re-probe. */
+type Command = {
+    cmd: string
+    /** Structural args identifying WHAT to run. Probed with; never omitted. */
+    args: string[]
+    /** The user's own extra args. Appended at spawn time only — never probed with. */
+    extra?: string[]
+    version?: [number, number, number]
+}
 
-function onPath(cmd: string, env: NodeJS.ProcessEnv): boolean {
-    return spawnSync(cmd, ["--version"], { stdio: "ignore", env }).status === 0
+/** Probe a command once for BOTH facts we need: is it runnable, and which version.
+ *
+ *  Presence is "spawn did not fail", NOT "exited 0": a pre-0.8.0 mcp-combiner exits 2 on
+ *  `--version` (the flag did not exist yet), so an exit-status test reported *absent* for
+ *  precisely the stale install MIN_COMBINER_VERSION exists to catch. spawnSync sets `error`
+ *  (ENOENT) when the command cannot be resolved and EACCES when it is present but not
+ *  executable; both mean unusable, so any error counts as absent. Resolution is left to
+ *  spawn — hand-rolling a PATH walk means reimplementing PATHEXT, exec bits and symlink
+ *  following, for no gain.
+ *
+ *  Probing uses ONLY the structural args. Folding the user's extras in here meant a single
+ *  arg the CLI rejects in that position made a healthy install look stale AND broke the uvx
+ *  fallbacks that carry the same extras — turning one bad option into "could not be found
+ *  or fetched". */
+function probe(cmd: Command, env: NodeJS.ProcessEnv): { present: boolean; version?: [number, number, number] } {
+    const r = spawnSync(cmd.cmd, [...cmd.args, "--version"], { env })
+    if (r.error) return { present: false }
+    if (r.status !== 0) return { present: true }
+    return { present: true, version: parseVersion(`${r.stdout?.toString() ?? ""}${r.stderr?.toString() ?? ""}`) }
+}
+
+/** Probe, and accept only a combiner at or above the floor. Used for every auto-detected
+ *  source so the guarantee is enforced rather than assumed — including the uvx tail, whose
+ *  whole job is to be the known-good option. */
+function probeUsable(cmd: Command, env: NodeJS.ProcessEnv): Command | undefined {
+    const { version } = probe(cmd, env)
+    if (!version || !gte(version, MIN_COMBINER_VERSION)) return undefined
+    return { ...cmd, version }
 }
 
 function splitArgs(value: string | undefined): string[] {
     if (!value) return []
     return value.split(/\s+/).filter((s) => s.length > 0)
-}
-
-/** Resolve how to invoke the combiner, mirroring the Claude mcp-combiner plugin's priority:
- *  explicit option → env command → `mcp-combiner` on PATH →
- *  `uv run --project <checkout> python -m mcp_combiner`. */
-function resolveCombiner(opts: Options, env: NodeJS.ProcessEnv): Command | undefined {
-    const extra = opts.args ?? []
-    if (opts.command) return { cmd: opts.command, args: extra }
-    if (env.OPENCODE_MCP_COMBINER_COMMAND) {
-        return {
-            cmd: env.OPENCODE_MCP_COMBINER_COMMAND,
-            args: [...splitArgs(env.OPENCODE_MCP_COMBINER_ARGS), ...extra],
-        }
-    }
-    if (onPath("mcp-combiner", env)) return { cmd: "mcp-combiner", args: extra }
-    const checkout = opts.checkout ?? env.OPENCODE_MCP_COMBINER_CHECKOUT
-    if (checkout && onPath("uv", env)) {
-        return {
-            cmd: "uv",
-            args: ["run", "--project", checkout, "python", "-m", "mcp_combiner", ...extra],
-        }
-    }
-    return undefined
 }
 
 function parseVersion(text: string): [number, number, number] | undefined {
@@ -170,13 +187,105 @@ function gte(a: [number, number, number], b: [number, number, number]): boolean 
     return true
 }
 
-/** True if the combiner supports (needs) the `--mcp` serve flag. Unknown version
- *  → assume yes (current releases are ≥0.8.0). */
+/** This plugin's own version, which lockstep releases keep equal to the published PyPI
+ *  mcp-combiner (scripts/bump-version.sh writes both). Used as the uvx pin — derived from
+ *  the package manifest rather than duplicated as a constant. */
+const PLUGIN_VERSION: string | undefined = (() => {
+    try {
+        const here = dirname(fileURLToPath(import.meta.url))
+        const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as {
+            version?: string
+        }
+        return pkg.version
+    } catch {
+        return undefined
+    }
+})()
+
+/** Resolve how to invoke the combiner, mirroring the Claude plugin's priority:
+ *  explicit option → env command → `mcp-combiner` on PATH (only when new enough) →
+ *  `uv run --project <checkout> python -m mcp_combiner` → a pinned release via uvx.
+ *  The uvx tail is what makes a bare plugin install work with nothing installed by hand.
+ *  Unlike the Claude plugin there is no legacy `mcp-bridge` branch — this package post-dates
+ *  the rename, so nobody can be upgrading into it from that name. */
+function resolveCombiner(
+    opts: Options,
+    env: NodeJS.ProcessEnv,
+    log?: LogFn,
+    toast?: ToastFn,
+): Command | undefined {
+    const extra = opts.args ?? []
+    if (opts.command) return { cmd: opts.command, args: [], extra }
+    if (env.OPENCODE_MCP_COMBINER_COMMAND) {
+        // $…_ARGS is part of the command spec (structural); opts.args is the user's extra.
+        return {
+            cmd: env.OPENCODE_MCP_COMBINER_COMMAND,
+            args: splitArgs(env.OPENCODE_MCP_COMBINER_ARGS),
+            extra,
+        }
+    }
+
+    // A PATH install wins outright when it is new enough: explicit user choice, no fetch.
+    // Too old and we fall through rather than limp — the uvx tail gets a known-good
+    // release, so staleness self-heals instead of lingering forever.
+    const onPathCandidate: Command = { cmd: "mcp-combiner", args: [] }
+    const pathProbe = probe(onPathCandidate, env)
+    if (pathProbe.present) {
+        if (pathProbe.version && gte(pathProbe.version, MIN_COMBINER_VERSION)) {
+            return { ...onPathCandidate, extra, version: pathProbe.version }
+        }
+        // Toast as well as log: this one is actionable — the user installed an
+        // mcp-combiner that we are now declining to use, and silently routing around it
+        // would be the confusing outcome. The uvx fallback below keeps them working
+        // meanwhile, so this is a nudge rather than an error.
+        const stale =
+            `mcp-combiner on PATH reports ${pathProbe.version?.join(".") ?? "a pre-0.8.0 version"}, ` +
+            `older than ${MIN_COMBINER_VERSION.join(".")} — ignoring it and fetching a pinned ` +
+            "release instead. Upgrade with: uv tool install --upgrade mcp-combiner"
+        log?.("warn", stale)
+        toast?.("warning", stale)
+    }
+
+    const checkout = opts.checkout ?? env.OPENCODE_MCP_COMBINER_CHECKOUT
+    if (checkout && existsSync(checkout) && probe({ cmd: "uv", args: [] }, env).present) {
+        return {
+            cmd: "uv",
+            args: ["run", "--project", checkout, "python", "-m", "mcp_combiner"],
+            extra,
+        }
+    }
+
+    // Out-of-the-box path: no install required, fetch from PyPI. Pinned to this plugin's
+    // version so the pair moves in lockstep; if that exact release is missing (a failed
+    // publish, say) fall back to latest rather than failing outright. The probe both
+    // validates the pin and warms uv's cache, so the real spawn is a cache hit.
+    if (probe({ cmd: "uvx", args: [] }, env).present) {
+        if (PLUGIN_VERSION) {
+            const pinned = probeUsable({ cmd: "uvx", args: [`mcp-combiner@${PLUGIN_VERSION}`] }, env)
+            if (pinned) return { ...pinned, extra }
+            log?.("warn", `pinned mcp-combiner@${PLUGIN_VERSION} unavailable or too old; trying latest from PyPI`)
+        }
+        const latest = probeUsable({ cmd: "uvx", args: ["mcp-combiner"] }, env)
+        if (latest) return { ...latest, extra }
+    }
+
+    return undefined
+}
+
+/** True if the combiner supports (needs) the `--mcp` serve flag. Unknown version →
+ *  assume NO, matching the Claude plugin's start.sh: a version we cannot read is a
+ *  pre-0.8.0 build with no --version flag, and those serve on a bare --config. Bare
+ *  --config still serves on newer releases (with a deprecation warning), so guessing
+ *  low degrades gracefully whereas guessing high does not. */
 function combinerNeedsMcpFlag(cmd: Command, env: NodeJS.ProcessEnv): boolean {
-    const r = spawnSync(cmd.cmd, [...cmd.args, "--version"], { env })
-    if (r.status !== 0) return true
-    const ver = parseVersion(`${r.stdout?.toString() ?? ""}${r.stderr?.toString() ?? ""}`)
-    return ver ? gte(ver, MIN_MCP_VERSION) : true
+    // Auto-detected sources already recorded their version during resolution; only the
+    // explicit command/env override arrives unprobed, and it probes once here. The probe
+    // keeps cmd.args (structural) and drops cmd.extra: dropping the structural args would
+    // reduce `uv run --project … -m mcp_combiner` to a bare `uv --version` and read uv's
+    // OWN version as the combiner's, while keeping the extras is what made healthy
+    // installs look stale.
+    const ver = cmd.version ?? probe({ cmd: cmd.cmd, args: cmd.args }, env).version
+    return ver ? gte(ver, MIN_COMBINER_VERSION) : false
 }
 
 // ── servers.json resolution (mirrors the Claude mcp-combiner plugin probing) ──
@@ -350,12 +459,50 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
         }, 1500).unref()
     }
 
-    const port = opts.port ?? DEFAULT_PORT
+    // Env knobs mirror the Claude plugin's CLAUDE_MCP_COMBINER_* set, so a user running
+    // both clients configures one namespace per client rather than options here and env
+    // vars there. Explicit plugin options still win over the environment.
+    const envPortRaw = process.env.OPENCODE_MCP_COMBINER_PORT
+    const envPort = Number(envPortRaw)
+    const portExplicit = opts.port !== undefined || (envPortRaw !== undefined && envPortRaw !== "")
+    if (envPortRaw !== undefined && envPortRaw !== "" && !(Number.isInteger(envPort) && envPort > 0)) {
+        log("warn", `OPENCODE_MCP_COMBINER_PORT=${envPortRaw} is not a positive integer; using ${DEFAULT_PORT}`)
+    }
+    let port = opts.port ?? (Number.isInteger(envPort) && envPort > 0 ? envPort : DEFAULT_PORT)
     const mcpName = opts.mcpName ?? DEFAULT_NAME
-    const name = opts.name ?? DEFAULT_NAME
+    const name = opts.name ?? process.env.OPENCODE_MCP_COMBINER_NAME ?? DEFAULT_NAME
     const register = opts.register !== false
-    const hostOwnedUrl = process.env.MCP_COMPANION_COMBINER_URL
-    const url = opts.url ?? hostOwnedUrl ?? `http://127.0.0.1:${port}/mcp`
+
+    // A set MCP_COMPANION_COMBINER_URL normally means the host editor owns the combiner
+    // and we only register. But if a port was ALSO named explicitly, the user is saying
+    // "I picked this port, launch here" — the same distinction the Claude plugin draws,
+    // kept identical so one environment behaves the same in both clients. The host never
+    // sets a port, so this cannot change its behaviour.
+    const combinerUrl = process.env.MCP_COMPANION_COMBINER_URL
+    const hostOwnedUrl = combinerUrl && !portExplicit ? combinerUrl : undefined
+    if (combinerUrl && portExplicit) {
+        // The URL wins where they disagree: it is what gets registered with OpenCode, so
+        // serving anywhere else would be unreachable.
+        let urlPort = NaN
+        try {
+            urlPort = Number(new URL(combinerUrl).port)
+        } catch {
+            // Malformed URL — fall through to the no-usable-port branch below, which
+            // reports it. Never throw here: this runs at plugin init and would take
+            // the whole session down over a typo'd env var.
+        }
+        if (!Number.isInteger(urlPort) || urlPort <= 0) {
+            const msg = `MCP_COMPANION_COMBINER_URL=${combinerUrl} has no explicit port; serving on ${port}. Use an explicit port in the URL (e.g. http://127.0.0.1:${port}/mcp).`
+            log("warn", msg)
+            toast("warning", msg)
+        } else if (urlPort !== port) {
+            const msg = `port ${port} disagrees with MCP_COMPANION_COMBINER_URL=${combinerUrl}; the URL is what gets registered, so serving on ${port} would be unreachable — using ${urlPort} instead. Set them to the same port.`
+            log("warn", msg)
+            toast("warning", msg)
+            port = urlPort
+        }
+    }
+    const url = opts.url ?? hostOwnedUrl ?? combinerUrl ?? `http://127.0.0.1:${port}/mcp`
 
     // The registration half — always applied (unless disabled). OpenCode surfaces
     // connection state itself, so a briefly-absent endpoint recovers.
@@ -406,10 +553,11 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
         toast("error", msg)
         return hooks
     }
-    const combiner = resolveCombiner(opts, env)
+    const combiner = resolveCombiner(opts, env, log, toast)
     if (!combiner) {
         const msg =
-            "mcp-combiner command not found; install `mcp-combiner`, set `command`/`checkout`, " +
+            "mcp-combiner could not be found or fetched; install uv and it will be fetched from " +
+            "PyPI on demand, or install `mcp-combiner`, set `command`/`checkout`, " +
             "or set $OPENCODE_MCP_COMBINER_COMMAND / $OPENCODE_MCP_COMBINER_CHECKOUT"
         log("error", msg)
         toast("error", msg)
@@ -430,7 +578,12 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
     if (combinerNeedsMcpFlag(combiner, env)) serve.push("--mcp")
     serve.push("--config", cfgPath, "--port", String(port))
     if (opts.host) serve.push("--host", opts.host)
-    const wrapped: Command = { cmd: combiner.cmd, args: [...combiner.args, ...serve] }
+    // Structural args, then the user's extras, then the serve args — the extras sit
+    // "before the serve args" as the `args` option documents.
+    const wrapped: Command = {
+        cmd: combiner.cmd,
+        args: [...combiner.args, ...(combiner.extra ?? []), ...serve],
+    }
 
     const useArgs = [
         "use",
@@ -438,11 +591,12 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
         "--pid",
         String(process.pid),
         "--grace-period",
-        opts.gracePeriod ?? DEFAULT_GRACE,
+        opts.gracePeriod ?? process.env.OPENCODE_MCP_COMBINER_GRACE ?? DEFAULT_GRACE,
         "--metadata",
         `opencode-${process.pid}`,
     ]
-    if (opts.logFile) useArgs.push("--log-file", opts.logFile)
+    const logFile = opts.logFile ?? process.env.OPENCODE_MCP_COMBINER_LOG
+    if (logFile) useArgs.push("--log-file", logFile)
     useArgs.push("--", wrapped.cmd, ...wrapped.args)
 
     installCleanup()

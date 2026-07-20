@@ -113,8 +113,20 @@ Equivalent to setting `manage: false` with an explicit `url`.
 | `OPENCODE_MCP_COMBINER_COMMAND` / `_ARGS` | Override the combiner invocation. |
 | `OPENCODE_MCP_COMBINER_CHECKOUT` | Checkout path for `uv run`. |
 | `OPENCODE_MCP_COMBINER_CONFIG` | `servers.json` path. |
+| `OPENCODE_MCP_COMBINER_PORT` | Port the combiner serves on. Default `9741`. |
+| `OPENCODE_MCP_COMBINER_NAME` | `sharedserver` instance name. Default `mcp-combiner`. |
+| `OPENCODE_MCP_COMBINER_GRACE` | `sharedserver` grace period. Default `30m`. |
+| `OPENCODE_MCP_COMBINER_LOG` | Capture the combiner's output to this path. |
 | `SHAREDSERVER_BIN` | Path to the `sharedserver` binary. |
 | `SHAREDSERVER_LOCKDIR` | `sharedserver` lock directory. |
+
+Plugin options take precedence over the environment. These mirror the Claude plugin's
+`CLAUDE_MCP_COMBINER_*` set, so running both clients means one namespace per client
+rather than options in one place and env vars in the other.
+
+If `mcp-combiner` is on `PATH` but older than `0.8.0`, the plugin logs **and toasts** a
+warning, then falls back to a pinned release fetched with `uvx` — it will not silently
+use a stale binary, nor silently route around one you installed deliberately.
 
 ## Relationship to `opencode-sharedserver`
 

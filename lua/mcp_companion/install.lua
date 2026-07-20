@@ -2,10 +2,13 @@
 ---
 --- Installs the Python combiner (`mcp_combiner`, exposing the `mcp-combiner` console
 --- script) into a venv via `uv`, so the combiner command is available without a
---- separate build step. The target venv is `config.combiner.venv` if set,
---- otherwise the self-contained plugin-local `combiner/.venv`. SAFETY: the plugin
---- only ever creates (`uv venv`) its own plugin-local venv; a user-specified
---- `combiner.venv` must already exist and is only ever installed into (additive).
+--- separate build step. The target venv is `config.combiner.venv` if set, otherwise the
+--- self-contained plugin-local `combiner/.venv`. The two are populated differently: the
+--- plugin-local venv via `uv sync` (lock-pinned, uv manages the environment), a
+--- user-specified one via an additive `uv pip install -e`. SAFETY: the plugin only ever
+--- creates/manages its own plugin-local venv; a user-specified `combiner.venv` must
+--- already exist and is only ever installed into (additive), never synced — `uv sync`
+--- would treat it as ours to prune.
 --- @module mcp_companion.install
 
 local M = {}
@@ -117,10 +120,10 @@ function M.ensure(venv, callback, force)
     local py = venv .. "/bin/python"
     local venv_exists = vim.fn.executable(py) == 1
 
-    -- SAFETY: only ever CREATE (`uv venv`) the plugin's own self-managed venv.
-    -- A user-specified `combiner.venv` (e.g. ~/.venv) is theirs — never `uv venv`
-    -- it (that can wipe an existing venv). We only `uv pip install` into it
-    -- (additive), and require it to already exist.
+    -- SAFETY: only ever CREATE/MANAGE the plugin's own self-managed venv (via `uv sync`,
+    -- which makes <src>/.venv itself). A user-specified `combiner.venv` (e.g. ~/.venv) is
+    -- theirs — never point an environment-managing command at it. We only `uv pip install`
+    -- into it (additive), and require it to already exist.
     local plugin_local = src .. "/.venv"
     local self_managed = (venv == plugin_local)
 
@@ -135,36 +138,51 @@ function M.ensure(venv, callback, force)
         )
     end
 
-    -- Install the combiner (editable, additive — never clears the venv) + stamp it.
-    local function pip_install()
-        vim.system({ "uv", "pip", "install", "--python", py, "-e", src }, { text = true }, function(obj)
-            vim.schedule(function()
-                if obj.code == 0 then
-                    local sf = io.open(stamp_path(venv), "w")
-                    if sf then
-                        sf:write(source_hash() or "")
-                        sf:close()
-                    end
-                    log.info("mcp-combiner installed into %s", venv)
-                    callback(true, nil, true)
-                else
-                    log.warn("mcp-combiner install failed: %s", (obj.stderr or ""):sub(1, 400))
-                    callback(false, obj.stderr, false)
+    -- Stamp the venv and report — shared by both install strategies below.
+    local function finish(obj)
+        vim.schedule(function()
+            if obj.code == 0 then
+                local sf = io.open(stamp_path(venv), "w")
+                if sf then
+                    sf:write(source_hash() or "")
+                    sf:close()
                 end
-            end)
+                log.info("mcp-combiner installed into %s", venv)
+                callback(true, nil, true)
+            else
+                log.warn("mcp-combiner install failed: %s", (obj.stderr or ""):sub(1, 400))
+                callback(false, obj.stderr, false)
+            end
         end)
     end
 
-    if self_managed and not venv_exists then
-        -- Create the plugin-local venv (only when absent), then install.
-        log.info("Creating plugin-local venv %s …", venv)
-        vim.system({ "uv", "venv", venv }, { text = true }, function()
-            pip_install()
-        end)
+    if self_managed then
+        -- Plugin-owned venv (the default, user-facing mode) → `uv sync`, which honours
+        -- uv.lock. The stamp hashes that lock, so a lock change now both triggers a
+        -- reinstall AND actually yields the locked versions (`uv pip install` re-resolves
+        -- against the index and ignores the lock entirely). uv creates and manages
+        -- <src>/.venv itself — which is exactly this venv — so there is no `uv venv` step.
+        --   --frozen   install from the committed lock as-is; never re-resolve
+        --   --no-dev   runtime deps only; the dev group is for `cd combiner && uv sync`
+        --   --inexact  never prune — we own the combiner's deps here, not the whole venv
+        -- UV_PROJECT_ENVIRONMENT is set explicitly rather than left to uv's default of
+        -- <project>/.venv: a user with that variable exported (containerised workflows do
+        -- this) would otherwise have the sync populate THEIR directory while we stamp and
+        -- look for <src>/.venv — an install that reports success, leaves no binary where
+        -- we expect one, and so reinstalls on every setup(). Naming the target makes the
+        -- destination ours regardless of the ambient environment.
+        log.info("Syncing mcp-combiner into %s …", venv)
+        vim.system(
+            { "uv", "sync", "--frozen", "--no-dev", "--inexact", "--project", src },
+            { text = true, env = { UV_PROJECT_ENVIRONMENT = venv } },
+            finish
+        )
     else
-        -- venv already exists (plugin-local or user's) → install only, never `uv venv`.
+        -- User-specified venv (the dev mode) → additive editable install, nothing else.
+        -- Never `uv sync` here: it is project-scoped and would treat a venv we don't own
+        -- as ours to manage.
         log.info("Installing mcp-combiner into %s …", venv)
-        pip_install()
+        vim.system({ "uv", "pip", "install", "--python", py, "-e", src }, { text = true }, finish)
     end
 end
 

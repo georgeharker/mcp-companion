@@ -20,16 +20,16 @@ launch — the host owns the lifecycle at its matching version.
 
 ## Prerequisites (both plugins)
 
-1. **The combiner CLI** — published on PyPI as `mcp-combiner`; the plugins
-   resolve it from `PATH`:
+1. **The combiner CLI** — **nothing to do**, as long as [`uv`](https://docs.astral.sh/uv/)
+   is installed: the plugins fetch a pinned `mcp-combiner` from PyPI on demand.
+   Install it only if you want one shared copy (faster start, works offline):
 
    ```sh
    uv tool install mcp-combiner     # or: pipx install mcp-combiner
    mcp-combiner --version           # sanity check
    ```
 
-   (A checkout works too: the plugins fall back to `uv run -m mcp_combiner`
-   from `CLAUDE_MCP_COMBINER_CHECKOUT` / the `checkout` option.)
+   ([How the combiner is resolved](#how-the-combiner-is-resolved) covers the full order.)
 
 2. **`sharedserver`** — the refcounting process manager (Rust, on crates.io):
 
@@ -130,6 +130,47 @@ for the full table.
 
 `$MCP_COMPANION_COMBINER_URL` (host-owned) or `manage: false` → register-only.
 
+## How the combiner is resolved
+
+Both plugins pick a combiner the same way, highest first:
+
+| # | Source | Notes |
+|---|--------|-------|
+| 1 | `$CLAUDE_MCP_COMBINER_COMMAND` / `$OPENCODE_MCP_COMBINER_COMMAND`, or the `command` option | explicit; never version-checked |
+| 2 | `mcp-combiner` on `PATH` | **only when `>= 0.8.0`**; older is reported and skipped |
+| 3 | `uv run -m mcp_combiner` from `$…_CHECKOUT` / the `checkout` option | the checkout must exist |
+| 4 | `uvx mcp-combiner@<plugin version>` | the zero-install path; falls back to latest if that release is missing |
+
+The floor at row 2 exists because the plugins depend on combiner ≥ 0.8.0 behaviour
+(`--mcp` serve mode). A too-old `PATH` install is skipped rather than used, so a stale
+binary self-heals into the pinned release instead of failing obscurely — and the skip is
+reported, not silent (Claude Code: SessionStart `systemMessage`; OpenCode: a TUI toast),
+since routing around a binary you installed on purpose should never be invisible.
+
+## Choosing a port
+
+The default is `9741`. Changing it takes **two** variables, exported **before** the client
+starts:
+
+```sh
+export CLAUDE_MCP_COMBINER_PORT=9999                        # OPENCODE_… for OpenCode
+export MCP_COMPANION_COMBINER_URL=http://127.0.0.1:9999/mcp
+```
+
+They answer different questions and neither can be derived from the other. The port says
+where to *serve*; the URL is what the client *dials* — and for Claude Code that URL is the
+only thing `.mcp.json` can be redirected by, because its `${VAR:-default}` expansion does
+not nest (a `${A:-…${B:-9741}…}` default silently mangles into a literal rather than
+erroring). Set only one and the session cannot connect, so both plugins say so.
+
+Set the two to different ports and the **URL wins** — it is what the client acts on, so
+serving anywhere else would be unreachable — and you get a warning naming the mismatch.
+
+`MCP_COMPANION_COMBINER_URL` on its own still means "the host editor owns the combiner,
+register only, don't launch" — that is how CodeCompanion/mcp-companion injects its tokened
+per-session endpoint. Adding an explicit port is what distinguishes "I picked this port"
+from "someone else is serving me".
+
 ## Troubleshooting
 
 - **"no config file found"** — create `~/.config/mcp-combiner/servers.json`
@@ -140,8 +181,9 @@ for the full table.
   `SHAREDSERVER_BIN=/path/to/sharedserver`.
 - **Port 9741 already in use** — usually a previous combiner still inside its
   grace period (that's the design: reattach, don't respawn). `mcp-combiner
-  status` to inspect it, `mcp-combiner restart --force` to bounce it, or set a
-  different `_PORT`/`port`.
+  status` to inspect it, `mcp-combiner restart --force` to bounce it, or move to
+  a different port (see [Choosing a port](#choosing-a-port) — it needs the URL
+  set too, not just `_PORT`).
 - **Tools missing mid-session** — `combiner__status` (as a tool) or
   `mcp-combiner status` (shell) show per-server state; `combiner__restart_server`
   bounces one upstream without disturbing the rest.

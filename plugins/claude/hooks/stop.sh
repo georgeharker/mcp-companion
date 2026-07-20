@@ -8,7 +8,11 @@ set -u
 # Mirror start.sh: when launched under CodeCompanion / mcp-companion the combiner
 # was started (and is refcounted) by the host editor, not by us — we never ran
 # `sharedserver use`, so there is nothing to detach. The host owns teardown.
-if [[ -n "${MCP_COMPANION_COMBINER_URL:-}" ]]; then
+#
+# This condition MUST stay identical to start.sh's. A URL with CLAUDE_MCP_COMBINER_PORT
+# also set means the user picked a port and start.sh DID launch, so we do have a
+# refcount to release; deferring here would leak it until the grace period expired.
+if [[ -n "${MCP_COMPANION_COMBINER_URL:-}" && -z "${CLAUDE_MCP_COMBINER_PORT:-}" ]]; then
   exit 0
 fi
 
