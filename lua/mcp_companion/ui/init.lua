@@ -432,11 +432,11 @@ function M.open()
 
     local config = require("mcp_companion.config").get()
 
-    -- No combiner connection yet (e.g. :MCPStatus before any chat has opened) —
-    -- bring up the editor's own connection so the window shows live data instead
-    -- of blank. Renders proceed immediately; the state subscription below
-    -- re-renders as the connection comes up.
-    require("mcp_companion.combiner").ensure_started()
+    -- Connection-on-demand (e.g. :MCPStatus before any chat has opened, or after
+    -- the combiner was bounced) is handled by _fetch_and_render() at the end of
+    -- open(): when there's no live client it calls ensure_started() to bring up
+    -- the editor's own connection. Renders proceed immediately; the state
+    -- subscription below re-renders as the connection comes up.
 
     -- Create buffer
     _buf = vim.api.nvim_create_buf(false, true)
@@ -657,14 +657,25 @@ function M._fetch_and_render()
     -- Initial render with cached/empty state
     M.render()
 
-    -- Actually refresh from the combiner: /health first (lifecycle states),
-    -- then capabilities (tool lists) — _update_server_state merges both and
-    -- the state subscription re-renders. Without this, "refresh" only
-    -- re-rendered the cached snapshot from connect time.
+    -- Refresh from the combiner. When connected, do the real requery: /health
+    -- first (lifecycle states), then capabilities (tool lists) —
+    -- _update_server_state merges both and the state subscription re-renders.
+    -- Without this, "refresh" only re-rendered the cached snapshot from connect
+    -- time.
+    --
+    -- When NOT connected (e.g. the combiner was bounced or the whole stack was
+    -- taken down), a data refresh is useless — client:refresh() would be
+    -- skipped and we'd just repaint the stale snapshot, which reads as "r does
+    -- nothing". Kick a reconnect instead: ensure_started() no-ops if already
+    -- connecting/connected and otherwise runs M.start() (check-existing →
+    -- create_client → connect), adopting a freshly-restarted combiner. The
+    -- post-connect flow + the state subscription repaint once the link is back.
     local combiner_mod = require("mcp_companion.combiner")
     local client = combiner_mod.client
     if client and client.connected then
         client:refresh()
+    elseif combiner_mod.ensure_started() then
+        vim.notify("[mcp-companion] Combiner not connected — reconnecting…", vim.log.levels.INFO)
     end
 
     -- If we have a source chat/CLI buffer, fetch live session status
