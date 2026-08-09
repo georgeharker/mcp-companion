@@ -27,9 +27,11 @@ def register_meta_tools(
         """Get status of all configured MCP servers.
 
         Returns a dict of server names to their configuration and runtime
-        ``state`` (ready / connected / disconnected / auth_failed / disabled) —
-        the same lifecycle state the Neovim MCPStatus panel shows, via the
-        shared status builder.
+        ``state`` (ready / connected / starting / disconnected / unreachable /
+        auth_failed / disabled) — the same lifecycle state the Neovim MCPStatus
+        panel shows, via the shared status builder. ``starting`` means wait
+        (spawn/probe/connect still in flight); ``unreachable`` means the backing
+        process did not come up within its health timeout.
         """
         from mcp_combiner.status import build_server_status
 

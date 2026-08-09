@@ -866,11 +866,11 @@ function Client:_update_server_state()
     end
 
     -- Merge per-server lifecycle state from /health. The combiner reports a
-    -- `state` field (ready / connected / disconnected / auth_failed / disabled)
-    -- that is authoritative for the status indicator — it decouples the display
-    -- from the volatile "does this server have tools right now" heuristic, so a
-    -- server warming up reads amber (connecting), a genuine drop reads
-    -- grey/red, and only a tools-listable server reads green.
+    -- `state` field (ready / connected / starting / disconnected / unreachable /
+    -- auth_failed / disabled) that is authoritative for the status indicator —
+    -- it decouples the display from the volatile "does this server have tools
+    -- right now" heuristic, so a server warming up reads amber (connecting), a
+    -- genuine drop reads grey/red, and only a tools-listable server reads green.
     local health = self._server_health or {}
 
     -- Map the combiner lifecycle `state` to the UI status vocabulary. Returns
@@ -880,10 +880,10 @@ function Client:_update_server_state()
         local st = info and info.state
         if st == "ready" then
             return "connected" -- green: tools listable
-        elseif st == "connected" then
-            return "connecting" -- amber: session up, tools still warming
-        elseif st == "auth_failed" then
-            return "error" -- red: needs combiner__enable_server
+        elseif st == "connected" or st == "starting" then
+            return "connecting" -- amber: coming up / tools still warming
+        elseif st == "auth_failed" or st == "unreachable" then
+            return "error" -- red: needs combiner__enable_server / backing never came up
         elseif st == "disabled" then
             return "disabled"
         elseif st == "disconnected" then

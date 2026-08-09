@@ -135,11 +135,35 @@ class SharedServerManager:
         self._binary: str | None = None
         # Track which server names we successfully `use`d so we can `unuse` them.
         self._active: list[str] = []
+        # Observed lifecycle of each backing process (keyed by sharedServer name,
+        # like _active). Purely observational — ``build_server_status`` overlays
+        # it onto the connection-level state so status can distinguish "still
+        # starting" from "won't start"; nothing gates on it. Values:
+        #   "spawning"     — `sharedserver use` in flight
+        #   "spawn_failed" — `use` errored or timed out; no reference held
+        #   "probing"      — `use` succeeded; reachability poll in progress
+        #   "unreachable"  — reachability poll timed out (reference still held)
+        #   "reachable"    — answered HTTP (any status counts — see _poll_url)
+        #   "spawned"      — `use` succeeded; server has no URL to probe
+        #   "stopped"      — we dropped our reference
+        self._backing_state: dict[str, str] = {}
 
     def _get_binary(self) -> str:
         if self._binary is None:
             self._binary = _require_binary()
         return self._binary
+
+    def backing_state(self, server_name: str) -> str | None:
+        """Observed state of *server_name*'s backing sharedserver process.
+
+        ``None`` when the server has no sharedserver backing, or when nothing
+        has been observed yet (status asked before start_all touched it).
+        Values are documented on ``_backing_state``.
+        """
+        ss = self._config.resolve_shared_server(server_name)
+        if ss is None:
+            return None
+        return self._backing_state.get(ss.name)
 
     async def start_all(self) -> None:
         """Launch ``sharedserver use`` for every enabled server concurrently.
@@ -199,6 +223,7 @@ class SharedServerManager:
             binary = self._get_binary()
         except FileNotFoundError as exc:
             logger.warning("Skipping sharedserver start for '%s': %s", server_name, exc)
+            self._backing_state[ss.name] = "spawn_failed"
             return
 
         cmd = _build_use_cmd(binary, ss, pid=os.getpid())
@@ -207,6 +232,7 @@ class SharedServerManager:
             ss.name,
             " ".join(cmd),
         )
+        self._backing_state[ss.name] = "spawning"
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -222,12 +248,15 @@ class SharedServerManager:
                     proc.returncode,
                     stderr.decode().strip() if stderr else "",
                 )
+                self._backing_state[ss.name] = "spawn_failed"
                 return
         except asyncio.TimeoutError:
             logger.warning("sharedserver use '%s' timed out", ss.name)
+            self._backing_state[ss.name] = "spawn_failed"
             return
         except OSError as exc:
             logger.warning("sharedserver use '%s' failed: %s", ss.name, exc)
+            self._backing_state[ss.name] = "spawn_failed"
             return
 
         self._active.append(ss.name)
@@ -235,6 +264,7 @@ class SharedServerManager:
 
         # Poll for health
         if url:
+            self._backing_state[ss.name] = "probing"
             health_url = url.rstrip("/")
             logger.info(
                 "Waiting up to %ds for '%s' at %s",
@@ -244,14 +274,18 @@ class SharedServerManager:
             )
             ready = await _poll_url(health_url, ss.health_timeout)
             if ready:
+                self._backing_state[ss.name] = "reachable"
                 logger.info("'%s' is healthy", server_name)
             else:
+                self._backing_state[ss.name] = "unreachable"
                 logger.warning(
                     "'%s' did not become healthy within %ds — "
                     "proxy will be mounted but may fail until server is ready",
                     server_name,
                     ss.health_timeout,
                 )
+        else:
+            self._backing_state[ss.name] = "spawned"
 
     async def ensure_started(self, server_name: str) -> None:
         """Start (``sharedserver use`` + health-poll) the sharedserver backing
@@ -283,6 +317,7 @@ class SharedServerManager:
             return
         await self._stop_one(binary, ss.name)
         self._active.remove(ss.name)
+        self._backing_state[ss.name] = "stopped"
 
     async def restart(self, server_name: str) -> bool:
         """Hard-restart the sharedserver backing *server_name*.

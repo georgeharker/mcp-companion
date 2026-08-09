@@ -350,7 +350,10 @@ class ConnectionManager:
           * ``"ready"``        — connected AND tools confirmed listable.
           * ``"connected"``    — session established, tools not yet listable
                                  (warming up, or the priming list failed).
-          * ``"disconnected"`` — down / reconnecting / never came up.
+          * ``"starting"``     — registered; the first connect attempt has not
+                                 finished yet (spawn / probe / connect in flight).
+          * ``"disconnected"`` — a finished first attempt failed, or an
+                                 established session dropped (reconnecting).
           * ``"unknown"``      — *name* is not a managed (HTTP) connection.
 
         Derived live from connection fields — no proactive probing. Downgrades
@@ -365,6 +368,12 @@ class ConnectionManager:
         client = conn.client_ref[0]
         if client is not None and client.is_connected():
             return "ready" if conn._tools_ready else "connected"
+        if not conn._ready.is_set():
+            # First connect attempt still in flight (or not yet begun). Distinct
+            # from "disconnected" so an early caller — status during startup,
+            # restart tooling — reads "wait" rather than "broken". Also entered
+            # after reset_auth_failure, which re-arms _ready for the retry.
+            return "starting"
         return "disconnected"
 
     def mark_tools_unready(self, name: str) -> None:

@@ -161,6 +161,7 @@ async def test_start_all_calls_sharedserver_use() -> None:
     assert cmd[1] == "use"
     assert cmd[2] == "goog_ws"
     assert "goog_ws" in mgr._active
+    assert mgr.backing_state("google-workspace") == "reachable"
 
 
 @pytest.mark.anyio
@@ -172,6 +173,7 @@ async def test_start_all_skips_when_binary_missing() -> None:
         await mgr.start_all()
 
     assert mgr._active == []
+    assert mgr.backing_state("google-workspace") == "spawn_failed"
 
 
 @pytest.mark.anyio
@@ -187,6 +189,7 @@ async def test_start_all_skips_on_nonzero_exit() -> None:
         await mgr.start_all()
 
     assert mgr._active == []
+    assert mgr.backing_state("google-workspace") == "spawn_failed"
 
 
 @pytest.mark.anyio
@@ -254,3 +257,80 @@ async def test_health_poll_timeout_warns_but_continues() -> None:
 
     # Should still be tracked so unuse is called on exit
     assert "goog_ws" in mgr._active
+    assert mgr.backing_state("google-workspace") == "unreachable"
+
+
+def test_backing_state_none_without_sharedserver() -> None:
+    raw = {"servers": {"plain": {"url": "http://localhost:9000/mcp"}}}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(raw, f)
+        path = f.name
+    config = CombinerConfig.load(path)
+    os.unlink(path)
+    mgr = SharedServerManager(config)
+    assert mgr.backing_state("plain") is None
+
+
+def test_backing_state_none_before_any_start() -> None:
+    mgr = SharedServerManager(_make_config())
+    assert mgr.backing_state("google-workspace") is None
+
+
+# ── backing-state overlay (status.py) ──────────────────────────────
+
+
+class TestOverlayBackingState:
+    """_overlay_backing_state refines only not-serving states, and only when a
+    backing verdict exists — an established session always wins."""
+
+    def _set_mgr(self, monkeypatch: pytest.MonkeyPatch, backing: str | None) -> None:
+        from types import SimpleNamespace
+
+        from mcp_combiner.runtime import RUNTIME
+
+        fake = SimpleNamespace(backing_state=lambda name: backing)
+        monkeypatch.setattr(RUNTIME, "ss_manager", fake, raising=False)
+
+    @pytest.mark.parametrize("state", ["ready", "connected", "disabled", "auth_failed"])
+    def test_serving_states_never_adjusted(
+        self, monkeypatch: pytest.MonkeyPatch, state: str
+    ) -> None:
+        from mcp_combiner.status import _overlay_backing_state
+
+        self._set_mgr(monkeypatch, "unreachable")
+        assert _overlay_backing_state("s", state) == state
+
+    @pytest.mark.parametrize(
+        ("state", "backing", "expected"),
+        [
+            ("starting", "spawning", "starting"),
+            ("starting", "probing", "starting"),
+            ("starting", "unreachable", "unreachable"),
+            ("starting", "spawn_failed", "unreachable"),
+            ("disconnected", "spawning", "starting"),
+            ("disconnected", "probing", "starting"),
+            ("disconnected", "unreachable", "unreachable"),
+            ("disconnected", "spawn_failed", "unreachable"),
+            ("disconnected", "reachable", "disconnected"),
+            ("disconnected", "stopped", "disconnected"),
+            ("disconnected", None, "disconnected"),
+        ],
+    )
+    def test_not_serving_states_refined(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        state: str,
+        backing: str | None,
+        expected: str,
+    ) -> None:
+        from mcp_combiner.status import _overlay_backing_state
+
+        self._set_mgr(monkeypatch, backing)
+        assert _overlay_backing_state("s", state) == expected
+
+    def test_no_ss_manager_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mcp_combiner.runtime import RUNTIME
+        from mcp_combiner.status import _overlay_backing_state
+
+        monkeypatch.setattr(RUNTIME, "ss_manager", None, raising=False)
+        assert _overlay_backing_state("s", "disconnected") == "disconnected"

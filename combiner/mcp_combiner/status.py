@@ -57,4 +57,31 @@ def build_server_status(
         # (warming) rung of the tri-state HTTP servers get before "ready". We do
         # NOT assume ready just because it is mounted.
         state = "connected"
-    return info.model_copy(update={"state": state})
+    return info.model_copy(update={"state": _overlay_backing_state(name, state)})
+
+
+def _overlay_backing_state(name: str, state: str) -> str:
+    """Refine a not-serving *state* using the backing sharedserver's observed state.
+
+    The connection manager can only say a first attempt hasn't finished
+    ("starting") or that an attempt failed ("disconnected"); the sharedserver
+    manager knows *why* — spawn still in flight vs. reachability poll timed
+    out. Fold that in so status distinguishes "wait" ("starting") from "won't
+    come up" ("unreachable").
+
+    Only states that already mean "not serving" are adjusted: an established
+    session ("connected"/"ready") is direct evidence the upstream is reachable
+    and beats any stale probe verdict, and "disabled"/"auth_failed" carry more
+    specific meaning than the backing process's health.
+    """
+    if state not in ("starting", "disconnected"):
+        return state
+    ss_manager = RUNTIME.ss_manager
+    if ss_manager is None:
+        return state
+    backing = ss_manager.backing_state(name)
+    if backing in ("spawning", "probing"):
+        return "starting"
+    if backing in ("spawn_failed", "unreachable"):
+        return "unreachable"
+    return state

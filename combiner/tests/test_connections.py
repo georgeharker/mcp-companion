@@ -12,12 +12,14 @@ the TTL expires. ``_signal_tools_ready`` is the bridge — it primes one bounded
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from mcp_combiner.connections import (
     _BACKING_RESTART_AFTER,
     _MAX_BACKOFF_LOCAL,
     ConnectionManager,
+    _ManagedConnection,
     _is_local_upstream,
 )
 
@@ -521,11 +523,20 @@ def _inject_conn(
     connected: bool = False,
     tools_ready: bool = False,
     has_client: bool = True,
+    first_attempt_done: bool = True,
 ) -> None:
-    """Inject a minimal fake managed-connection so lifecycle_state can read it."""
+    """Inject a minimal fake managed-connection so lifecycle_state can read it.
+
+    ``first_attempt_done`` mirrors the ``_ready`` event: True (the default,
+    matching every pre-"starting" test) means the first connect attempt has
+    finished; False means it is still in flight.
+    """
     client = SimpleNamespace(is_connected=lambda: connected) if has_client else None
+    ready = asyncio.Event()
+    if first_attempt_done:
+        ready.set()
     mgr._connections[name] = SimpleNamespace(  # type: ignore[assignment]
-        _auth_failed=auth_failed, client_ref=[client], _tools_ready=tools_ready
+        _auth_failed=auth_failed, client_ref=[client], _tools_ready=tools_ready, _ready=ready
     )
 
 
@@ -557,6 +568,26 @@ class TestLifecycleState:
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", has_client=False, tools_ready=True)
         assert mgr.lifecycle_state("a") == "disconnected"
+
+    def test_starting_before_first_attempt_finishes(self):
+        # Registered (or mid-connect): no client yet, _ready not signalled —
+        # "wait", not "broken".
+        mgr = ConnectionManager()
+        _inject_conn(mgr, "a", has_client=False, first_attempt_done=False)
+        assert mgr.lifecycle_state("a") == "starting"
+
+    def test_starting_via_real_register(self):
+        # The actual register() path (no fake): entry exists, no attempt made.
+        mgr = ConnectionManager()
+        mgr._connections["a"] = _ManagedConnection(
+            name="a", config=None, srv=None  # type: ignore[arg-type]
+        )
+        assert mgr.lifecycle_state("a") == "starting"
+
+    def test_auth_failed_beats_starting(self):
+        mgr = ConnectionManager()
+        _inject_conn(mgr, "a", auth_failed=True, has_client=False, first_attempt_done=False)
+        assert mgr.lifecycle_state("a") == "auth_failed"
 
     def test_mark_tools_unready_downgrades_ready_to_connected(self):
         mgr = ConnectionManager()
