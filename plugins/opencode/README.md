@@ -76,7 +76,9 @@ all defaults.
 | `checkout` | — | Combiner checkout for `uv run --project <checkout> python -m mcp_combiner`. |
 | `name` | `mcp-combiner` | `sharedserver` instance name. |
 | `gracePeriod` | `30m` | `sharedserver` grace period (`30m`, `1h`, …). |
-| `logFile` | — | Capture the combiner's output (`sharedserver --log-file`). |
+| `logFile` | `~/.local/state/mcp-combiner/mcp-combiner.log` | Capture the combiner's stdout/stderr (`sharedserver --log-file`); `"none"` disables. |
+| `pyLogFile` | `~/.local/state/mcp-combiner/mcp-combiner-py.log` | The combiner's own `--log-file` (fastmcp/OAuth/httpx detail); `"none"` disables. |
+| `logLevel` | `info` | The combiner's `--log-level`. |
 | `binary` | *(auto-resolved)* | Path to the `sharedserver` binary. |
 | `lockdir` | — | Override `SHAREDSERVER_LOCKDIR`. |
 | `mcpName` | `mcp-combiner` | Key under OpenCode's `mcp` config. |
@@ -116,7 +118,9 @@ Equivalent to setting `manage: false` with an explicit `url`.
 | `OPENCODE_MCP_COMBINER_PORT` | Port the combiner serves on. Default `9741`. |
 | `OPENCODE_MCP_COMBINER_NAME` | `sharedserver` instance name. Default `mcp-combiner`. |
 | `OPENCODE_MCP_COMBINER_GRACE` | `sharedserver` grace period. Default `30m`. |
-| `OPENCODE_MCP_COMBINER_LOG` | Capture the combiner's output to this path. |
+| `OPENCODE_MCP_COMBINER_LOG` | Stdout/stderr capture path (default `~/.local/state/mcp-combiner/mcp-combiner.log`; `none` disables). |
+| `OPENCODE_MCP_COMBINER_PYLOG` | The combiner's own `--log-file` (default `…/mcp-combiner-py.log`; `none` disables). |
+| `OPENCODE_MCP_COMBINER_LOG_LEVEL` | The combiner's `--log-level`. Default `info`. |
 | `SHAREDSERVER_BIN` | Path to the `sharedserver` binary. |
 | `SHAREDSERVER_LOCKDIR` | `sharedserver` lock directory. |
 

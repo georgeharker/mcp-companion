@@ -103,16 +103,55 @@ def _resolve_config(explicit: str | None) -> str | None:
     return next((c for c in candidates if os.path.isfile(c)), None)
 
 
+def _default_log_dir() -> str:
+    """Default directory for combiner log files (XDG state convention).
+
+    Parity with the Neovim plugin, which gives the combiner two files under
+    stdpath("log"): ``mcp-combiner.log`` (raw stdout/stderr, captured by
+    sharedserver's ``--log-file``) and ``mcp-combiner-py.log`` (the combiner's
+    own ``--log-file`` — fastmcp, OAuth, httpx detail). Outside Neovim there is
+    no stdpath("log"), so both default here instead.
+    """
+    state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(state, "mcp-combiner")
+
+
+def _resolve_capture_log(explicit: str | None) -> str | None:
+    """Resolve the sharedserver stdout/stderr capture path (``use --log-file``).
+
+    ``--log-file none`` disables capture; unset defaults to
+    ``<state>/mcp-combiner/mcp-combiner.log``. Previously the default was NO
+    capture, which meant a combiner started by this CLI discarded stdout/stderr
+    entirely — an outage left no server-side record.
+    """
+    if explicit == "none":
+        return None
+    if explicit:
+        return explicit
+    log_dir = _default_log_dir()
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, "mcp-combiner.log")
+
+
 def _combiner_serve_argv(config: str, host: str, port: int, extra: list[str]) -> list[str]:
     """Build the ``mcp-combiner --mcp …`` serve command sharedserver will run.
 
     Prefers the installed ``mcp-combiner`` entry point (absolute path, so it works
     detached from the current venv activation); falls back to ``python -m
     mcp_combiner`` using the running interpreter.
+
+    The served combiner also gets a default ``--log-file`` at
+    ``<state>/mcp-combiner/mcp-combiner-py.log`` — the second half of the
+    Neovim plugin's two-file scheme (see ``_default_log_dir``). An explicit
+    ``--log-file`` in *extra* wins; the combiner creates the parent directory
+    itself.
     """
     exe = shutil.which("mcp-combiner")
     base = [exe] if exe else [sys.executable, "-m", "mcp_combiner"]
-    return [*base, "--mcp", "--config", config, "--port", str(port), "--host", host, *extra]
+    argv = [*base, "--mcp", "--config", config, "--port", str(port), "--host", host, *extra]
+    if "--log-file" not in extra:
+        argv += ["--log-file", os.path.join(_default_log_dir(), "mcp-combiner-py.log")]
+    return argv
 
 
 def _build_start_cmd(
@@ -146,6 +185,61 @@ def _build_start_cmd(
 def _build_stop_cmd(binary: str, *, name: str, pid: int) -> list[str]:
     """Build the ``sharedserver unuse`` argv that drops *pid*'s reference."""
     return [binary, "unuse", name, "--pid", str(pid)]
+
+
+# How long start/restart --wait polls the combiner's /health. The combiner binds
+# its port only AFTER its ASGI lifespan startup completes, and that startup
+# `sharedserver use`s + health-polls every backing server first (config
+# health_timeout, default 30s, plus up to 15s for the `use` itself — concurrent
+# across servers, so ONE dead upstream delays the bind by ~45s). The previous
+# 30s poll therefore expired mid-startup and reported "not yet healthy" for
+# restarts that came up fine moments later. 60s covers that worst default case
+# with margin while keeping true-failure reporting reasonably snappy.
+_STARTUP_HEALTH_TIMEOUT = 60.0
+
+
+def _parse_registered_command(info_text: str) -> list[str] | None:
+    """Extract the registered child command from ``sharedserver info`` output.
+
+    The ``Command:`` line holds the argv sharedserver spawns, space-joined;
+    shlex-split it back. ``None`` when the line is missing or empty. An argv
+    element with embedded spaces would mis-split — acceptable for a best-effort
+    reuse that falls back to a rebuilt command.
+    """
+    import shlex
+
+    for line in info_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Command:"):
+            rest = stripped[len("Command:") :].strip()
+            return shlex.split(rest) if rest else None
+    return None
+
+
+async def _registered_command(binary: str, name: str) -> list[str] | None:
+    """Best-effort harvest of the running server's registered command, else None."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            "info",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+    except OSError:
+        return None
+    if proc.returncode != 0 or not out:
+        return None
+    return _parse_registered_command(out.decode(errors="replace"))
+
+
+def _argv_flag_value(argv: list[str], flag: str) -> str | None:
+    """The value following *flag* in *argv*, or None."""
+    try:
+        return argv[argv.index(flag) + 1]
+    except (ValueError, IndexError):
+        return None
 
 
 async def _poll_health(host: str, port: int, timeout: float) -> bool:
@@ -201,7 +295,7 @@ async def cmd_start(args: argparse.Namespace) -> int:
         pid=pid,
         grace_period=args.grace_period,
         serve_argv=serve_argv,
-        log_file=args.log_file,
+        log_file=_resolve_capture_log(args.log_file),
     )
     if args.dry_run:
         print(" ".join(cmd))
@@ -221,12 +315,26 @@ async def cmd_start(args: argparse.Namespace) -> int:
 
     url = f"http://{args.host}:{args.port}/mcp"
     if args.wait:
-        ready = await _poll_health(args.host, args.port, 30.0)
-        state = "ready" if ready else "starting (not yet healthy)"
+        ready = await _poll_health(args.host, args.port, _STARTUP_HEALTH_TIMEOUT)
+        state = "ready" if ready else _not_serving_state()
     else:
         state = "attached"
     print(f"combiner '{args.name}' {state} — {url} (ref pid {pid}, grace {args.grace_period})")
     return 0
+
+
+def _not_serving_state() -> str:
+    """Verdict for a --wait poll that expired without /health answering.
+
+    Deliberately NOT "unhealthy": the port binds only after lifespan startup
+    finishes bringing up every backing sharedserver, so an expired poll usually
+    means "still starting", not "failed". Say so, and point at the evidence.
+    """
+    return (
+        f"not serving after {int(_STARTUP_HEALTH_TIMEOUT)}s — likely still starting "
+        "(the port binds only once every backing sharedserver is up); check "
+        f"`mcp-combiner status` shortly, or the logs in {_default_log_dir()}"
+    )
 
 
 async def cmd_stop(args: argparse.Namespace) -> int:
@@ -322,20 +430,45 @@ async def cmd_restart_combiner(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    config = _resolve_config(args.config)
-    if not config:
-        print(
-            "restart: no config file found. Pass --config PATH, set MCP_COMBINER_CONFIG, "
-            "or create ~/.config/mcp-combiner/servers.json.",
-            file=sys.stderr,
-        )
-        return 2
-    if not os.path.isfile(config):
-        print(f"restart: config file not found: {config}", file=sys.stderr)
-        return 2
-
     pid = args.pid if args.pid is not None else os.getppid()
-    serve_argv = _combiner_serve_argv(config, args.host, args.port, [])
+
+    # Serve argv: reuse the RUNNING daemon's registered command verbatim unless
+    # the caller explicitly re-specifies serve parameters (--config/--host/--port).
+    # Restart means "the same thing, fresh process" — the registered argv carries
+    # flags this CLI cannot reconstruct (Neovim's --schema-fix / validation /
+    # --log-file choices), and rebuilding from scratch silently dropped them and
+    # relocated the py-log. Fall back to a rebuild when nothing is registered or
+    # the info output is unparsable.
+    serve_argv: list[str] | None = None
+    overridden = args.config is not None or args.host is not None or args.port is not None
+    if not overridden:
+        serve_argv = await _registered_command(binary, name)
+        if serve_argv:
+            print("restart: reusing the running combiner's registered command", file=sys.stderr)
+    if serve_argv is None:
+        config = _resolve_config(args.config)
+        if not config:
+            print(
+                "restart: no config file found. Pass --config PATH, set MCP_COMBINER_CONFIG, "
+                "or create ~/.config/mcp-combiner/servers.json.",
+                file=sys.stderr,
+            )
+            return 2
+        if not os.path.isfile(config):
+            print(f"restart: config file not found: {config}", file=sys.stderr)
+            return 2
+        serve_argv = _combiner_serve_argv(
+            config, args.host or "127.0.0.1", args.port or 9741, []
+        )
+
+    # Health-poll / URL target: explicit flags win; otherwise read host/port from
+    # the argv we are about to run (a reused command may serve off-default).
+    host = args.host or _argv_flag_value(serve_argv, "--host") or "127.0.0.1"
+    try:
+        port = args.port or int(_argv_flag_value(serve_argv, "--port") or 9741)
+    except ValueError:
+        port = 9741
+
     stop_cmd = [binary, "admin", "stop", "--force", name]
     start_cmd = _build_start_cmd(
         binary,
@@ -343,7 +476,7 @@ async def cmd_restart_combiner(args: argparse.Namespace) -> int:
         pid=pid,
         grace_period=args.grace_period,
         serve_argv=serve_argv,
-        log_file=args.log_file,
+        log_file=_resolve_capture_log(args.log_file),
     )
     if args.dry_run:
         print(" ".join(stop_cmd))
@@ -373,10 +506,10 @@ async def cmd_restart_combiner(args: argparse.Namespace) -> int:
     if out and out.strip():
         print(out.decode().strip())
 
-    url = f"http://{args.host}:{args.port}/mcp"
+    url = f"http://{host}:{port}/mcp"
     if args.wait:
-        ready = await _poll_health(args.host, args.port, 30.0)
-        state = "ready" if ready else "starting (not yet healthy)"
+        ready = await _poll_health(host, port, _STARTUP_HEALTH_TIMEOUT)
+        state = "ready" if ready else _not_serving_state()
     else:
         state = "attached"
     print(
@@ -388,9 +521,11 @@ async def cmd_restart_combiner(args: argparse.Namespace) -> int:
 _STATE_GLYPH = {
     "ready": "●",
     "connected": "◐",
+    "starting": "◌",
     "disabled": "○",
     "auth_failed": "✗",
     "disconnected": "✗",
+    "unreachable": "✗",
 }
 
 
@@ -541,7 +676,11 @@ def add_ctl_parsers(subparsers: "argparse._SubParsersAction[argparse.ArgumentPar
         help="Client PID to attach the reference to (default: the calling shell)",
     )
     p.add_argument(
-        "--log-file", dest="log_file", default=None, help="Combiner stdout/stderr log path"
+        "--log-file",
+        dest="log_file",
+        default=None,
+        help="Combiner stdout/stderr capture path (default: "
+        "~/.local/state/mcp-combiner/mcp-combiner.log; 'none' disables)",
     )
     p.add_argument(
         "--wait",
@@ -596,11 +735,23 @@ def add_ctl_parsers(subparsers: "argparse._SubParsersAction[argparse.ArgumentPar
     p.add_argument(
         "--config",
         default=None,
-        help="servers.json for the fresh combiner (default: $MCP_COMBINER_CONFIG, "
-        "$CLAUDE_MCP_COMBINER_CONFIG, then standard locations)",
+        help="servers.json for the fresh combiner. Omitted (like --host/--port): the "
+        "running combiner's registered command is reused verbatim, preserving flags "
+        "this CLI cannot reconstruct. Passing any of the three rebuilds from scratch "
+        "(config default: $MCP_COMBINER_CONFIG, $CLAUDE_MCP_COMBINER_CONFIG, then "
+        "standard locations)",
     )
-    p.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
-    p.add_argument("--port", type=int, default=9741, help="Port to bind (default: 9741)")
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Host to bind (default: the reused command's, else 127.0.0.1)",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port to bind (default: the reused command's, else 9741)",
+    )
     p.add_argument("--name", default="mcp-combiner", help="sharedserver name")
     p.add_argument(
         "--grace-period",
@@ -615,7 +766,11 @@ def add_ctl_parsers(subparsers: "argparse._SubParsersAction[argparse.ArgumentPar
         help="Client PID to attach the fresh process to (default: the calling shell)",
     )
     p.add_argument(
-        "--log-file", dest="log_file", default=None, help="Combiner stdout/stderr log path"
+        "--log-file",
+        dest="log_file",
+        default=None,
+        help="Combiner stdout/stderr capture path (default: "
+        "~/.local/state/mcp-combiner/mcp-combiner.log; 'none' disables)",
     )
     p.add_argument(
         "--wait",

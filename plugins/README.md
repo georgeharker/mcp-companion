@@ -171,12 +171,31 @@ register only, don't launch" — that is how CodeCompanion/mcp-companion injects
 per-session endpoint. Adding an explicit port is what distinguishes "I picked this port"
 from "someone else is serving me".
 
+## Logs
+
+When the hook is the one that launches the combiner, it sets up the same two-file
+scheme the Neovim plugin uses (there, under `stdpath("log")`), defaulted to
+`~/.local/state/mcp-combiner/` (`$XDG_STATE_HOME` respected):
+
+- `mcp-combiner.log` — raw stdout/stderr, captured by sharedserver
+  (`CLAUDE_MCP_COMBINER_LOG` / `OPENCODE_MCP_COMBINER_LOG` or the OpenCode
+  `logFile` option override the path; `none` disables).
+- `mcp-combiner-py.log` — the combiner's own `--log-file`: fastmcp, OAuth and
+  httpx detail (`CLAUDE_MCP_COMBINER_PYLOG` / `OPENCODE_MCP_COMBINER_PYLOG` or
+  `pyLogFile`; level via `…_LOG_LEVEL` / `logLevel`, default `info`; `none`
+  disables).
+
+The `mcp-combiner start`/`restart` CLI verbs default the same paths. Whichever
+client *starts* the shared process fixes its argv — when Neovim launched the
+combiner, its `stdpath("log")` paths are already in place and these have no
+effect.
+
 ## Troubleshooting
 
 - **"no config file found"** — create `~/.config/mcp-combiner/servers.json`
   (or set `MCP_COMBINER_CONFIG`); the probe order is listed under
-  Prerequisites. The hook logs to stderr (`CLAUDE_MCP_COMBINER_LOG` to
-  capture) and the session simply has no combiner tools.
+  Prerequisites. The hook logs to stderr and the session simply has no
+  combiner tools.
 - **`sharedserver binary not found`** — `cargo install sharedserver`, or set
   `SHAREDSERVER_BIN=/path/to/sharedserver`.
 - **Port 9741 already in use** — usually a previous combiner still inside its

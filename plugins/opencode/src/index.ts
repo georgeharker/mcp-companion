@@ -13,7 +13,7 @@
 // best-effort "make sure something is listening there" half. See README.md.
 
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -42,8 +42,15 @@ type Options = {
     name?: string
     /** sharedserver grace period, e.g. "30m", "1h". Default `"30m"`. */
     gracePeriod?: string
-    /** Capture the combiner's stdout/stderr to this path (sharedserver `--log-file`). */
+    /** Capture the combiner's stdout/stderr to this path (sharedserver `--log-file`).
+     *  Default `$XDG_STATE_HOME/mcp-combiner/mcp-combiner.log` (parity with the Neovim
+     *  plugin's two-file scheme — see plugins/README.md "Logs"); `"none"` disables. */
     logFile?: string
+    /** The combiner's own `--log-file` (fastmcp, OAuth, httpx detail).
+     *  Default `$XDG_STATE_HOME/mcp-combiner/mcp-combiner-py.log`; `"none"` disables. */
+    pyLogFile?: string
+    /** The combiner's `--log-level`. Default `"info"`. */
+    logLevel?: string
 
     // ── Combiner invocation ───────────────────────────────────────
     /** Override the combiner command (else auto-resolved, see resolveCombiner). */
@@ -579,9 +586,21 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
 
     // Assemble the wrapped command: <combiner> [--mcp] --config <cfg> --port <port> [--host <host>]
     const serve: string[] = []
-    if (combinerNeedsMcpFlag(combiner, env)) serve.push("--mcp")
+    const modern = combinerNeedsMcpFlag(combiner, env)
+    if (modern) serve.push("--mcp")
     serve.push("--config", cfgPath, "--port", String(port))
     if (opts.host) serve.push("--host", opts.host)
+    // Logging parity with the Neovim plugin's two-file scheme (plugins/README.md "Logs"):
+    // sharedserver captures raw stdout/stderr (--log-file on `use`, below) and the
+    // combiner writes its own --log-file. Both default under $XDG_STATE_HOME/mcp-combiner;
+    // "none" disables a file. The combiner-side flags ride the same version gate as
+    // --mcp — releases below the floor predate --log-file/--log-level.
+    const logDir = join(env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "mcp-combiner")
+    const pyLogFile = opts.pyLogFile ?? env.OPENCODE_MCP_COMBINER_PYLOG ?? join(logDir, "mcp-combiner-py.log")
+    if (modern) {
+        if (pyLogFile !== "none") serve.push("--log-file", pyLogFile)
+        serve.push("--log-level", opts.logLevel ?? env.OPENCODE_MCP_COMBINER_LOG_LEVEL ?? "info")
+    }
     // Structural args, then the user's extras, then the serve args — the extras sit
     // "before the serve args" as the `args` option documents.
     const wrapped: Command = {
@@ -599,8 +618,17 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
         "--metadata",
         `opencode-${process.pid}`,
     ]
-    const logFile = opts.logFile ?? process.env.OPENCODE_MCP_COMBINER_LOG
-    if (logFile) useArgs.push("--log-file", logFile)
+    const logFile = opts.logFile ?? process.env.OPENCODE_MCP_COMBINER_LOG ?? join(logDir, "mcp-combiner.log")
+    if (logFile !== "none") {
+        // sharedserver won't create the capture file's directory; the combiner does
+        // create its own --log-file parent.
+        try {
+            mkdirSync(dirname(logFile), { recursive: true })
+        } catch {
+            // best-effort — a failed mkdir just means sharedserver may drop the capture
+        }
+        useArgs.push("--log-file", logFile)
+    }
     useArgs.push("--", wrapped.cmd, ...wrapped.args)
 
     installCleanup()

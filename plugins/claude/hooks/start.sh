@@ -251,7 +251,27 @@ fi
 port="${CLAUDE_MCP_COMBINER_PORT:-9741}"
 grace="${CLAUDE_MCP_COMBINER_GRACE:-30m}"
 name="${CLAUDE_MCP_COMBINER_NAME:-mcp-combiner}"
-log_file="${CLAUDE_MCP_COMBINER_LOG:-}"
+
+# --- Logging ---------------------------------------------------------------------
+# Parity with the Neovim plugin, which gives the combiner two log files under
+# stdpath("log"): mcp-combiner.log (raw stdout/stderr, captured by sharedserver's
+# --log-file) and mcp-combiner-py.log (the combiner's own --log-file — fastmcp,
+# OAuth, httpx detail — at level "info"). There is no stdpath("log") here, so both
+# default under $XDG_STATE_HOME/mcp-combiner. Set a variable to "none" to disable
+# that file. Whichever client STARTS the shared process fixes its argv — when
+# Neovim launched the combiner these have no effect (its stdpath paths are already
+# in place); they matter exactly when this hook is the launcher, which was
+# previously the only launch path with no logs at all (stdout/stderr to /dev/null,
+# no --log-file: an outage left no server-side record).
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/mcp-combiner"
+log_file="${CLAUDE_MCP_COMBINER_LOG:-$log_dir/mcp-combiner.log}"
+py_log_file="${CLAUDE_MCP_COMBINER_PYLOG:-$log_dir/mcp-combiner-py.log}"
+log_level="${CLAUDE_MCP_COMBINER_LOG_LEVEL:-info}"
+[[ "$log_file" == "none" ]] && log_file=""
+[[ "$py_log_file" == "none" ]] && py_log_file=""
+# sharedserver won't create the capture file's directory; the combiner does create
+# its own --log-file parent, so only the capture path needs help.
+[[ -n "$log_file" ]] && mkdir -p "$(dirname "$log_file")" 2>/dev/null
 
 # Choosing a port takes BOTH variables, because they answer different questions and
 # neither can be derived from the other: CLAUDE_MCP_COMBINER_PORT is where we tell
@@ -322,10 +342,19 @@ if [[ -n "$combiner_version" ]] && version_ge "$combiner_version" "$MIN_COMBINER
   serve_flag=(--mcp)
 fi
 
+# Combiner-side log flags ride the same version gate as --mcp: releases below the
+# floor predate --log-file/--log-level, and an unknown-version override shouldn't
+# be handed flags it may not parse.
+combiner_log_args=()
+if [[ ${#serve_flag[@]} -gt 0 ]]; then
+  [[ -n "$py_log_file" ]] && combiner_log_args+=(--log-file "$py_log_file")
+  combiner_log_args+=(--log-level "$log_level")
+fi
+
 # --- Build and run sharedserver use --------------------------------------------
 ss_args=(use "$name" --pid "$client_pid" --metadata "claude-$client_pid" --grace-period "$grace")
 [[ -n "$log_file" ]] && ss_args+=(--log-file "$log_file")
-ss_args+=(-- "${combiner_cmd[@]}" "${serve_flag[@]}" --config "$config" --port "$port")
+ss_args+=(-- "${combiner_cmd[@]}" "${serve_flag[@]}" --config "$config" --port "$port" "${combiner_log_args[@]}")
 
 if ! out="$("$ss_bin" "${ss_args[@]}" 2>&1)"; then
   echo "mcp-combiner: sharedserver use failed (exit $?):" >&2
