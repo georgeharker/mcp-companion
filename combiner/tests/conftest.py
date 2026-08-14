@@ -118,10 +118,13 @@ def write_servers_config(
     path: Path,
     servers: dict[str, Any],
     shared_servers: dict[str, Any] | None = None,
+    isolation: dict[str, Any] | None = None,
 ) -> Path:
     doc: dict[str, Any] = {"servers": servers}
     if shared_servers:
         doc["sharedServers"] = shared_servers
+    if isolation:
+        doc["isolation"] = isolation
     path.write_text(json.dumps(doc, indent=2))
     return path
 

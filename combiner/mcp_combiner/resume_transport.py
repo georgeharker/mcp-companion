@@ -9,10 +9,12 @@ Nothing is fabricated.
 
 Mechanics (all but one piece public API):
 
-- ``terminate_on_close=False`` — public parameter of the SDK's
-  ``streamable_http_client``; fastmcp's wrapper simply never passes it. Used
-  both to *not* destroy the upstream session when parking/handing over, and
-  by resumed connections.
+- ``terminate_on_close`` — the SDK reads its knob of this name at CONNECT
+  time, but parking decides at CLOSE time whether the upstream session should
+  survive. So we always pass the SDK ``False`` and perform the close-time
+  DELETE ourselves via the public ``terminate_session`` method, reading our
+  own (mutable) ``terminate_on_close`` flag when the connection closes —
+  flip it to ``False`` on a live client just before disconnecting to park.
 - Seeding — the SDK transport keeps session identity as two plain attributes
   (``session_id``, ``protocol_version``) captured from the initialize
   exchange and stamped onto every request's headers. A resume sets them
@@ -61,7 +63,8 @@ class ResumableStreamableHttpTransport(StreamableHttpTransport):
     ``Client(auto_initialize=False)`` so no fresh initialize is sent — and
     re-sends ``notifications/initialized`` to start the GET stream. Without
     it, behaves exactly like the parent except that ``terminate_on_close``
-    is honoured (fastmcp hardwires the SDK default of True).
+    is honoured, and read at CLOSE time (mutable per instance), so a live
+    connection can be parked by flipping the flag before disconnecting.
     """
 
     def __init__(
@@ -112,20 +115,24 @@ class ResumableStreamableHttpTransport(StreamableHttpTransport):
 
         async with (
             http_client,
+            # terminate_on_close is OUR close-time decision (see module
+            # docstring): the SDK never terminates; we DELETE in the finally
+            # below iff the flag still says so when the connection closes.
             streamable_http_client(
                 self.url,
                 http_client=http_client,
-                terminate_on_close=self.terminate_on_close,
+                terminate_on_close=False,
             ) as transport,
         ):
             read_stream, write_stream, get_session_id = transport
             self._get_session_id_cb = get_session_id
+            # The SDK transport is the bound method's receiver; session
+            # identity lives in two plain attributes it stamps onto every
+            # request's headers.
+            sdk_transport = get_session_id.__self__  # type: ignore[attr-defined]
 
             if self.resume_session_id is not None:
-                # The SDK transport is the bound method's receiver; session
-                # identity lives in two plain attributes it stamps onto every
-                # request's headers. Seed BEFORE anything is sent.
-                sdk_transport = get_session_id.__self__  # type: ignore[attr-defined]
+                # Seed BEFORE anything is sent.
                 sdk_transport.session_id = self.resume_session_id
                 if self.resume_protocol_version is not None:
                     sdk_transport.protocol_version = self.resume_protocol_version
@@ -134,18 +141,22 @@ class ResumableStreamableHttpTransport(StreamableHttpTransport):
                     self.resume_session_id[:8],
                 )
 
-            async with ClientSession(
-                read_stream, write_stream, **session_kwargs
-            ) as session:
-                if self.resume_session_id is not None:
-                    # Re-announce initialized: idempotent server-side, and the
-                    # SDK client starts its standalone GET stream (server-
-                    # initiated notifications) on exactly this send.
-                    await session.send_notification(
-                        mt.ClientNotification(
-                            mt.InitializedNotification(
-                                method="notifications/initialized"
+            try:
+                async with ClientSession(
+                    read_stream, write_stream, **session_kwargs
+                ) as session:
+                    if self.resume_session_id is not None:
+                        # Re-announce initialized: idempotent server-side, and
+                        # the SDK client starts its standalone GET stream
+                        # (server-initiated notifications) on exactly this send.
+                        await session.send_notification(
+                            mt.ClientNotification(
+                                mt.InitializedNotification(
+                                    method="notifications/initialized"
+                                )
                             )
                         )
-                    )
-                yield session
+                    yield session
+            finally:
+                if self.terminate_on_close:
+                    await sdk_transport.terminate_session(http_client)

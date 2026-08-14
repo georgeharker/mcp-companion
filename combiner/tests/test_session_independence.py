@@ -397,6 +397,40 @@ class TestIsolatedUpstreamSessions:
         assert stats["tool_calls"]["greet"] == 2
         assert len(greet_sessions) == 1, stats["session_calls"]
 
+    async def test_park_and_resume_across_grace_expiry(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """After the grace window the chat's upstream client is parked
+        (disconnected without terminating the upstream session); the token's
+        next appearance resumes the SAME upstream session via the seeded
+        transport."""
+        tools_path = write_tools_spec(tmp_path / "tools.json", _SPEC)
+        mock = await procs.start_http_mock("mockup", tools_path=tools_path)
+        cfg = write_servers_config(
+            tmp_path / "servers.json",
+            {"mockup": {**http_mock_entry(mock.port), "isolate": True}},
+            isolation={"grace_seconds": 0.5, "park_ttl_seconds": 3600},
+        )
+        combiner = await procs.start_combiner(cfg)
+        await combiner.wait_server_state("mockup", ("ready",))
+
+        tok = _token()
+        async with _header_client(combiner, tok) as c1:
+            assert await _text(c1, "mockup_greet", {"who": "a"}) == "Hello, a!"
+
+        # Let the grace window lapse and the sweeper park the entry.
+        import asyncio
+
+        await asyncio.sleep(2.0)
+
+        async with _header_client(combiner, tok) as c2:
+            assert await _text(c2, "mockup_greet", {"who": "b"}) == "Hello, b!"
+
+        stats = await mock.stats()
+        greet_sessions = {sid for sid in stats["session_calls"] if sid != "<none>"}
+        assert stats["tool_calls"]["greet"] == 2
+        assert len(greet_sessions) == 1, stats["session_calls"]
+
     async def test_non_isolated_chats_share_one_upstream_session(
         self, procs: ProcFactory, tmp_path: Path
     ) -> None:

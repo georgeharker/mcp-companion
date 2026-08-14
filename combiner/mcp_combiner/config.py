@@ -468,12 +468,43 @@ class OAuthConfig(BaseModel):
         )
 
 
+class IsolationConfig(BaseModel):
+    """Lifecycle knobs for token-keyed isolated upstream sessions.
+
+    Example JSON (top-level section)::
+
+        "isolation": {
+            "grace_seconds": 300,
+            "park_ttl_seconds": 3600
+        }
+    """
+
+    grace_seconds: float = 300.0
+    """How long a chat's upstream client stays connected after its last
+    downstream session exits. Reconnects inside the window reattach live."""
+
+    park_ttl_seconds: float = 3600.0
+    """How long a parked upstream session id stays resumable. The effective
+    resume window is min(this, the upstream server's own session expiry) —
+    this bounds how long a resume probe is worth attempting, it is not a
+    state-retention guarantee."""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> IsolationConfig:
+        """Parse the top-level ``isolation`` config dict."""
+        return cls(
+            grace_seconds=float(data.get("grace_seconds", 300.0)),
+            park_ttl_seconds=float(data.get("park_ttl_seconds", 3600.0)),
+        )
+
+
 class CombinerConfig(BaseModel):
     """Full combiner configuration."""
 
     servers: dict[str, ServerConfig] = Field(default_factory=dict)
     shared_servers: dict[str, SharedServerConfig] = Field(default_factory=dict)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
+    isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     permissions: PermissionPolicy | None = None
     """Global tool-call permission policy applied to every server, unless a
     server overrides it.  ``None`` (default) means **off** — no gate, identical
@@ -503,12 +534,16 @@ class CombinerConfig(BaseModel):
         raw_oauth: dict[str, Any] = raw.get("oauth", {})
         oauth = OAuthConfig.from_dict(raw_oauth) if raw_oauth else OAuthConfig()
 
+        raw_isolation: dict[str, Any] = raw.get("isolation", {})
+        isolation = IsolationConfig.from_dict(raw_isolation) if raw_isolation else IsolationConfig()
+
         permissions = PermissionPolicy.from_dict(raw.get("permissions"))
 
         return cls(
             servers=servers,
             shared_servers=shared_servers,
             oauth=oauth,
+            isolation=isolation,
             permissions=permissions,
             config_path=str(path),
         )

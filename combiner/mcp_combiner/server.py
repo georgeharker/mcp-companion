@@ -299,6 +299,14 @@ def create_combiner(
     RUNTIME.conn_manager = conn_manager
     RUNTIME.ss_manager = ss_manager
 
+    # Lifecycle knobs for token-keyed isolated upstream sessions.
+    from mcp_combiner.isolated import REGISTRY as _isolated_registry
+
+    _isolated_registry.configure(
+        grace=config.isolation.grace_seconds,
+        ttl=config.isolation.park_ttl_seconds,
+    )
+
     @asynccontextmanager
     async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         await ss_manager.start_all()

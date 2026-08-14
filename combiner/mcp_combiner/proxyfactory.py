@@ -127,9 +127,21 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
     race into parallel auth flows, and surfaces the primer's auth failure as a
     retryable ``AuthenticationError``.
     """
+    from fastmcp.client.transports import StreamableHttpTransport
+
     from mcp_combiner.isolated import TokenKeyedStatefulClient
+    from mcp_combiner.resume_transport import ResumableStreamableHttpTransport
 
     transport = build_http_transport(srv)
+    # Streamable-HTTP isolated servers ride the resumable transport so their
+    # per-chat sessions can be parked (disconnected without termination) and
+    # resumed by token. SSE has no session-id semantics — keep it plain.
+    if isinstance(transport, StreamableHttpTransport) and not isinstance(
+        transport, ResumableStreamableHttpTransport
+    ):
+        transport = ResumableStreamableHttpTransport(
+            url=transport.url, headers=transport.headers
+        )
 
     # OAuth-isolated: borrow the primer connection's shared, refreshed auth and
     # gate per-chat session creation on the primer's eager auth completing.
@@ -161,7 +173,7 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
                     f"Server '{name}' is disabled due to an authentication error: "
                     f"{mgr.auth_error(name)}. Use combiner__enable_server to retry."
                 )
-            return oauth_stateful.new_stateful()
+            return await oauth_stateful.acquire_stateful()
 
         logger.info(
             "Server '%s': per-chat session isolation enabled "
@@ -191,10 +203,12 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
     )
     logger.info("Server '%s': per-chat session isolation enabled (isolate=true)", name)
 
-    # Wrap new_stateful so each per-chat clone gets our handler re-attached, bound
-    # to the requesting chat's session (per_chat=True). Passed via the public param.
+    # Wrap the (async) acquire so each per-chat clone gets our handler
+    # re-attached, bound to the requesting chat's session (per_chat=True).
+    # Passed via the public param.
     return FastMCPProxy(
-        client_factory=forwarding_factory(stateful.new_stateful, name, per_chat=True), name=name
+        client_factory=forwarding_factory(stateful.acquire_stateful, name, per_chat=True),
+        name=name,
     )
 
 
