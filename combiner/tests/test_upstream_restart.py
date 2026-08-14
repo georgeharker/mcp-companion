@@ -136,6 +136,45 @@ class TestRestartMetaTool:
             who = await _whoami(c)
         assert who["pid"] == mock.proc.pid
 
+    async def test_isolated_chat_recovers_after_server_restart(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """restart_server evicts an isolate:true server's per-chat sessions:
+        a tokened chat's next call opens a clean fresh upstream session
+        instead of erroring against the dead pre-restart session id, and the
+        restart summary makes the state reset legible."""
+        from fastmcp.client.transports import StreamableHttpTransport
+
+        tools_path = write_tools_spec(tmp_path / "tools.json", _SPEC)
+        mock = await procs.start_http_mock("mockup", tools_path=tools_path)
+        cfg = write_servers_config(
+            tmp_path / "servers.json",
+            {"mockup": {**http_mock_entry(mock.port), "isolate": True}},
+        )
+        combiner = await procs.start_combiner(cfg, env=FAST_TIMING_ENV)
+        await combiner.wait_server_state("mockup", ("ready",))
+
+        token = "11111111-2222-3333-4444-555555555555"
+
+        def _chat() -> Client:
+            return Client(
+                StreamableHttpTransport(
+                    combiner.mcp_url, headers={"X-MCP-Combiner-Session": token}
+                )
+            )
+
+        async with _chat() as c:
+            assert await _text(c, "mockup_greet", {"who": "a"}) == "Hello, a!"
+
+        summary = await _restart(combiner)
+        assert "isolated per-chat session(s) were reset" in summary
+        await combiner.wait_server_state("mockup", ("ready",))
+
+        # Same chat token: must get a clean fresh upstream session, not a
+        # cached client bound to the dead pre-restart session id.
+        async with _chat() as c:
+            assert await _text(c, "mockup_greet", {"who": "b"}) == "Hello, b!"
+
     @requires_sharedserver
     async def test_sharedserver_restart_bounces_backing_process(
         self, procs: ProcFactory, tmp_path: Path

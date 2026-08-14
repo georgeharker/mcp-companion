@@ -239,6 +239,19 @@ def register_meta_tools(
                 "mount bookkeeping may have diverged",
                 server_name,
             )
+        # Evict this server's isolated per-chat sessions (live and parked):
+        # their upstream session ids die with the process, and a cached client
+        # bound to a dead id would error on every call instead of opening a
+        # clean fresh session. A server restart is an intentional state reset.
+        from mcp_combiner.isolated import REGISTRY as isolated_registry
+
+        evicted_chats = await isolated_registry.evict_server(server_name)
+        if evicted_chats:
+            logger.info(
+                "restart: reset %d isolated per-chat session(s) for '%s'",
+                evicted_chats,
+                server_name,
+            )
 
         # 2. Hard-restart the backing process (no-op for non-sharedserver servers).
         restarted_proc = False
@@ -301,9 +314,17 @@ def register_meta_tools(
                 ready_note = "; server not yet listable — tools appear once it is live"
 
         proc_note = "process restarted" if restarted_proc else "connection re-opened"
+        # Make the state reset legible: the LLM may hold references (document
+        # ids, kernels) into per-chat sessions that just died with the server.
+        reset_note = (
+            f"; {evicted_chats} isolated per-chat session(s) were reset — "
+            "server-side per-chat state is gone, fresh sessions open on next use"
+            if evicted_chats
+            else ""
+        )
         summary = (
             f"Server '{server_name}' restarted ({proc_note}; "
-            f"{removed} provider(s) replaced){ready_note}"
+            f"{removed} provider(s) replaced){reset_note}{ready_note}"
         )
         logger.info(summary)
         return summary
