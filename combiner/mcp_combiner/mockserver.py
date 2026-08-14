@@ -158,6 +158,10 @@ class MockState:
     tool_calls: dict[str, int] = field(default_factory=dict)
     session_calls: dict[str, int] = field(default_factory=dict)
     session_ids: list[str] = field(default_factory=list)
+    # Per-session scratch value (mock__remember/mock__recall): models a
+    # stateful server's session-scoped state (svg-mcp's current document, a
+    # jupyter kernel). In-memory ON PURPOSE — it must die with the process.
+    session_memory: dict[str, str] = field(default_factory=dict)
     # Live ServerSessions, recorded per request so catalog mutations can
     # broadcast notifications/tools/list_changed (same pattern as the
     # combiner's _active_sessions WeakSet).
@@ -427,6 +431,36 @@ class MockServer:
                     "calls_total": state.calls_total,
                 }
             )
+
+        @mcp_srv.tool(
+            name="mock__remember",
+            description=(
+                "Store a value scoped to THIS upstream MCP session — models a "
+                "stateful server's per-session state (e.g. svg-mcp's current "
+                "document). A different or fresh session cannot see it."
+            ),
+        )
+        async def mock__remember(ctx: Context, value: str) -> str:
+            state.record_session(ctx)
+            state.record_call("mock__remember", ctx.session_id)
+            sid = ctx.session_id or "<none>"
+            state.session_memory[sid] = value
+            return f"remembered in session {sid[:8]}"
+
+        @mcp_srv.tool(
+            name="mock__recall",
+            description=(
+                "Recall the value stored in THIS upstream MCP session. Errors "
+                "when the session has no memory — a fresh session starts empty."
+            ),
+        )
+        async def mock__recall(ctx: Context) -> str:
+            state.record_session(ctx)
+            state.record_call("mock__recall", ctx.session_id)
+            sid = ctx.session_id or "<none>"
+            if sid not in state.session_memory:
+                raise ToolError("nothing remembered in this session")
+            return state.session_memory[sid]
 
         @mcp_srv.tool(
             name="mock__sleep",

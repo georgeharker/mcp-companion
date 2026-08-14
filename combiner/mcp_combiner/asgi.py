@@ -163,6 +163,17 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
+        # (Observed via GET /sessions/map: isolated_live → isolated_parked.)
+        # An explicit session DELETE from a tokened client skips the grace
+        # window for that token's isolated upstream sessions: the client
+        # declared this downstream session finished, so park now (never
+        # forget — DELETE is ambiguous between chat-done and a clean
+        # transport cycle, and parked serves both).
+        if request.method == "DELETE":
+            from mcp_combiner.isolated import REGISTRY as _isolated_registry
+
+            _isolated_registry.expedite_park(token)
+
         if not already_mapped:
             sid = response.headers.get("mcp-session-id")
             if sid:

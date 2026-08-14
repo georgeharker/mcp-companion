@@ -56,6 +56,56 @@ def register_routes(
         payload["boot_id"] = RUNTIME.boot_id
         return JSONResponse(payload)
 
+    # The general session map: every correlation the combiner holds around a
+    # chat token — downstream wire session, nvim instance bind, and the
+    # token-keyed isolated upstream sessions (live and parked tiers).
+    # Loopback control plane — tokens and session ids appear in full, same
+    # trust level as the /sessions/token routes. Tests and ops both read
+    # lifecycle transitions here.
+    @combiner.custom_route("/sessions/map", methods=["GET"])
+    async def session_map(request: Request) -> JSONResponse:
+        from mcp_combiner import nvim_proxy
+        from mcp_combiner.isolated import REGISTRY as isolated_registry
+
+        token_instances, _instances = nvim_proxy.snapshot_routing()
+        tokens = sorted(set(RUNTIME.sessions.token_sessions) | set(token_instances))
+        return JSONResponse(
+            {
+                "tokens": [
+                    {
+                        "token": token,
+                        "session_id": RUNTIME.sessions.token_sessions.get(token),
+                        "instance_id": token_instances.get(token),
+                    }
+                    for token in tokens
+                ],
+                "isolated_live": [
+                    {
+                        "server": server,
+                        "token": token,
+                        "downstream_sessions": len(entry.session_ids),
+                        "upstream_session_id": (
+                            entry.client.transport.get_session_id()
+                            if hasattr(entry.client.transport, "get_session_id")
+                            else None
+                        ),
+                    }
+                    for (server, token), entry in isolated_registry.live.items()
+                ],
+                "isolated_parked": [
+                    {
+                        "server": server,
+                        "token": token,
+                        "upstream_session_id": parked.session_id,
+                        "protocol_version": parked.protocol_version,
+                    }
+                    for (server, token), parked in isolated_registry.parked.items()
+                ],
+                "grace_seconds": isolated_registry.grace,
+                "park_ttl_seconds": isolated_registry.ttl,
+            }
+        )
+
     # Sanctioned-restart handover: ctl flags the NEXT shutdown to write the
     # one-shot handover payload to *path*. Only `mcp-combiner restart` calls
     # this; an unflagged shutdown (crash, kill, grace expiry) writes nothing.

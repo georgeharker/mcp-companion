@@ -86,15 +86,29 @@ def _request_token() -> str | None:
 
 @dataclass
 class LiveEntry:
-    """A connected per-chat upstream client and the downstream sessions using it."""
+    """A connected per-chat upstream client and the downstream sessions using it.
+
+    Liveness is tracked TWO ways because neither alone is reliable:
+    ``session_ids`` counts sessions whose exit-stack callback has not yet
+    fired (the authoritative clean-exit signal — fastmcp's session manager
+    keeps strong refs to terminated ServerSessions, so GC alone never
+    empties the weakset), while the weakset catches a session that died
+    without unwinding its exit stack. The entry counts as idle when EITHER
+    says no sessions remain.
+    """
 
     client: Client[Any]
-    # Downstream sessions currently riding this upstream client. Weak: a
-    # session that dies without a clean exit still drops out.
+    # id(session) for each downstream session still inside its lifecycle;
+    # removed by the session's own exit-stack callback.
+    session_ids: set[int] = field(default_factory=set)
+    # Weak belt-and-braces: a session that vanished without a clean exit.
     sessions: weakref.WeakSet[ServerSession] = field(default_factory=weakref.WeakSet)
     # Monotonic time of the last factory acquire or downstream session exit;
-    # the grace window counts from here once ``sessions`` is empty.
+    # the grace window counts from here once no sessions remain.
     last_activity: float = field(default_factory=time.monotonic)
+
+    def has_live_sessions(self) -> bool:
+        return bool(self.session_ids) and bool(self.sessions)
 
 
 @dataclass
@@ -122,6 +136,8 @@ class IsolatedSessionRegistry:
         self.grace: float = GRACE_SECONDS
         self.ttl: float = PARK_TTL_SECONDS
         self._sweeper: asyncio.Task[None] | None = None
+        # Strong refs to short-lived expedited sweeps (asyncio keeps weak ones).
+        self._expedite_tasks: set[asyncio.Task[None]] = set()
 
     def configure(self, grace: float, ttl: float) -> None:
         self.grace = grace
@@ -161,19 +177,65 @@ class IsolatedSessionRegistry:
         """Claim a parked session for resumption (removes it)."""
         return self.parked.pop((server, token), None)
 
+    def expedite_park(self, token: str) -> None:
+        """Skip the grace window for a token whose client sent an explicit
+        session DELETE — it declared this downstream session finished, so
+        there is no quick-reconnect to keep a warm client for. Park (never
+        forget): DELETE is ambiguous between chat-done and a clean transport
+        cycle, and a parked entry serves both.
+
+        Backdates the idle clock and kicks a near-immediate sweep; the sweep
+        still requires the live-session set to be empty, so a token with
+        OTHER downstream sessions still attached is untouched.
+        """
+        backdated = False
+        now = time.monotonic()
+        for (server, tok), entry in self.live.items():
+            if tok == token:
+                entry.last_activity = now - self.grace - 1.0
+                backdated = True
+                logger.debug("isolated: DELETE expedites park for %s (token %s…)", server, tok[:8])
+        if backdated:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            # The DELETE's session teardown must finish (and the ServerSession
+            # be collected out of the weakset) before a sweep can park; retry
+            # a few times rather than waiting for the slow background cadence.
+            async def _sweep_soon() -> None:
+                for delay in (0.5, 1.0, 2.0):
+                    await asyncio.sleep(delay)
+                    try:
+                        await self.sweep_once()
+                    except Exception:
+                        logger.exception("isolated: expedited sweep failed")
+                        return
+                    if not any(tok == token for (_, tok) in self.live):
+                        return
+
+            task = loop.create_task(_sweep_soon(), name="isolated-expedite")
+            self._expedite_tasks.add(task)
+            task.add_done_callback(self._expedite_tasks.discard)
+
     def restore_parked(self, server: str, token: str, parked: ParkedSession) -> None:
         """Load a parked entry (handover restore, or a failed claim put back)."""
         self.parked[(server, token)] = parked
         self._ensure_sweeper()
 
     def _track_session(self, entry: LiveEntry, session: ServerSession | None) -> None:
-        if session is None or session in entry.sessions:
+        if session is None:
             return
+        sid = id(session)
+        if sid in entry.session_ids:
+            return
+        entry.session_ids.add(sid)
         entry.sessions.add(session)
 
         async def _on_session_exit() -> None:
             # Grace, not teardown: the chat may reconnect under a new
             # downstream session and reattach by token.
+            entry.session_ids.discard(sid)
             entry.last_activity = time.monotonic()
 
         session._exit_stack.push_async_callback(_on_session_exit)
@@ -315,7 +377,7 @@ class IsolatedSessionRegistry:
         now = time.monotonic() if now is None else now
         transitions = 0
         for key, entry in list(self.live.items()):
-            if not entry.sessions and now - entry.last_activity > self.grace:
+            if not entry.has_live_sessions() and now - entry.last_activity > self.grace:
                 await self.park(key)
                 transitions += 1
         for key, parked in list(self.parked.items()):
@@ -333,6 +395,9 @@ class IsolatedSessionRegistry:
         if self._sweeper is not None:
             self._sweeper.cancel()
             self._sweeper = None
+        for task in list(self._expedite_tasks):
+            task.cancel()
+        self._expedite_tasks.clear()
 
 
 REGISTRY = IsolatedSessionRegistry()

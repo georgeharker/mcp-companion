@@ -11,7 +11,6 @@ never died, and the successor resumes the same upstream session id.
 from __future__ import annotations
 
 import json
-import os
 import stat
 import time
 from pathlib import Path
@@ -187,6 +186,55 @@ class TestHandoverE2E:
             )
             r.raise_for_status()
             assert r.json()["disabled_servers"] == ["mockup"]
+
+    async def test_stateful_server_state_visible_after_sanctioned_restart(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """The headline: a stateful server's per-session state (svg-mcp's
+        current document, a jupyter kernel — modeled by mock__remember) is
+        still THERE for the same chat after `mcp-combiner restart`. The
+        server never died; only the combiner's plumbing did, and the handover
+        carried the session id across."""
+        tools_path = write_tools_spec(tmp_path / "tools.json", _SPEC)
+        mock = await procs.start_http_mock("mockup", tools_path=tools_path)
+        cfg = write_servers_config(
+            tmp_path / "servers.json",
+            {"mockup": {**http_mock_entry(mock.port), "isolate": True}},
+        )
+        port = free_port()
+        combiner = await procs.start_combiner(cfg, port=port)
+        await combiner.wait_server_state("mockup", ("ready",))
+
+        token = "cafecafe-1111-2222-3333-444444444444"
+
+        def _chat(c) -> Client:
+            return Client(
+                StreamableHttpTransport(
+                    c.mcp_url, headers={"X-MCP-Combiner-Session": token}
+                )
+            )
+
+        async with _chat(combiner) as c:
+            await c.call_tool("mockup_mock__remember", {"value": "the-current-document"})
+
+        handover_file = tmp_path / "handover.json"
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                f"{combiner.base_url}/handover/prepare",
+                json={"path": str(handover_file)},
+                timeout=5.0,
+            )
+            assert r.status_code == 200
+        combiner.terminate()
+
+        successor = await procs.start_combiner(
+            cfg, port=port, extra_args=["--restore", str(handover_file)]
+        )
+        await successor.wait_server_state("mockup", ("ready",))
+
+        async with _chat(successor) as c:
+            recalled = await _text_of(await c.call_tool("mockup_mock__recall", {}))
+        assert recalled == "the-current-document"
 
 
 async def _text_of(result) -> str:
