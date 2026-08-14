@@ -378,7 +378,18 @@ def create_combiner(
                 task.cancel()
             from mcp_combiner.isolated import REGISTRY as _isolated_registry
 
-            await _isolated_registry.close_all()
+            if RUNTIME.handover_path:
+                # Sanctioned handover: park isolated sessions (no termination)
+                # and write the one-shot payload for the successor.
+                from mcp_combiner.handover import write_handover
+
+                try:
+                    await write_handover(RUNTIME.handover_path)
+                except Exception:
+                    logger.exception("handover: write failed — shutting down plain")
+                    await _isolated_registry.close_all()
+            else:
+                await _isolated_registry.close_all()
             await conn_manager.close_all()
             await ss_manager.stop_all()
 

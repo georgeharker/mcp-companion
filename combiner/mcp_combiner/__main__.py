@@ -164,6 +164,17 @@ def _add_serve_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--restore",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Consume a sanctioned-restart handover file written by the "
+            "predecessor's shutdown (mcp-combiner restart passes this; the "
+            "file is deleted on consume). Refused on version/staleness "
+            "mismatch — the combiner then boots fresh."
+        ),
+    )
+    parser.add_argument(
         "--log-file",
         metavar="PATH",
         default=None,
@@ -246,6 +257,7 @@ def _serve(args: argparse.Namespace) -> None:
         input_validation=args.input_validation,
         output_validation=args.output_validation,
         stale_tool_grace=args.stale_tool_grace,
+        restore=args.restore,
         log_file=args.log_file,
         log_level=args.log_level,
     )

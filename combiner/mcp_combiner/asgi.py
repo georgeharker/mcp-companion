@@ -56,6 +56,7 @@ class ServeOptions:
     input_validation: bool | None = None
     output_validation: bool | None = None
     stale_tool_grace: float | None = None
+    restore: str | None = None
     log_file: str | None = None
     log_level: str = "info"
 
@@ -254,6 +255,15 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
 
     # Register manager for cleanup on exit
     register_for_cleanup(ss_manager)
+
+    # Sanctioned-restart handover: consume the predecessor's one-shot payload
+    # (token filters, nvim binds/instances, parked upstream sessions) before
+    # serving. The file is deleted regardless of outcome; a refused snapshot
+    # (version/staleness) just means booting fresh.
+    if options.restore:
+        from mcp_combiner.handover import load_handover
+
+        load_handover(options.restore)
 
     # Use streamable HTTP with stateful mode.
     # Stateless mode doesn't support GET for SSE streams, which OpenCode needs.

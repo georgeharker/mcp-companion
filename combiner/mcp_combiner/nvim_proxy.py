@@ -89,6 +89,43 @@ def record_session_token(session_id: str | None) -> None:
         _session_tokens[session_id] = token
 
 
+def snapshot_routing() -> tuple[dict[str, str], dict[str, Any]]:
+    """Snapshot chat↔editor binds + the instance registry for handover.
+
+    Cache-warming only: nvim's boot_id protocol re-asserts both within
+    seconds of the successor's /health answering, overwriting whatever we
+    carry here; the snapshot just keeps ``neovim_*`` routable in the gap.
+    """
+    instances: dict[str, Any] = {}
+    if _nvim_channel is not None:
+        instances = {
+            inst.instance_id: {"socket": inst.socket, "meta": inst.meta}
+            for inst in _nvim_channel._instances.values()
+        }
+    return dict(_token_instances), instances
+
+
+def restore_routing(token_instances: dict[str, str], instances: dict[str, Any]) -> None:
+    """Load a handover snapshot into the routing tables.
+
+    Instances register with lazy connections — a dead editor's socket fails
+    on first use and is evicted by the channel's normal error path (the
+    accepted staleness mitigation); a live one is immediately routable.
+    """
+    _token_instances.update({str(k): str(v) for k, v in token_instances.items()})
+    if instances:
+        channel = get_nvim_channel()
+        for instance_id, data in instances.items():
+            try:
+                channel.register(
+                    str(instance_id),
+                    str(data["socket"]),
+                    dict(data.get("meta") or {}),
+                )
+            except Exception:
+                logger.warning("handover: could not restore nvim instance %s", instance_id)
+
+
 def _instance_for_session(session_id: str | None) -> str | None:
     """Resolve session_id -> token -> instance_id, if bound to a live instance."""
     if not session_id:

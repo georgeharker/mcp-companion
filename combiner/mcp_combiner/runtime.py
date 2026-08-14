@@ -278,6 +278,11 @@ class CombinerRuntime:
     # restart so clients re-register instances and token bindings.
     boot_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
+    # Sanctioned-handover flag: set by POST /handover/prepare (ctl restart);
+    # the lifespan shutdown writes the handover payload here iff non-None.
+    # No crash path can produce the file — only the flagged shutdown does.
+    handover_path: str | None = None
+
     # Strong refs to background tasks (asyncio only keeps weak ones).
     prime_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     notification_tasks: set[asyncio.Task[None]] = field(default_factory=set)
@@ -309,6 +314,7 @@ def reset() -> None:
     r.tools.generation = 0
     r.tools.stale_grace = 30.0
     r.tools.failed_servers.clear()
+    r.handover_path = None
     r.prime_tasks.clear()
     r.notification_tasks.clear()
     # Token-keyed isolated-session registry (module-level, nvim_proxy pattern).

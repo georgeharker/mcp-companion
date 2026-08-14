@@ -242,6 +242,49 @@ def _argv_flag_value(argv: list[str], flag: str) -> str | None:
         return None
 
 
+def _strip_flag_with_value(argv: list[str], flag: str) -> list[str]:
+    """Remove every ``flag <value>`` pair from *argv*.
+
+    Harvest hygiene: ``--restore`` is a one-shot flag consumed by the boot it
+    was passed to — a harvested argv must never echo it into the next restart.
+    """
+    out: list[str] = []
+    skip = False
+    for item in argv:
+        if skip:
+            skip = False
+            continue
+        if item == flag:
+            skip = True
+            continue
+        out.append(item)
+    return out
+
+
+def _handover_path(name: str) -> str:
+    """Where a sanctioned restart stages its one-shot handover file."""
+    cache_dir = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "mcp-combiner"
+    )
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"handover-{name}.json")
+
+
+async def _arm_handover(host: str, port: int, path: str) -> bool:
+    """Ask the running combiner to write a handover file at shutdown.
+
+    Best-effort: a combiner too wedged to answer gets a restore-less restart
+    (today's fresh boot — correct, its state is suspect).
+    """
+    url = f"http://{host}:{port}/handover/prepare"
+    try:
+        async with httpx.AsyncClient() as http:
+            r = await http.post(url, json={"path": path}, timeout=3.0)
+            return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
 async def _poll_health(host: str, port: int, timeout: float) -> bool:
     """Poll the combiner's /health until it returns 200 or *timeout* expires."""
     import time
@@ -469,19 +512,43 @@ async def cmd_restart_combiner(args: argparse.Namespace) -> int:
     except ValueError:
         port = 9741
 
+    # A harvested argv must never echo a consumed --restore into this restart.
+    final_argv: list[str] = _strip_flag_with_value(serve_argv, "--restore")
+
     stop_cmd = [binary, "admin", "stop", "--force", name]
-    start_cmd = _build_start_cmd(
-        binary,
-        name=name,
-        pid=pid,
-        grace_period=args.grace_period,
-        serve_argv=serve_argv,
-        log_file=_resolve_capture_log(args.log_file),
-    )
+
+    def _start_cmd() -> list[str]:
+        return _build_start_cmd(
+            binary,
+            name=name,
+            pid=pid,
+            grace_period=args.grace_period,
+            serve_argv=final_argv,
+            log_file=_resolve_capture_log(args.log_file),
+        )
+
     if args.dry_run:
+        # Dry run must not touch the running combiner, so the handover is not
+        # armed and --restore is not shown — the real run adds it when armed.
         print(" ".join(stop_cmd))
-        print(" ".join(start_cmd))
+        print(" ".join(_start_cmd()))
         return 0
+
+    # Sanctioned handover: arm the running combiner to write its one-shot
+    # state file at shutdown (token filters, nvim binds, parked isolated
+    # sessions); the successor consumes it via --restore. A combiner too
+    # wedged to answer restarts restore-less — fresh boot, its state is
+    # suspect anyway.
+    handover_file = _handover_path(name)
+    if await _arm_handover(host, port, handover_file):
+        final_argv = [*final_argv, "--restore", handover_file]
+        print("restart: handover armed — successor will restore session state", file=sys.stderr)
+    else:
+        print(
+            "restart: combiner did not answer handover prepare — restarting fresh",
+            file=sys.stderr,
+        )
+    start_cmd = _start_cmd()
 
     # 1) Graceful stop (escalates to SIGKILL). A non-zero exit (e.g. "not
     #    running") is fine — we're about to start a fresh one regardless.

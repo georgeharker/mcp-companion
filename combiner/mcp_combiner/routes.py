@@ -14,6 +14,7 @@ middleware reads. Preserved as-is pending discussion.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
@@ -54,6 +55,25 @@ def register_routes(
         # it to detect a restart and re-register Neovim instances + token binds.
         payload["boot_id"] = RUNTIME.boot_id
         return JSONResponse(payload)
+
+    # Sanctioned-restart handover: ctl flags the NEXT shutdown to write the
+    # one-shot handover payload to *path*. Only `mcp-combiner restart` calls
+    # this; an unflagged shutdown (crash, kill, grace expiry) writes nothing.
+    @combiner.custom_route("/handover/prepare", methods=["POST"])
+    async def handover_prepare(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            path = str(body["path"])
+        except Exception:
+            return JSONResponse({"error": "body must be {'path': <str>}"}, status_code=400)
+        parent = Path(path).expanduser().parent
+        if not parent.is_dir():
+            return JSONResponse(
+                {"error": f"directory does not exist: {parent}"}, status_code=400
+            )
+        RUNTIME.handover_path = str(Path(path).expanduser())
+        logger.info("handover: shutdown will write %s", RUNTIME.handover_path)
+        return JSONResponse({"status": "armed", "path": RUNTIME.handover_path})
 
     # --- Session management REST API ---
     # These endpoints allow external clients (e.g. the Neovim plugin) to
