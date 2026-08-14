@@ -342,6 +342,61 @@ class TestIsolatedUpstreamSessions:
         assert stats["tool_calls"]["greet"] == 2
         assert len(greet_sessions) >= 2, stats["session_calls"]
 
+    async def test_same_token_reconnect_reattaches_upstream_session(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """A chat reconnecting under a new downstream session (same token)
+        reattaches to its existing upstream session — the token-keyed cache
+        survives downstream session churn (mid-chat SSE drop / transport
+        cycle) within the grace window."""
+        tools_path = write_tools_spec(tmp_path / "tools.json", _SPEC)
+        mock = await procs.start_http_mock("mockup", tools_path=tools_path)
+        cfg = write_servers_config(
+            tmp_path / "servers.json",
+            {"mockup": {**http_mock_entry(mock.port), "isolate": True}},
+        )
+        combiner = await procs.start_combiner(cfg)
+        await combiner.wait_server_state("mockup", ("ready",))
+
+        tok = _token()
+        async with _header_client(combiner, tok) as c1:
+            assert await _text(c1, "mockup_greet", {"who": "a"}) == "Hello, a!"
+        # Downstream session fully torn down; same chat token reconnects.
+        async with _header_client(combiner, tok) as c2:
+            assert await _text(c2, "mockup_greet", {"who": "b"}) == "Hello, b!"
+
+        stats = await mock.stats()
+        greet_sessions = {sid for sid in stats["session_calls"] if sid != "<none>"}
+        assert stats["tool_calls"]["greet"] == 2
+        assert len(greet_sessions) == 1, stats["session_calls"]
+
+    async def test_same_token_concurrent_sessions_share_upstream(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """Two concurrent downstream sessions bearing the SAME token are one
+        chat — they share one isolated upstream session."""
+        tools_path = write_tools_spec(tmp_path / "tools.json", _SPEC)
+        mock = await procs.start_http_mock("mockup", tools_path=tools_path)
+        cfg = write_servers_config(
+            tmp_path / "servers.json",
+            {"mockup": {**http_mock_entry(mock.port), "isolate": True}},
+        )
+        combiner = await procs.start_combiner(cfg)
+        await combiner.wait_server_state("mockup", ("ready",))
+
+        tok = _token()
+        async with (
+            _header_client(combiner, tok) as c1,
+            _header_client(combiner, tok) as c2,
+        ):
+            assert await _text(c1, "mockup_greet", {"who": "a"}) == "Hello, a!"
+            assert await _text(c2, "mockup_greet", {"who": "b"}) == "Hello, b!"
+
+        stats = await mock.stats()
+        greet_sessions = {sid for sid in stats["session_calls"] if sid != "<none>"}
+        assert stats["tool_calls"]["greet"] == 2
+        assert len(greet_sessions) == 1, stats["session_calls"]
+
     async def test_non_isolated_chats_share_one_upstream_session(
         self, procs: ProcFactory, tmp_path: Path
     ) -> None:

@@ -368,6 +368,9 @@ def create_combiner(
         finally:
             for task in list(_prime_tasks):
                 task.cancel()
+            from mcp_combiner.isolated import REGISTRY as _isolated_registry
+
+            await _isolated_registry.close_all()
             await conn_manager.close_all()
             await ss_manager.stop_all()
 

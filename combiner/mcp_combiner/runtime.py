@@ -311,3 +311,7 @@ def reset() -> None:
     r.tools.failed_servers.clear()
     r.prime_tasks.clear()
     r.notification_tasks.clear()
+    # Token-keyed isolated-session registry (module-level, nvim_proxy pattern).
+    from mcp_combiner.isolated import REGISTRY as _isolated_registry
+
+    _isolated_registry.reset()

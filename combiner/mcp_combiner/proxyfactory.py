@@ -127,7 +127,7 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
     race into parallel auth flows, and surfaces the primer's auth failure as a
     retryable ``AuthenticationError``.
     """
-    from fastmcp.server.providers.proxy import StatefulProxyClient
+    from mcp_combiner.isolated import TokenKeyedStatefulClient
 
     transport = build_http_transport(srv)
 
@@ -140,10 +140,10 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
     ):
         mgr = RUNTIME.conn_manager
         shared_auth = mgr.get_auth(name)
-        oauth_stateful: StatefulProxyClient[Any] = (
-            StatefulProxyClient(transport, auth=shared_auth)
+        oauth_stateful: TokenKeyedStatefulClient[Any] = (
+            TokenKeyedStatefulClient(transport, auth=shared_auth, server_name=name)
             if shared_auth is not None
-            else StatefulProxyClient(transport)
+            else TokenKeyedStatefulClient(transport, server_name=name)
         )
 
         async def _gated_factory() -> Any:
@@ -184,10 +184,10 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
         token_dir=config.oauth.token_dir_path,
         cache_tokens=config.oauth.cache_tokens,
     )
-    stateful: StatefulProxyClient[Any] = (
-        StatefulProxyClient(transport, auth=auth)
+    stateful: TokenKeyedStatefulClient[Any] = (
+        TokenKeyedStatefulClient(transport, auth=auth, server_name=name)
         if auth is not None
-        else StatefulProxyClient(transport)
+        else TokenKeyedStatefulClient(transport, server_name=name)
     )
     logger.info("Server '%s': per-chat session isolation enabled (isolate=true)", name)
 
