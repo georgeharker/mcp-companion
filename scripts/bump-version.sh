@@ -191,19 +191,23 @@ fi
 for i in "${!MANIFESTS[@]}"; do write_ver "${MANIFESTS[$i]}" "${TARGETS[$i]}" "$new"; done
 echo "updated ${#MANIFESTS[@]} manifests -> $new"
 
-# The Claude plugin ships instructions.txt as a REAL FILE copied from
+# Both plugins ship instructions.txt as a REAL FILE copied from
 # CLAUDE.md.example — never a symlink. Marketplace installs copy the plugin
 # subtree out of the repo into a cache with no repo root, so a ../../ symlink
-# arrives dangling and start.sh silently emits no instructions (shipped broken
-# 0.10.x). The OpenCode plugin materializes the same copy in its npm prepack;
-# this is the Claude-side equivalent, re-synced on every release so it cannot
-# drift. (rm first: cp onto a symlink would write THROUGH it instead.)
-INSTR="$ROOT/plugins/claude/instructions.txt"
-if [ -f "$ROOT/CLAUDE.md.example" ]; then
-  rm -f "$INSTR"
-  cp "$ROOT/CLAUDE.md.example" "$INSTR"
-  echo "  synced plugins/claude/instructions.txt from CLAUDE.md.example"
-fi
+# arrives dangling (whether it survives or is dereferenced at install is
+# undocumented copy behavior — it failed for mcp-companion 0.10.x, where
+# start.sh then silently emitted no instructions). Re-synced on every release
+# so the copies cannot drift; the OpenCode npm prepack keeps its own copy step
+# as a belt for ad-hoc publishes. (rm first: cp onto a symlink would write
+# THROUGH it instead.)
+INSTRS=()
+for _plugdir in "$ROOT/plugins/claude" "$ROOT/plugins/opencode"; do
+  [ -d "$_plugdir" ] && [ -f "$ROOT/CLAUDE.md.example" ] || continue
+  rm -f "$_plugdir/instructions.txt"
+  cp "$ROOT/CLAUDE.md.example" "$_plugdir/instructions.txt"
+  INSTRS+=("$_plugdir/instructions.txt")
+  echo "  synced ${_plugdir#"$ROOT"/}/instructions.txt from CLAUDE.md.example"
+done
 
 # Keep any Cargo.lock next to a bumped Cargo.toml in sync (the crate's own
 # self-version entry, so a `--locked` build/publish doesn't fail).
@@ -222,7 +226,7 @@ done
 
 [ "$do_commit" = 0 ] && { echo "files updated; skipped commit (--no-commit)"; exit 0; }
 
-git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"} "$INSTR"
+git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"} ${INSTRS+"${INSTRS[@]}"}
 git -C "$ROOT" commit -m "release: $TAG — lockstep version across all manifests"
 echo "committed."
 
