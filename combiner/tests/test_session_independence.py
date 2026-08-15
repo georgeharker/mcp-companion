@@ -108,6 +108,29 @@ class TestTokenSessionMapping:
                 sids.add(out["session_id"])
             assert len(sids) == 3
 
+    async def test_prefixed_opaque_tokens_map_like_uuids(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """Tokens are opaque, externally minted strings — the Claude plugin's
+        cc-<session-id> and arbitrary user overrides must map exactly like
+        nvim's bare UUIDs, on both the header and URL-path transports. (A
+        UUID-only validation regex used to silently demote these to the
+        tokenless path.)"""
+        combiner = await _start_stdio_combiner(procs, tmp_path)
+        tok_header = f"cc-{_token()}"
+        tok_url = "my.custom_token-42"
+
+        async with (
+            _header_client(combiner, tok_header) as ch,
+            _url_client(combiner, tok_url) as cu,
+        ):
+            assert await _text(ch, "mockup_greet", {"who": "h"}) == "Hello, h!"
+            assert await _text(cu, "mockup_greet", {"who": "u"}) == "Hello, u!"
+
+            for tok in (tok_header, tok_url):
+                out = await _rest(combiner, "GET", f"/sessions/token/{tok}")
+                assert out["session_id"], f"token {tok} not mapped"
+
     @xfail_session_namespace_split
     async def test_token_sessions_appear_in_sessions_listing(
         self, procs: ProcFactory, tmp_path: Path

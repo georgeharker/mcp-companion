@@ -30,13 +30,19 @@ _mcp_log = logging.getLogger("mcp-combiner.requests")
 # Header name the Neovim plugin sets on ACP-injected mcpServers entries.
 _ACP_TOKEN_HEADER = "x-mcp-combiner-session"
 
-# UUID pattern: validates tokens from both header and URL path.
-_TOKEN_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Grouping tokens are OPAQUE, minted outside the combiner (the custody
+# principle): nvim mints bare UUIDs, the Claude plugin presents
+# "cc-<session-id>", OpenCode a per-instance UUID, and a user override can be
+# any header-safe string. Validate only header safety and a minimum length —
+# a UUID-only pattern here silently demoted every non-UUID token to the
+# tokenless path (isolated sessions worked via the raw header, but the
+# token↔session map and pending-filter application never saw them).
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,199}$")
 
-# Match /mcp/<uuid>[/...] in the URL path.
-_MCP_TOKEN_PATH_RE = re.compile(
-    r"^/mcp/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(/.*)?$"
-)
+# Match /mcp/<token>[/...] in the URL path. Same opaque-token shape; the MCP
+# endpoint itself has no sub-paths, so anything token-shaped after /mcp/ is a
+# token attempt (shorter or unsafe strings fall through untouched and 404).
+_MCP_TOKEN_PATH_RE = re.compile(r"^/mcp/([A-Za-z0-9][A-Za-z0-9._-]{7,199})(/.*)?$")
 
 # NOTE (QUESTIONS.md Q1): token→session mappings recorded here carry the wire
 # mcp-session-id — a different namespace from Context.session_id. Preserved.
