@@ -73,6 +73,56 @@ _emit_instructions() {
 }
 trap _emit_instructions EXIT
 
+# --- Resolve client PID (used below AND by the chat-identity bridge) --------------
+# $PPID is the wrapper shell that claude execs to run this hook — ephemeral, so
+# sharedserver's dead-client poller would reap our registration ~5s after the
+# hook returns. Walk the parent chain to find the actual claude process.
+find_claude_pid() {
+  local pid=$PPID
+  local comm
+  while [[ "$pid" -gt 1 ]]; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
+    [[ -z "$comm" ]] && break
+    # `comm` is the full executable path on macOS, basename elsewhere.
+    if [[ "${comm##*/}" == "claude" ]]; then
+      echo "$pid"
+      return 0
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [[ -z "$pid" ]] && break
+  done
+  return 1
+}
+
+# --- Chat identity bridge (grouping token) ----------------------------------------
+# The hook's stdin JSON carries the Claude session id — the stable, externally
+# maintained chat identity (survives /resume, /clear, /compact). MCP config has no
+# per-session channel, so persist it keyed by the claude PID; token-helper.sh (the
+# combiner entry's headersHelper, a child of the same claude process) walks its own
+# parent chain to the same PID, reads this file, and presents the id as the chat's
+# X-MCP-Combiner-Session grouping token. Written BEFORE the supervised-session
+# early-exit below, unconditionally: under a host nvim the helper abstains (the URL
+# already carries the supervisor's token, which wins in the combiner regardless),
+# so a stale file is harmless — and stop.sh removes it.
+_hook_input="$(cat 2>/dev/null || true)"
+_session_id=""
+if [[ -n "$_hook_input" ]]; then
+  if command -v jq >/dev/null 2>&1; then
+    _session_id="$(printf '%s' "$_hook_input" | jq -r '.session_id // empty' 2>/dev/null)"
+  else
+    _session_id="$(printf '%s' "$_hook_input" |
+      sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  fi
+fi
+# Defense in depth: the value lands in an HTTP header — keep it to token-safe chars.
+_session_id="${_session_id//[^a-zA-Z0-9._-]/}"
+if [[ -n "$_session_id" ]] && _claude_pid="$(find_claude_pid)"; then
+  _token_dir="${XDG_STATE_HOME:-$HOME/.local/state}/mcp-companion"
+  if mkdir -p "$_token_dir" 2>/dev/null; then
+    (umask 077 && printf '%s' "$_session_id" >"$_token_dir/cc-token-${_claude_pid}") 2>/dev/null
+  fi
+fi
+
 # --- Skip when the combiner was launched for us ----------------------------------
 # When Claude Code is spawned by CodeCompanion / mcp-companion, the host editor
 # has already started (and refcounts, via sharedserver) the combiner process, and
@@ -299,26 +349,7 @@ elif [[ -n "$url" ]]; then
 fi
 
 # --- Resolve client PID --------------------------------------------------------
-# $PPID is the wrapper shell that claude execs to run this hook — ephemeral, so
-# sharedserver's dead-client poller would reap our registration ~5s after the
-# hook returns. Walk the parent chain to find the actual claude process.
-find_claude_pid() {
-  local pid=$PPID
-  local comm
-  while [[ "$pid" -gt 1 ]]; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
-    [[ -z "$comm" ]] && break
-    # `comm` is the full executable path on macOS, basename elsewhere.
-    if [[ "${comm##*/}" == "claude" ]]; then
-      echo "$pid"
-      return 0
-    fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [[ -z "$pid" ]] && break
-  done
-  return 1
-}
-
+# find_claude_pid is defined at the top (shared with the chat-identity bridge).
 if client_pid=$(find_claude_pid); then
   :
 else

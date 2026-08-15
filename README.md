@@ -126,6 +126,21 @@ over its control API.
   `:MCPRestart!`. `restart-server <name>`, by contrast, only bounces that one
   upstream and never the combiner.
 
+  `restart` is the **sanctioned** restart, and it carries session state across:
+  before stopping, it arms a one-shot **handover** (`POST /handover/prepare`) —
+  the dying combiner parks its per-chat isolated upstream sessions *without
+  terminating them* (the backing servers keep running and keep their state)
+  and writes token filters, nvim binds, and per-token upstream session ids to
+  a mode-600 file that the successor consumes via `--restore` (deleted on
+  consume; refused if stale). A reconnecting chat that presents its grouping
+  token then resumes its exact upstream sessions — a stateful server like
+  `svg-mcp` still has the chat's documents, mid-conversation. Only this path
+  gets the handover: crashes and `sharedserver admin kill` boot fresh (config
+  + supervisor re-assertion), and a combiner too wedged to answer the prepare
+  call restarts restore-less. Tokenless chats always come back fresh — their
+  wire session id died with the old process (see
+  [Chat identity](#chat-identity--grouping-tokens)).
+
 `start`/`restart` accept `--config` (default: `$MCP_COMBINER_CONFIG`,
 `$CLAUDE_MCP_COMBINER_CONFIG`, then standard locations), `--name` (sharedserver
 name, default `mcp-combiner`), `--port`/`--host`, `--grace-period`, `--pid`
@@ -254,9 +269,51 @@ then sees all chats as the same session, so two concurrent chats clash.
 Set `"isolate": true` on such a server and the combiner opens a **separate
 upstream session per chat** (still one upstream server *instance*, shared
 transport). The server is handed a distinct, stable `Mcp-Session-Id` per chat
-and partitions its per-session state automatically — no clash. The session is
-torn down when the chat ends; an abandoned one is just an idle upstream session
-the server can expire.
+and partitions its per-session state automatically — no clash.
+
+#### Chat identity — grouping tokens
+
+"Per chat" is keyed by the chat's **grouping token** (the
+`X-MCP-Combiner-Session` header, or a `/mcp/<token>` URL path — the URL form
+wins when both are present). Tokens are minted *outside* the combiner by
+whoever owns the chat, which is what makes them stable across combiner
+restarts:
+
+- **Neovim / CodeCompanion** mints a token per chat and manages its bindings.
+- **The Claude Code plugin** presents the Claude session id as the token (a
+  `SessionStart` hook + `headersHelper` bridge), so every Claude chat is
+  individually addressable — including through the `/sessions/token/<token>`
+  control routes (per-chat filters and, over a restart, continuity).
+- **The OpenCode plugin** registers a per-instance token on its URL (all of an
+  OpenCode instance's sessions share one MCP connection, so per-instance is
+  its natural granularity).
+
+A connection with **no token** falls back to its wire `Mcp-Session-Id` as the
+grouping key — fine within one combiner lifetime, but that id is minted by the
+combiner and dies with it, so tokenless chats do not survive a restart.
+
+#### Session lifecycle
+
+A chat's isolated upstream session moves through three tiers, driven by pure
+timers (configure via a top-level `"isolation"` section):
+
+- **live** — a downstream session bearing the token is connected, or the last
+  one dropped less than `grace_seconds` (default 300) ago; quick reconnects
+  reattach instantly. An explicit session DELETE from the client skips the
+  grace and parks immediately.
+- **parked** — disconnected *without terminating* the upstream session; only
+  `token → (Mcp-Session-Id, protocolVersion)` is kept. The token's next
+  appearance resumes the same upstream session (state intact), falling back to
+  a fresh one if the server expired it.
+- **forgotten** — parked past `park_ttl_seconds` (default 3600): the entry is
+  dropped and a best-effort DELETE releases the server's session state.
+
+```jsonc
+"isolation": { "grace_seconds": 300, "park_ttl_seconds": 3600 }
+```
+
+`GET /sessions/map` on the combiner shows every correlation live: tokens,
+their downstream sessions, nvim binds, and the isolated live/parked tiers.
 
 `isolate` is tri-state:
 

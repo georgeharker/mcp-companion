@@ -2,7 +2,8 @@
   "mcpServers": {
     "mcp-combiner": {
       "type": "http",
-      "url": "${MCP_COMPANION_COMBINER_URL:-http://127.0.0.1:9741/mcp}"
+      "url": "${MCP_COMPANION_COMBINER_URL:-http://127.0.0.1:9741/mcp}",
+      "headersHelper": "${CLAUDE_PLUGIN_ROOT}/hooks/token-helper.sh"
     }
   }
 }

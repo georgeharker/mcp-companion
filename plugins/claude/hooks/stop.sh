@@ -5,20 +5,6 @@
 
 set -u
 
-# Mirror start.sh: when launched under CodeCompanion / mcp-companion the combiner
-# was started (and is refcounted) by the host editor, not by us — we never ran
-# `sharedserver use`, so there is nothing to detach. The host owns teardown.
-#
-# This condition MUST stay identical to start.sh's. A URL with CLAUDE_MCP_COMBINER_PORT
-# also set means the user picked a port and start.sh DID launch, so we do have a
-# refcount to release; deferring here would leak it until the grace period expired.
-if [[ -n "${MCP_COMPANION_COMBINER_URL:-}" && -z "${CLAUDE_MCP_COMBINER_PORT:-}" ]]; then
-  exit 0
-fi
-
-ss_bin="${CLAUDE_PLUGIN_ROOT}/bin/sharedserver"
-name="${CLAUDE_MCP_COMBINER_NAME:-mcp-combiner}"
-
 # Mirror start.sh: $PPID is the ephemeral hook-wrapper shell, so walk parents
 # to find the claude PID we originally registered.
 find_claude_pid() {
@@ -37,6 +23,27 @@ find_claude_pid() {
   return 1
 }
 
+# Remove the chat-identity file the SessionStart hook wrote for token-helper.sh.
+# Unconditional (start.sh writes it even under a host nvim); best-effort.
+if _claude_pid="$(find_claude_pid)"; then
+  rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/mcp-companion/cc-token-${_claude_pid}" 2>/dev/null
+fi
+
+# Mirror start.sh: when launched under CodeCompanion / mcp-companion the combiner
+# was started (and is refcounted) by the host editor, not by us — we never ran
+# `sharedserver use`, so there is nothing to detach. The host owns teardown.
+#
+# This condition MUST stay identical to start.sh's. A URL with CLAUDE_MCP_COMBINER_PORT
+# also set means the user picked a port and start.sh DID launch, so we do have a
+# refcount to release; deferring here would leak it until the grace period expired.
+if [[ -n "${MCP_COMPANION_COMBINER_URL:-}" && -z "${CLAUDE_MCP_COMBINER_PORT:-}" ]]; then
+  exit 0
+fi
+
+ss_bin="${CLAUDE_PLUGIN_ROOT}/bin/sharedserver"
+name="${CLAUDE_MCP_COMBINER_NAME:-mcp-combiner}"
+
+# find_claude_pid is defined at the top (shared with the token-file cleanup).
 client_pid=$(find_claude_pid) || client_pid="$PPID"
 
 "$ss_bin" unuse "$name" --pid "$client_pid" >/dev/null 2>&1 || true

@@ -13,6 +13,7 @@
 // best-effort "make sure something is listening there" half. See README.md.
 
 import { spawnSync } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -24,9 +25,21 @@ type Options = {
     // ── Registration ──────────────────────────────────────────────
     /** Key under OpenCode's `mcp` config. Default `"mcp-combiner"`. */
     mcpName?: string
-    /** Explicit MCP URL to register. Default `http://127.0.0.1:<port>/mcp`
-     *  (or `$MCP_COMPANION_COMBINER_URL` when the host owns the combiner). */
+    /** Explicit MCP URL to register. Default `http://127.0.0.1:<port>/mcp/<token>`
+     *  (or `$MCP_COMPANION_COMBINER_URL` when the host owns the combiner — used
+     *  VERBATIM: a host-supplied URL carries the supervisor's own token and is
+     *  never decorated). An explicit url here is likewise used verbatim. */
     url?: string
+    /** Grouping token appended to the DEFAULT url path (`/mcp/<token>`) — this
+     *  instance's chat identity toward the combiner: all sessions of one
+     *  OpenCode instance multiplex one MCP connection, so per-instance is the
+     *  structural granularity. Default: a UUID minted per plugin init, so the
+     *  identity lives exactly as long as this OpenCode process (a restarted
+     *  instance's parked combiner state ages out via the park TTL). Set a
+     *  stable value to keep one identity across OpenCode restarts — explicit
+     *  custody, maintained by you. Ignored when `url` or
+     *  `$MCP_COMPANION_COMBINER_URL` supplies the URL. */
+    token?: string
     /** Register the MCP endpoint with OpenCode. Default `true`. */
     register?: boolean
 
@@ -513,7 +526,13 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
             port = urlPort
         }
     }
-    const url = opts.url ?? hostOwnedUrl ?? combinerUrl ?? `http://127.0.0.1:${port}/mcp`
+    // The grouping token: this instance's chat identity toward the combiner
+    // (X-MCP-Combiner-Session, carried in the URL path — the combiner's
+    // TokenRewriteMiddleware gives URL tokens first priority). Only the
+    // DEFAULT url is decorated: a host-owned or explicit URL is someone
+    // else's identity declaration and is registered verbatim.
+    const instanceToken = opts.token ?? randomUUID()
+    const url = opts.url ?? hostOwnedUrl ?? combinerUrl ?? `http://127.0.0.1:${port}/mcp/${instanceToken}`
 
     // The registration half — always applied (unless disabled). OpenCode surfaces
     // connection state itself, so a briefly-absent endpoint recovers.

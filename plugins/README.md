@@ -91,6 +91,24 @@ Then restart the session (the hooks run at session start). What it does:
 - The combiner's HTTP endpoint is registered as the `mcp-combiner` MCP server
   via the plugin's static `.mcp.json`
   (`${MCP_COMPANION_COMBINER_URL:-http://127.0.0.1:9741/mcp}`).
+- **Per-chat identity**: the session's grouping token is the Claude session id,
+  bridged in two steps — the `SessionStart` hook persists the id keyed by the
+  claude PID, and a `headersHelper` (`hooks/token-helper.sh`, run fresh on
+  every MCP connection) reads it back and presents
+  `X-MCP-Combiner-Session: cc-<session-id>`. This makes each Claude chat
+  individually addressable on the combiner's `/sessions/token/<token>` control
+  routes (per-chat server filters), keys its `isolate: true` upstream sessions,
+  and carries them across `mcp-combiner restart` — a stateful server like
+  svg-mcp still has the chat's state after the combiner bounces. Under a host
+  editor (`MCP_COMPANION_COMBINER_URL` with a `/mcp/<token>` path) the helper
+  abstains: the supervisor's URL token owns the session and takes precedence
+  in the combiner regardless. `MCP_COMBINER_CC_TOKEN` (exported before
+  launching claude) overrides with an explicit user-maintained token —
+  per-launch granularity, every session from that environment shares it. If
+  the hook never runs (hooks disabled), the helper mints a per-session UUID
+  once and persists it, so the identity stays stable across reconnects. The
+  claude PID is only ever a private rendezvous key for the state file the
+  hook and helper share — it never appears in a token.
 
 **Verify:** `/mcp` should list `mcp-combiner` as connected, and the session's
 tools include the prefixed upstream tools (e.g. `everything_echo`) plus the
@@ -119,7 +137,14 @@ all-defaults, or tuple form for options:
 
 It injects the combiner into OpenCode's `mcp` config (a `type: "remote"` entry)
 via the `config` hook, and drives sharedserver the same way as the Claude plugin.
-Options (all optional): `mcpName`, `url`, `register`, `manage`, `binary`,
+The default registered URL carries a **per-instance grouping token**
+(`/mcp/<uuid>`, minted at plugin init): all of an OpenCode instance's sessions
+multiplex one MCP connection, so the instance is the chat-identity granularity —
+its `isolate: true` upstream sessions survive `mcp-combiner restart`, and a
+restarted OpenCode gets a fresh identity (old state ages out via the park TTL).
+Set the `token` option for an identity that survives OpenCode restarts too. A
+host-supplied or explicit `url` is registered verbatim, never decorated.
+Options (all optional): `mcpName`, `url`, `token`, `register`, `manage`, `binary`,
 `lockdir`, `name`, `gracePeriod`, `logFile`, `command`/`args`/`checkout`,
 `config`, `port` (9741), `host`, `notify`. See
 [`plugins/opencode/README.md`](./opencode/README.md)
