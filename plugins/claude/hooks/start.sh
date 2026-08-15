@@ -11,7 +11,10 @@ set -u
 # available rather than assume. Emitted as SessionStart additionalContext on EVERY exit
 # path (several branches below exit early, so a trap rather than a tail fall-through),
 # mirroring the sibling svg-mcp / cribsheet plugins' instructions.txt pattern.
-# Canonical source: CLAUDE.md.example at the repo root, which instructions.txt symlinks.
+# Canonical source: CLAUDE.md.example at the repo root. instructions.txt is a
+# committed COPY of it, re-synced by scripts/bump-version.sh — never a symlink:
+# marketplace installs copy the plugin subtree into a cache with no repo root,
+# where a ../../ symlink dangles and this hook silently emits nothing.
 # NOTE: stdout IS the hook's JSON payload — every other line in this script goes to
 # stderr so it cannot corrupt it.
 # Escape stdin as a JSON string body (no surrounding quotes), for the no-jq path.

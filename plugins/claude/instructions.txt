@@ -1,1 +1,27 @@
-../../CLAUDE.md.example
+# Combined MCP servers (mcp-combiner)
+
+Many MCP servers are proxied through the single `mcp-combiner` endpoint, so their tools
+do **not** appear under the names their own docs use. **Two prefixes stack**: the
+combiner prefixes every tool with the upstream server it came from, and your client
+prefixes the combiner endpoint in turn.
+
+```
+mcp__…mcp-combiner__ github_ search_code
+└ your client's      └ the    └ the tool's own name
+  prefix               combiner's
+```
+
+- **The combiner's own layer is `<server>_`** — `github_search_code`, `svg-mcp_add_rect`,
+  `cribsheet_note_lookup`, `perplexity-ask_perplexity_ask`. On top of that Claude Code
+  gives `mcp__…mcp-combiner__github_search_code` and OpenCode
+  `mcp-combiner_github_search_code`. So match on the *tail* of a tool name, never the
+  whole string — a tool you know by its bare name is there, just spelled longer.
+- **List the available tools when you need a capability**, before concluding it is
+  missing. Scan for a `<server>_` fragment that fits the job, or call `combiner__status`
+  for every configured server and its lifecycle state. The server you want is often
+  present under a name you would not have guessed. (The combiner's own controls are a
+  namespace like any other: `combiner__status`, `combiner__restart_server`, …)
+- **The tool set is not fixed.** Servers may be disabled or not yet connected;
+  `combiner__enable_server` (persistent) or `combiner__session_enable_server` (this chat
+  only) turns one on and its tools appear. A capability absent right now may be one call
+  away — check `combiner__status` rather than assuming.

@@ -191,6 +191,20 @@ fi
 for i in "${!MANIFESTS[@]}"; do write_ver "${MANIFESTS[$i]}" "${TARGETS[$i]}" "$new"; done
 echo "updated ${#MANIFESTS[@]} manifests -> $new"
 
+# The Claude plugin ships instructions.txt as a REAL FILE copied from
+# CLAUDE.md.example — never a symlink. Marketplace installs copy the plugin
+# subtree out of the repo into a cache with no repo root, so a ../../ symlink
+# arrives dangling and start.sh silently emits no instructions (shipped broken
+# 0.10.x). The OpenCode plugin materializes the same copy in its npm prepack;
+# this is the Claude-side equivalent, re-synced on every release so it cannot
+# drift. (rm first: cp onto a symlink would write THROUGH it instead.)
+INSTR="$ROOT/plugins/claude/instructions.txt"
+if [ -f "$ROOT/CLAUDE.md.example" ]; then
+  rm -f "$INSTR"
+  cp "$ROOT/CLAUDE.md.example" "$INSTR"
+  echo "  synced plugins/claude/instructions.txt from CLAUDE.md.example"
+fi
+
 # Keep any Cargo.lock next to a bumped Cargo.toml in sync (the crate's own
 # self-version entry, so a `--locked` build/publish doesn't fail).
 LOCKS=()
@@ -208,7 +222,7 @@ done
 
 [ "$do_commit" = 0 ] && { echo "files updated; skipped commit (--no-commit)"; exit 0; }
 
-git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"}
+git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"} "$INSTR"
 git -C "$ROOT" commit -m "release: $TAG — lockstep version across all manifests"
 echo "committed."
 
