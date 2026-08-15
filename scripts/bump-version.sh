@@ -209,13 +209,20 @@ for _plugdir in "$ROOT/plugins/claude" "$ROOT/plugins/opencode"; do
   echo "  synced ${_plugdir#"$ROOT"/}/instructions.txt from CLAUDE.md.example"
 done
 
-# Keep any Cargo.lock next to a bumped Cargo.toml in sync (the crate's own
-# self-version entry, so a `--locked` build/publish doesn't fail).
+# Keep any lockfile next to a bumped toml manifest in sync — the package's own
+# self-version entry, so a `--locked` build/publish (cargo) or `uv sync --locked`
+# doesn't fail. Cargo.toml -> Cargo.lock, pyproject.toml -> uv.lock; both lock
+# formats put `version = "…"` on the line after `name = "<pkg>"`.
 LOCKS=()
 for i in "${!MANIFESTS[@]}"; do
   [ "${TARGETS[$i]}" = "toml" ] || continue
-  m="${MANIFESTS[$i]}"; case "$m" in */Cargo.toml) : ;; *) continue ;; esac
-  lock="${m%/Cargo.toml}/Cargo.lock"; [ -f "$lock" ] || continue
+  m="${MANIFESTS[$i]}"
+  case "$m" in
+    */Cargo.toml)     lock="${m%/Cargo.toml}/Cargo.lock" ;;
+    */pyproject.toml) lock="${m%/pyproject.toml}/uv.lock" ;;
+    *) continue ;;
+  esac
+  [ -f "$lock" ] || continue
   cname="$(grep -E '^name *= *"' "$m" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
   [ -n "$cname" ] || continue
   # `-i.bak` + rm: portable across GNU and BSD sed (bare `-i` differs — see write_ver).
