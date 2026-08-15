@@ -7,12 +7,12 @@ mapping, per-session filter isolation, pending filters, and per-chat upstream
 session isolation for ``isolate: true`` servers (observed from the upstream
 side via the mock's session tracking).
 
-NOTE (QUESTIONS.md Q1): the token REST route and the fastmcp middleware
-currently key sessions in two different namespaces (HTTP ``mcp-session-id``
-vs ``Context.session_id``), so filters set via /sessions/token/<t>/filter are
-recorded but never applied. Tests pinning the *intended* behavior of that
-path are marked ``xfail(strict=True)`` — they flip loudly when the namespace
-split is resolved. The meta-tool path works and is pinned as passing.
+NOTE (QUESTIONS.md Q1 — RESOLVED for filters): the token-keyed filter store
+is canonical and enforcement reads through ``ctx.session_id → token → store``
+at request time, so /sessions/token/<t>/filter and the session meta-tools
+apply live, before or after the chat connects. The one residual namespace
+split — the /sessions LISTING reporting Context ids while the token map holds
+wire ids — keeps its strict xfail below and flips loudly if unified.
 """
 
 from __future__ import annotations
@@ -38,8 +38,10 @@ pytestmark = pytest.mark.e2e
 
 xfail_session_namespace_split = pytest.mark.xfail(
     strict=True,
-    reason="QUESTIONS.md Q1: token-route filters keyed by HTTP mcp-session-id, "
-    "middleware filters by Context.session_id — namespaces diverge on fastmcp 3.4",
+    reason="Q1 residual: the /sessions LISTING reports Context.session_id while "
+    "the token map records the wire mcp-session-id — the two id namespaces are "
+    "not joinable for display (filters are unaffected: enforcement reads through "
+    "the token store)",
 )
 
 _SPEC = [
@@ -214,7 +216,6 @@ class TestControlChannelFilters:
     ``chat_id`` meta-tool argument. Both naming paths currently miss the
     target session's actual filter key (Q1 / Q1b)."""
 
-    @xfail_session_namespace_split
     async def test_control_session_filters_chat_via_token_route(
         self, procs: ProcFactory, tmp_path: Path
     ) -> None:
@@ -233,13 +234,12 @@ class TestControlChannelFilters:
             control_names = {t.name for t in await control.list_tools()}
             assert "mockup_greet" in control_names
 
-    @xfail_session_namespace_split
     async def test_control_session_filters_chat_via_meta_tool_chat_id(
         self, procs: ProcFactory, tmp_path: Path
     ) -> None:
         """chat_id names the target chat when the CALLER is not that chat.
-        Currently the value is stored verbatim as the filter key, which never
-        matches the chat session's Context.session_id (Q1b)."""
+        chat_id-interpreted-as-token IS the storage key (the Q1b resolution),
+        and enforcement reads through to it on the chat's next request."""
         combiner = await _start_stdio_combiner(procs, tmp_path)
         tok = _token()
         async with (
@@ -260,9 +260,42 @@ class TestControlChannelFilters:
             assert not any(n.startswith("mockup_") for n in chat_names)
 
 
+class TestDurableSessionControl:
+    """Token-backed control state outlives the wire session (the custody
+    principle applied to filters): a chat's self-toggle sticks across a
+    reconnect because it lives in the token store, not the session store."""
+
+    async def test_meta_tool_self_toggle_survives_reconnect(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner = await _start_stdio_combiner(procs, tmp_path)
+        tok = _token()
+
+        async with _header_client(combiner, tok) as c:
+            out = json.loads(
+                await _text(c, "combiner__session_disable_server", {"server_name": "mockup"})
+            )
+            assert out["token"] == tok
+            assert out["disabled_servers"] == ["mockup"]
+
+        # Same chat token, brand-new downstream session: still disabled.
+        async with _header_client(combiner, tok) as c2:
+            names = {t.name for t in await c2.list_tools()}
+            assert not any(n.startswith("mockup_") for n in names)
+            status = json.loads(await _text(c2, "combiner__session_status", {}))
+            assert status["disabled_servers"] == ["mockup"]
+
+            # And re-enabling from within the chat clears it durably.
+            await _text(c2, "combiner__session_enable_server", {"server_name": "mockup"})
+        async with _header_client(combiner, tok) as c3:
+            names = {t.name for t in await c3.list_tools()}
+            assert "mockup_greet" in names
+
+
 class TestTokenRouteFilters:
     """The REST /sessions/token/<t>/filter route — the Lua plugin's primary
-    filter path. Bookkeeping works; APPLICATION is currently broken (Q1)."""
+    filter path. The token store is canonical; enforcement reads through
+    ctx.session_id → token → store at request time (the Q1 fix)."""
 
     async def test_token_filter_bookkeeping(self, procs: ProcFactory, tmp_path: Path) -> None:
         combiner = await _start_stdio_combiner(procs, tmp_path)
@@ -280,7 +313,6 @@ class TestTokenRouteFilters:
             )
             assert out["disabled_servers"] == []
 
-    @xfail_session_namespace_split
     async def test_token_filter_actually_filters(self, procs: ProcFactory, tmp_path: Path) -> None:
         combiner = await _start_stdio_combiner(procs, tmp_path)
         tok_a, tok_b = _token(), _token()
@@ -298,7 +330,6 @@ class TestTokenRouteFilters:
             names_b = {t.name for t in await cb.list_tools()}
             assert "mockup_greet" in names_b
 
-    @xfail_session_namespace_split
     async def test_allowed_servers_inverts_and_applies(
         self, procs: ProcFactory, tmp_path: Path
     ) -> None:
@@ -320,12 +351,11 @@ class TestTokenRouteFilters:
         combiner = await _start_stdio_combiner(procs, tmp_path)
         tok = _token()
         out = await _rest(combiner, "POST", f"/sessions/token/{tok}/filter", {"disable": "mockup"})
-        assert out["pending"] is True
+        assert out["connected"] is False
         status = await _rest(combiner, "GET", f"/sessions/token/{tok}/filter")
         assert status["session_id"] is None
         assert status["disabled_servers"] == ["mockup"]
 
-    @xfail_session_namespace_split
     async def test_pending_filter_applies_at_first_connect(
         self, procs: ProcFactory, tmp_path: Path
     ) -> None:

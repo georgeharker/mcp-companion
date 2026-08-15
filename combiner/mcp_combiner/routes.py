@@ -319,36 +319,40 @@ def register_routes(
 
         session_id = RUNTIME.sessions.session_for_token(token)
 
-        if request.method == "GET":
+        async def _notify_token_sessions() -> None:
+            # Best-effort "your tool list changed" nudges. The filter itself is
+            # enforced by read-through at request time — these only prompt a
+            # connected client to refetch sooner. Both id namespaces are tried
+            # (wire mcp-session-id and Context.session_id); misses are no-ops.
+            from mcp_combiner import nvim_proxy
+
             if session_id:
-                disabled = RUNTIME.sessions.disabled.get(session_id, set())
-                return JSONResponse(
-                    {"token": token, "session_id": session_id, "disabled_servers": sorted(disabled)}
-                )
-            pending = RUNTIME.sessions.pending_for(token)
+                await _notify_session_by_id(session_id)
+            for ctx_sid in nvim_proxy.sessions_for_token(token):
+                await _notify_session_by_id(ctx_sid)
+
+        if request.method == "GET":
             return JSONResponse(
                 {
                     "token": token,
-                    "session_id": None,
-                    "pending": True,
-                    "disabled_servers": sorted(pending),
+                    "session_id": session_id,
+                    "connected": session_id is not None,
+                    "disabled_servers": RUNTIME.sessions.token_snapshot(token),
                 }
             )
 
         if request.method == "DELETE":
+            previously = RUNTIME.sessions.token_snapshot(token)
             RUNTIME.sessions.set_pending(token, None)
-            if session_id:
-                removed = RUNTIME.sessions.clear_disabled(session_id)
-                await _notify_session_by_id(session_id)
-                return JSONResponse(
-                    {
-                        "token": token,
-                        "session_id": session_id,
-                        "action": "cleared",
-                        "previously_disabled": sorted(removed) if removed else [],
-                    }
-                )
-            return JSONResponse({"token": token, "session_id": None, "action": "cleared"})
+            await _notify_token_sessions()
+            return JSONResponse(
+                {
+                    "token": token,
+                    "session_id": session_id,
+                    "action": "cleared",
+                    "previously_disabled": previously,
+                }
+            )
 
         # POST — parse body (same format as /sessions/{id}/filter)
         try:
@@ -378,40 +382,25 @@ def register_routes(
                 return set(disabled_list) if disabled_list else None
             return current if current else None
 
-        if session_id:
-            # Session already connected — apply immediately
-            current = set(RUNTIME.sessions.disabled.get(session_id, set()))
-            new_disabled = _resolve_disabled(current)
-            RUNTIME.sessions.set_disabled(session_id, new_disabled)
-            await _notify_session_by_id(session_id)
-            logger.info(
-                "REST token filter: token=%s session=%s disabled=%s",
-                token,
-                session_id,
-                RUNTIME.sessions.disabled_snapshot(session_id),
-            )
-            return JSONResponse(
-                {
-                    "token": token,
-                    "session_id": session_id,
-                    "disabled_servers": RUNTIME.sessions.disabled_snapshot(session_id),
-                }
-            )
-
-        # Session not yet connected — store as pending
+        # The token store is CANONICAL (read-through enforcement resolves
+        # ctx.session_id → token → this store at request time), so the write
+        # is the same whether the chat is connected yet or not — connected
+        # sessions additionally get a list_changed nudge to refetch.
         current = set(RUNTIME.sessions.pending_for(token))
         new_disabled = _resolve_disabled(current)
         RUNTIME.sessions.set_pending(token, new_disabled)
+        await _notify_token_sessions()
         logger.info(
-            "REST token filter (pending): token=%s disabled=%s",
+            "REST token filter: token=%s connected=%s disabled=%s",
             token,
+            session_id is not None,
             sorted(new_disabled) if new_disabled else [],
         )
         return JSONResponse(
             {
                 "token": token,
-                "session_id": None,
-                "pending": True,
-                "disabled_servers": sorted(new_disabled) if new_disabled else [],
+                "session_id": session_id,
+                "connected": session_id is not None,
+                "disabled_servers": RUNTIME.sessions.token_snapshot(token),
             }
         )

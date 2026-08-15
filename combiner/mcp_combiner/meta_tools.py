@@ -434,30 +434,43 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
 
+        from mcp_combiner import nvim_proxy
         from mcp_combiner.runtime import RUNTIME
 
-        # Use chat_id if provided, otherwise fall back to MCP session_id
-        sid = chat_id if chat_id else ctx.session_id
-        RUNTIME.sessions.disable(sid, server_name)
+        # Storage resolves by identity strength: an explicit chat_id IS a
+        # token (per the token-canonical decision), else the calling session's
+        # own token (durable — survives reconnects and sanctioned restarts),
+        # else the tokenless session-keyed store (dies with the session).
+        token = chat_id or nvim_proxy.token_for_session(ctx.session_id)
+        if token:
+            RUNTIME.sessions.disable_token(token, server_name)
+            snapshot = RUNTIME.sessions.token_snapshot(token)
+        else:
+            RUNTIME.sessions.disable(ctx.session_id, server_name)
+            snapshot = RUNTIME.sessions.disabled_snapshot(ctx.session_id)
 
-        # Notify this session only so its tool list refreshes immediately.
-        # (Only effective when using ctx.session_id, not chat_id)
-        if not chat_id:
+        # Notify the calling session so its tool list refreshes immediately
+        # (a chat_id naming ANOTHER chat is enforced read-through on that
+        # chat's next request; its refresh nudge is best-effort via REST).
+        if not chat_id or token == nvim_proxy.token_for_session(ctx.session_id):
             try:
                 await ctx.session.send_tool_list_changed()
             except Exception:
                 logger.debug("Failed to notify session of tool list change", exc_info=True)
 
-        logger.info("Session %s: disabled server '%s'", sid, server_name)
+        logger.info(
+            "Session %s (token %s): disabled server '%s'", ctx.session_id, token, server_name
+        )
 
         import json
 
         return json.dumps(
             {
-                "session_id": sid,
+                "session_id": ctx.session_id,
+                "token": token,
                 "action": "disabled",
                 "server": server_name,
-                "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
+                "disabled_servers": snapshot,
             }
         )
 
@@ -481,43 +494,55 @@ def register_meta_tools(
         if server_name not in config.servers:
             return f"Error: Server '{server_name}' not found"
 
+        from mcp_combiner import nvim_proxy
         from mcp_combiner.runtime import RUNTIME
 
-        # Use chat_id if provided, otherwise fall back to MCP session_id
-        sid = chat_id if chat_id else ctx.session_id
-        blocked = RUNTIME.sessions.disabled_for(sid)
-        if not blocked or server_name not in blocked:
-            import json
+        # Same storage resolution as combiner__session_disable_server.
+        token = chat_id or nvim_proxy.token_for_session(ctx.session_id)
+        if token:
+            blocked = RUNTIME.sessions.pending_token_filters.get(token, set())
+        else:
+            blocked = RUNTIME.sessions.disabled_for(ctx.session_id) or set()
 
+        import json
+
+        if server_name not in blocked:
             return json.dumps(
                 {
-                    "session_id": sid,
+                    "session_id": ctx.session_id,
+                    "token": token,
                     "action": "no_change",
                     "server": server_name,
                     "message": f"Server '{server_name}' is not session-disabled",
-                    "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
+                    "disabled_servers": sorted(blocked),
                 }
             )
 
-        RUNTIME.sessions.enable(sid, server_name)
+        if token:
+            RUNTIME.sessions.enable_token(token, server_name)
+            snapshot = RUNTIME.sessions.token_snapshot(token)
+        else:
+            RUNTIME.sessions.enable(ctx.session_id, server_name)
+            snapshot = RUNTIME.sessions.disabled_snapshot(ctx.session_id)
 
-        # Notify this session only so its tool list refreshes immediately.
-        if not chat_id:
+        # Notify the calling session so its tool list refreshes immediately.
+        if not chat_id or token == nvim_proxy.token_for_session(ctx.session_id):
             try:
                 await ctx.session.send_tool_list_changed()
             except Exception:
                 logger.debug("Failed to notify session of tool list change", exc_info=True)
 
-        logger.info("Session %s: re-enabled server '%s'", sid, server_name)
-
-        import json
+        logger.info(
+            "Session %s (token %s): re-enabled server '%s'", ctx.session_id, token, server_name
+        )
 
         return json.dumps(
             {
-                "session_id": sid,
+                "session_id": ctx.session_id,
+                "token": token,
                 "action": "enabled",
                 "server": server_name,
-                "disabled_servers": RUNTIME.sessions.disabled_snapshot(sid),
+                "disabled_servers": snapshot,
             }
         )
 
@@ -536,17 +561,23 @@ def register_meta_tools(
         Returns:
             JSON string with session status.
         """
+        from mcp_combiner import nvim_proxy
         from mcp_combiner.runtime import RUNTIME
 
-        sid = chat_id if chat_id else ctx.session_id
-        blocked = RUNTIME.sessions.disabled_snapshot(sid)
-        blocked.sort()
+        # Same read-through as enforcement: token store when the caller (or
+        # the named chat_id) is tokened, session store otherwise.
+        token = chat_id or nvim_proxy.token_for_session(ctx.session_id)
+        if token:
+            blocked = RUNTIME.sessions.token_snapshot(token)
+        else:
+            blocked = RUNTIME.sessions.disabled_snapshot(ctx.session_id)
 
         import json
 
         return json.dumps(
             {
-                "session_id": sid,
+                "session_id": ctx.session_id,
+                "token": token,
                 "disabled_servers": blocked,
             }
         )

@@ -179,13 +179,23 @@ class TestHandoverE2E:
         assert stats["tool_calls"]["greet"] == 2
         assert len(greet_sessions) == 1, stats["session_calls"]
 
-        # And the token-keyed filter is already in place on the successor.
+        # And the token-keyed filter is already in place on the successor —
+        # both as bookkeeping and as ENFORCEMENT: the chat that presents that
+        # token gets the filtered view from its very first request
+        # (read-through — there is no join step to miss).
         async with httpx.AsyncClient() as http:
             r = await http.get(
                 f"{successor.base_url}/sessions/token/other-token/filter", timeout=5.0
             )
             r.raise_for_status()
             assert r.json()["disabled_servers"] == ["mockup"]
+        async with Client(
+            StreamableHttpTransport(
+                successor.mcp_url, headers={"X-MCP-Combiner-Session": "other-token"}
+            )
+        ) as fc:
+            names = {t.name for t in await fc.list_tools()}
+            assert not any(str(n).startswith("mockup_") for n in names)
 
     async def test_stateful_server_state_visible_after_sanctioned_restart(
         self, procs: ProcFactory, tmp_path: Path

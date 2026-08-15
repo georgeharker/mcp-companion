@@ -19,8 +19,8 @@ from mcp_combiner.connections import (
     _BACKING_RESTART_AFTER,
     _MAX_BACKOFF_LOCAL,
     ConnectionManager,
-    _ManagedConnection,
     _is_local_upstream,
+    _ManagedConnection,
 )
 
 

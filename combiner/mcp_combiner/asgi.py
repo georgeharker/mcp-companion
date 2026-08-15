@@ -218,16 +218,11 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
                     sid,
                     "url" if url_token else "header",
                 )
-                # Apply any pending filter that was stored before the client connected
-                pending = RUNTIME.sessions.pop_pending(token)
-                if pending:
-                    RUNTIME.sessions.set_disabled(sid, pending)
-                    logger.info(
-                        "Pending token filter applied: token=%s  session=%s  disabled=%s",
-                        token,
-                        sid,
-                        sorted(pending),
-                    )
+                # NOTE: no pending-filter copy here anymore. The token-keyed
+                # filter store is canonical and enforcement READS THROUGH to it
+                # (ctx.session_id → token → store) at request time — a filter
+                # stored before the client connected is simply in effect from
+                # its first request, with no namespace join to get wrong.
             else:
                 logger.debug(
                     "Token seen but no mcp-session-id in response: token=%s  status=%d  source=%s",

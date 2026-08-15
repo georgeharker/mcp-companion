@@ -116,6 +116,47 @@ class SessionRegistry:
         """Drop a session's elicitation grants (e.g. on disconnect)."""
         self.granted.pop(session_id, None)
 
+    # -- read-through enforcement (the Q1 fix) -------------------------------
+
+    def effective_disabled(self, session_id: str | None) -> set[str]:
+        """The blocklist ENFORCEMENT reads — resolved lazily at use time.
+
+        A TOKENED session's filters live in the token-keyed store (canonical:
+        written directly by the token REST route and the session meta-tools,
+        carried by the sanctioned-restart handover, stable across reconnects
+        because the token is externally maintained). The session-keyed store
+        remains only for tokenless sessions (the editor control session,
+        self-scoped toggles on unsupervised clients) and dies with them.
+
+        This replaces the old one-shot pending-filter copy at connect time —
+        there is no join between the two id namespaces anywhere, which is what
+        made token-route filters inert (QUESTIONS.md Q1).
+        """
+        if not session_id:
+            return set()
+        from mcp_combiner import nvim_proxy
+
+        token = nvim_proxy.token_for_session(session_id)
+        if token is not None:
+            return self.pending_token_filters.get(token, set())
+        return self.disabled.get(session_id, set())
+
+    # -- token-keyed filter store (canonical for tokened sessions) -----------
+
+    def disable_token(self, token: str, server: str) -> None:
+        self.pending_token_filters.setdefault(token, set()).add(server)
+
+    def enable_token(self, token: str, server: str) -> None:
+        blocked = self.pending_token_filters.get(token)
+        if blocked is None:
+            return
+        blocked.discard(server)
+        if not blocked:
+            self.pending_token_filters.pop(token, None)
+
+    def token_snapshot(self, token: str) -> list[str]:
+        return sorted(self.pending_token_filters.get(token, set()))
+
     # -- token correlation (Q1 caveat: values are wire mcp-session-ids) -----
 
     def session_for_token(self, token: str) -> str | None:

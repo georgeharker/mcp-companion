@@ -149,10 +149,13 @@ name, default `mcp-combiner`), `--port`/`--host`, `--grace-period`, `--pid`
 extra serve flags after `--`, e.g.
 `mcp-combiner start --config … -- --no-output-validation`.
 
-> **WIP:** the session filter verbs (`enable`/`disable`/`allow`/`clear`) are a
-> work in progress — CLI invocations are transient sessions, and
-> token-addressed filters are recorded but not yet applied while the
-> session-addressing rework lands. `session status` is fully functional.
+The session filter verbs (`enable`/`disable`/`allow`/`clear`) address a chat
+by its grouping token and apply **live**: the token-keyed filter store is
+canonical, enforcement reads through to it on the chat's next request, and the
+state survives reconnects and `mcp-combiner restart` (it rides the handover).
+With the Claude plugin's tokens this means any Claude chat is controllable
+from the CLI — or from another chat — by its `cc-<session-id>` token (see
+`/sessions/map` for the live roster).
 
 The read/drive verbs (`status`, `health`, `enable`, …) accept `--host`/`--port`
 (default `127.0.0.1:9741`) or `--url`, and `--json` for scripting.

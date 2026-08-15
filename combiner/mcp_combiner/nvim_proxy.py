@@ -126,6 +126,18 @@ def restore_routing(token_instances: dict[str, str], instances: dict[str, Any]) 
                 logger.warning("handover: could not restore nvim instance %s", instance_id)
 
 
+def token_for_session(session_id: str | None) -> str | None:
+    """The chat token bound to a fastmcp Context.session_id, if any."""
+    if not session_id:
+        return None
+    return _session_tokens.get(session_id)
+
+
+def sessions_for_token(token: str) -> list[str]:
+    """All Context.session_ids currently bound to *token* (usually one)."""
+    return [sid for sid, tok in _session_tokens.items() if tok == token]
+
+
 def _instance_for_session(session_id: str | None) -> str | None:
     """Resolve session_id -> token -> instance_id, if bound to a live instance."""
     if not session_id:
@@ -259,10 +271,18 @@ async def append_nvim_tools(
         return tools  # no editor has ever connected → no neovim tools
 
     # Still honour an explicit per-session disable of the neovim server.
+    # Read-through, like every other enforcement point: token store for
+    # tokened sessions, the passed session-keyed dict for tokenless ones.
     if context.fastmcp_context is not None:
         try:
             sid = context.fastmcp_context.session_id
-            if _NVIM_SERVER in session_disabled.get(sid, set()):
+            token = token_for_session(sid)
+            if token is not None:
+                from mcp_combiner.runtime import RUNTIME
+
+                if _NVIM_SERVER in RUNTIME.sessions.pending_token_filters.get(token, set()):
+                    return tools
+            elif _NVIM_SERVER in session_disabled.get(sid, set()):
                 return tools
         except (RuntimeError, AttributeError):
             pass
@@ -283,7 +303,14 @@ async def call_nvim_tool(
         except (RuntimeError, AttributeError):
             sid = None
 
-    if sid and _NVIM_SERVER in session_disabled.get(sid, set()):
+    _token = token_for_session(sid)
+    if _token is not None:
+        from mcp_combiner.runtime import RUNTIME as _runtime
+
+        _blocked = _NVIM_SERVER in _runtime.sessions.pending_token_filters.get(_token, set())
+    else:
+        _blocked = bool(sid) and _NVIM_SERVER in session_disabled.get(sid or "", set())
+    if _blocked:
         raise NotFoundError(
             f"Tool '{tool_name}' is unavailable — the 'neovim' server is disabled for this session."
         )

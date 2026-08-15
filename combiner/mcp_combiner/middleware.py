@@ -295,7 +295,7 @@ class ToolProcessingMiddleware(Middleware):
         except (RuntimeError, AttributeError):
             return tools
 
-        blocked = RUNTIME.sessions.disabled_for(sid)
+        blocked = RUNTIME.sessions.effective_disabled(sid)
         if not blocked:
             return tools
 
@@ -342,7 +342,7 @@ class ToolProcessingMiddleware(Middleware):
         if context.fastmcp_context is not None:
             try:
                 sid = context.fastmcp_context.session_id
-                blocked = RUNTIME.sessions.disabled_for(sid)
+                blocked = RUNTIME.sessions.effective_disabled(sid)
                 if blocked:
                     sess_server, _ = _find_server_for_tool(str(tool_name))
                     if sess_server in blocked:

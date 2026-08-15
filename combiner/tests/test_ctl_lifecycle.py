@@ -121,12 +121,13 @@ def _restart_args(**kw: object) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
-_INFO_OUTPUT = """\
-Server: mcp-combiner (PID: 12345)
-Status: ● Active (refcount: 1)
-Command: /opt/bin/mcp-combiner --mcp --config /c.json --port 9999 --host 127.0.0.1 --log-file /py.log --schema-fix empty_object
-Grace Period: 30m
-"""
+_INFO_OUTPUT = (
+    "Server: mcp-combiner (PID: 12345)\n"
+    "Status: ● Active (refcount: 1)\n"
+    "Command: /opt/bin/mcp-combiner --mcp --config /c.json --port 9999 "
+    "--host 127.0.0.1 --log-file /py.log --schema-fix empty_object\n"
+    "Grace Period: 30m\n"
+)
 
 
 def test_parse_registered_command() -> None:

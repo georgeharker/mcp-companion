@@ -1161,43 +1161,44 @@ class TestTokenFilterRESTEndpoints:
     # -- GET /sessions/token/{token}/filter --
 
     def test_get_filter_pending_empty(self, client):
-        """GET on unconnected token returns pending=True, empty disabled list."""
+        """GET on unconnected token reports the (empty) token store."""
         resp = client.get("/sessions/token/tok-aaa/filter")
         assert resp.status_code == 200
         data = resp.json()
         assert data["token"] == "tok-aaa"
         assert data["session_id"] is None
-        assert data["pending"] is True
+        assert data["connected"] is False
         assert data["disabled_servers"] == []
 
     def test_get_filter_pending_with_state(self, client):
-        """GET on unconnected token returns pending filter state."""
+        """GET on unconnected token returns the token-keyed filter state."""
         import mcp_combiner.server as srv
 
         srv._pending_token_filters["tok-aaa"] = {"everything"}
         resp = client.get("/sessions/token/tok-aaa/filter")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["pending"] is True
+        assert data["connected"] is False
         assert "everything" in data["disabled_servers"]
 
     def test_get_filter_connected(self, client):
-        """GET on connected token returns real session filter state."""
+        """GET on a connected token reports the CANONICAL token store (the
+        one enforcement reads through to), not the legacy session store."""
         import mcp_combiner.server as srv
 
         srv._token_sessions["tok-bbb"] = "session-123"
-        srv._session_disabled["session-123"] = {"http-example"}
+        srv._pending_token_filters["tok-bbb"] = {"http-example"}
         resp = client.get("/sessions/token/tok-bbb/filter")
         assert resp.status_code == 200
         data = resp.json()
         assert data["session_id"] == "session-123"
+        assert data["connected"] is True
         assert "http-example" in data["disabled_servers"]
-        assert "pending" not in data
 
     # -- POST /sessions/token/{token}/filter (pending path) --
 
     def test_post_filter_pending_disabled_servers(self, client):
-        """POST with disabled_servers on unconnected token stores as pending."""
+        """POST with disabled_servers on unconnected token writes the store."""
         import mcp_combiner.server as srv
 
         resp = client.post(
@@ -1206,9 +1207,9 @@ class TestTokenFilterRESTEndpoints:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["pending"] is True
+        assert data["connected"] is False
         assert "everything" in data["disabled_servers"]
-        # Verify pending dict was populated
+        # Verify the token-keyed store was populated
         assert "everything" in srv._pending_token_filters.get("tok-ccc", set())
 
     def test_post_filter_pending_allowed_servers(self, client):
@@ -1219,7 +1220,7 @@ class TestTokenFilterRESTEndpoints:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["pending"] is True
+        assert data["connected"] is False
         # everything is allowed, so other enabled servers should be disabled
         assert "everything" not in data["disabled_servers"]
 
@@ -1239,7 +1240,8 @@ class TestTokenFilterRESTEndpoints:
     # -- POST /sessions/token/{token}/filter (connected path) --
 
     def test_post_filter_connected_applies_immediately(self, client):
-        """POST on connected token applies filter to session directly."""
+        """POST on connected token writes the canonical token store — the
+        legacy session store is never touched (enforcement reads through)."""
         import mcp_combiner.server as srv
 
         srv._token_sessions["tok-fff"] = "session-456"
@@ -1250,16 +1252,17 @@ class TestTokenFilterRESTEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["session_id"] == "session-456"
+        assert data["connected"] is True
         assert "everything" in data["disabled_servers"]
-        # Verify _session_disabled was set
-        assert "everything" in srv._session_disabled.get("session-456", set())
+        assert "everything" in srv._pending_token_filters.get("tok-fff", set())
+        assert srv._session_disabled.get("session-456") is None
 
     def test_post_filter_connected_enable_single(self, client):
-        """POST enable on connected token removes server from disabled set."""
+        """POST enable on connected token removes server from the token store."""
         import mcp_combiner.server as srv
 
         srv._token_sessions["tok-ggg"] = "session-789"
-        srv._session_disabled["session-789"] = {"everything", "http-example"}
+        srv._pending_token_filters["tok-ggg"] = {"everything", "http-example"}
         resp = client.post(
             "/sessions/token/tok-ggg/filter",
             json={"enable": "everything"},
@@ -1270,7 +1273,7 @@ class TestTokenFilterRESTEndpoints:
         assert "http-example" in data["disabled_servers"]
 
     def test_post_filter_connected_disable_single(self, client):
-        """POST disable on connected token adds server to disabled set."""
+        """POST disable on connected token adds server to the token store."""
         import mcp_combiner.server as srv
 
         srv._token_sessions["tok-hhh"] = "session-101"
@@ -1281,7 +1284,7 @@ class TestTokenFilterRESTEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert "everything" in data["disabled_servers"]
-        assert "everything" in srv._session_disabled.get("session-101", set())
+        assert "everything" in srv._pending_token_filters.get("tok-hhh", set())
 
     # -- DELETE /sessions/token/{token}/filter --
 
@@ -1298,17 +1301,17 @@ class TestTokenFilterRESTEndpoints:
         assert srv._pending_token_filters.get("tok-iii") is None
 
     def test_delete_filter_connected_clears(self, client):
-        """DELETE on connected token clears the session filter."""
+        """DELETE on connected token clears the token-keyed filter."""
         import mcp_combiner.server as srv
 
         srv._token_sessions["tok-jjj"] = "session-202"
-        srv._session_disabled["session-202"] = {"everything"}
+        srv._pending_token_filters["tok-jjj"] = {"everything"}
         resp = client.delete("/sessions/token/tok-jjj/filter")
         assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "cleared"
         assert "everything" in data["previously_disabled"]
-        assert srv._session_disabled.get("session-202") is None
+        assert srv._pending_token_filters.get("tok-jjj") is None
 
 
 # ── allowed_servers → disabled inversion ───────────────────────────
