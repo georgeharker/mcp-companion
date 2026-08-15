@@ -96,6 +96,93 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
     before the client connected, it is applied immediately.
     """
 
+    # (client host, client port) -> (old wire session id, monotonic deadline).
+    # Populated when a request presents a restored-but-unknown session id and
+    # gets the spec 404; claimed by the re-initialize that follows. Shared
+    # across dispatches — BaseHTTPMiddleware is one instance per app.
+    _pending_reassoc: dict[tuple[str, int], tuple[str, float]]
+    _REASSOC_TTL = 10.0
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._pending_reassoc = {}
+
+    async def _dispatch_tokenless(
+        self, request: StarletteRequest, call_next: RequestResponseEndpoint
+    ) -> Response:
+        """Tokenless requests: the wire ``Mcp-Session-Id`` is the chat name.
+
+        PROPOSAL under validation (see the design graph): across a sanctioned
+        combiner restart the old wire id dies with the predecessor, but the
+        client's first post-restart request still PRESENTS it — the request
+        that 404s before the SDK re-initializes. That 404 is the correlation
+        point: stash (client addr → old id), and when the re-initialize on
+        the same kept-alive connection mints the new id, rename the old id's
+        restored parked state to the new identity ("the chat formerly called
+        X"). Every miss fails open to a fresh session.
+        """
+        import time as _time
+
+        from mcp_combiner.isolated import (
+            REGISTRY as _isolated_registry,
+        )
+        from mcp_combiner.isolated import (
+            SID_PREFIX as _sid_prefix,
+        )
+
+        request_sid = request.headers.get("mcp-session-id")
+        client = request.client
+        addr = (client.host, client.port) if client is not None else None
+
+        response = await call_next(request)
+
+        # Session DELETE from a tokenless client: same park-expedite hint as
+        # the tokened path — the wire id is the group key.
+        if request.method == "DELETE" and request_sid:
+            _isolated_registry.expedite_park(_sid_prefix + request_sid)
+            return response
+
+        now = _time.monotonic()
+
+        # A restored identity was presented and refused: remember who asked.
+        if (
+            response.status_code == 404
+            and request_sid
+            and _isolated_registry.has_parked_sid(request_sid)
+        ):
+            for key, (_sid, deadline) in list(self._pending_reassoc.items()):
+                if deadline < now:
+                    self._pending_reassoc.pop(key, None)
+            if addr is not None:
+                self._pending_reassoc[addr] = (request_sid, now + self._REASSOC_TTL)
+                logger.info(
+                    "reassoc: chat formerly called %s… is reconnecting (from %s:%d)",
+                    request_sid[:8],
+                    addr[0],
+                    addr[1],
+                )
+            return response
+
+        # A fresh initialize minted a new id: claim a pending old identity —
+        # same connection (addr match) first, else an unambiguous singleton.
+        if request_sid is None:
+            new_sid = response.headers.get("mcp-session-id")
+            if new_sid and self._pending_reassoc:
+                live = {
+                    k: v for k, v in self._pending_reassoc.items() if v[1] >= now
+                }
+                old_sid: str | None = None
+                if addr is not None and addr in live:
+                    old_sid = live[addr][0]
+                    self._pending_reassoc.pop(addr, None)
+                elif len(live) == 1:
+                    key, (old_sid, _deadline) = next(iter(live.items()))
+                    self._pending_reassoc.pop(key, None)
+                if old_sid is not None:
+                    _isolated_registry.rename_sid(old_sid, new_sid)
+
+        return response
+
     async def dispatch(
         self, request: StarletteRequest, call_next: RequestResponseEndpoint
     ) -> Response:
@@ -144,7 +231,7 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
         token = url_token or header_token
 
         if token is None:
-            return await call_next(request)
+            return await self._dispatch_tokenless(request, call_next)
 
         already_mapped = RUNTIME.sessions.session_for_token(token) is not None
         if not already_mapped:

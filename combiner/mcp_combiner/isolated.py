@@ -70,6 +70,13 @@ logger = logging.getLogger("mcp-combiner")
 # TokenRewriteMiddleware (see nvim_proxy.record_session_token).
 TOKEN_HEADER = "x-mcp-combiner-session"
 
+# Namespace prefix for group keys derived from the downstream wire
+# Mcp-Session-Id (the tokenless tier's chat identity — per-chat on Claude
+# Code, per-instance on OpenCode). Only sid: keys are alias-eligible after a
+# combiner restart (the 404-correlation rename); explicit tokens are stored
+# raw and re-associate by simply being presented again.
+SID_PREFIX = "sid:"
+
 # Defaults; overridden from CombinerConfig.isolation by create_combiner.
 GRACE_SECONDS = 300.0
 PARK_TTL_SECONDS = 3600.0
@@ -82,6 +89,29 @@ def _request_token() -> str | None:
     """The chat token of the current request, if it carries one."""
     headers = get_http_headers()
     return headers.get(TOKEN_HEADER) or None
+
+
+def _request_group_key() -> str | None:
+    """The current request's chat-grouping key.
+
+    An explicit supervisor-minted token wins (strongest identity — survives
+    client restarts). Otherwise the downstream wire ``Mcp-Session-Id`` names
+    the chat: it is stable for the whole conversation on Claude Code (one MCP
+    session per chat) and for the instance on OpenCode, and the
+    404-correlation aliasing carries it across a sanctioned combiner restart.
+    ``None`` (no HTTP context at all) falls back to session-object keying.
+    """
+    # get_http_headers strips mcp-session-id by default (it must not be
+    # forwarded downstream); include it explicitly — here it is read as the
+    # chat identity, never forwarded.
+    headers = get_http_headers(include={"mcp-session-id"})
+    token = headers.get(TOKEN_HEADER)
+    if token:
+        return token
+    sid = headers.get("mcp-session-id")
+    if sid:
+        return SID_PREFIX + sid
+    return None
 
 
 @dataclass
@@ -222,6 +252,40 @@ class IsolatedSessionRegistry:
         """Load a parked entry (handover restore, or a failed claim put back)."""
         self.parked[(server, token)] = parked
         self._ensure_sweeper()
+
+    # -- 404-correlation aliasing (wire-id group keys) ---------------------
+
+    def has_parked_sid(self, sid: str) -> bool:
+        """Whether any parked entry belongs to this old wire session id.
+
+        This IS the roster of restorable identities — self-cleaning, because
+        forget/TTL removes the parked entries themselves.
+        """
+        key = SID_PREFIX + sid
+        return any(tok == key for (_, tok) in self.parked)
+
+    def rename_sid(self, old_sid: str, new_sid: str) -> int:
+        """Re-key parked entries from an old wire session id to the re-minted
+        one — the chat formerly called *old_sid* is now called *new_sid*.
+
+        The successor cannot fabricate the old downstream session, but it can
+        hand the NEW session the old identity's parked state; the next
+        isolated call then resumes lazily as usual. Returns entries renamed.
+        """
+        old_key, new_key = SID_PREFIX + old_sid, SID_PREFIX + new_sid
+        moved = 0
+        for server, tok in list(self.parked):
+            if tok == old_key:
+                self.parked[(server, new_key)] = self.parked.pop((server, old_key))
+                moved += 1
+        if moved:
+            logger.info(
+                "isolated: re-associated %d parked session(s): sid %s… → %s…",
+                moved,
+                old_sid[:8],
+                new_sid[:8],
+            )
+        return moved
 
     def _track_session(self, entry: LiveEntry, session: ServerSession | None) -> None:
         if session is None:
@@ -422,7 +486,7 @@ class TokenKeyedStatefulClient(StatefulProxyClient[ClientTransportT]):
         self._server_name = server_name
 
     async def acquire_stateful(self) -> Client[Any]:
-        token = _request_token()
+        token = _request_group_key()
         if token is None:
             return super().new_stateful()
 
