@@ -253,39 +253,13 @@ class IsolatedSessionRegistry:
         self.parked[(server, token)] = parked
         self._ensure_sweeper()
 
-    # -- 404-correlation aliasing (wire-id group keys) ---------------------
-
-    def has_parked_sid(self, sid: str) -> bool:
-        """Whether any parked entry belongs to this old wire session id.
-
-        This IS the roster of restorable identities — self-cleaning, because
-        forget/TTL removes the parked entries themselves.
-        """
-        key = SID_PREFIX + sid
-        return any(tok == key for (_, tok) in self.parked)
-
-    def rename_sid(self, old_sid: str, new_sid: str) -> int:
-        """Re-key parked entries from an old wire session id to the re-minted
-        one — the chat formerly called *old_sid* is now called *new_sid*.
-
-        The successor cannot fabricate the old downstream session, but it can
-        hand the NEW session the old identity's parked state; the next
-        isolated call then resumes lazily as usual. Returns entries renamed.
-        """
-        old_key, new_key = SID_PREFIX + old_sid, SID_PREFIX + new_sid
-        moved = 0
-        for server, tok in list(self.parked):
-            if tok == old_key:
-                self.parked[(server, new_key)] = self.parked.pop((server, old_key))
-                moved += 1
-        if moved:
-            logger.info(
-                "isolated: re-associated %d parked session(s): sid %s… → %s…",
-                moved,
-                old_sid[:8],
-                new_sid[:8],
-            )
-        return moved
+    # NOTE: restored sid:-keyed parked entries are UNREACHABLE by design —
+    # the wire id died with the predecessor and no client will present it
+    # again (the 404-correlation re-association was prototyped and rejected;
+    # see the design graph). They are still written/restored on purpose: the
+    # successor's TTL sweep forgets them WITH the cleanup DELETE, releasing
+    # the upstream server's state promptly instead of leaving it to the
+    # server's own expiry.
 
     def _track_session(self, entry: LiveEntry, session: ServerSession | None) -> None:
         if session is None:

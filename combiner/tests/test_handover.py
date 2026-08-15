@@ -236,6 +236,53 @@ class TestHandoverE2E:
             recalled = await _text_of(await c.call_tool("mockup_mock__recall", {}))
         assert recalled == "the-current-document"
 
+    async def test_tokenless_chat_is_amnesiac_after_restart(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """The custody principle, pinned: a tokenless chat's identity is the
+        wire session id, which is maintained by the combiner and therefore
+        dies with it. After a sanctioned restart the chat reconnects cleanly
+        but on a FRESH session — no state carryover, and no inference-based
+        re-association (the 404-correlation scheme was prototyped and
+        rejected; see the design graph). Only presented, externally
+        maintained identity — a token — survives the restart."""
+        tools_path = write_tools_spec(tmp_path / "tools.json", _SPEC)
+        mock = await procs.start_http_mock("mockup", tools_path=tools_path)
+        cfg = write_servers_config(
+            tmp_path / "servers.json",
+            {"mockup": {**http_mock_entry(mock.port), "isolate": True}},
+        )
+        port = free_port()
+        combiner = await procs.start_combiner(cfg, port=port)
+        await combiner.wait_server_state("mockup", ("ready",))
+
+        c = Client(combiner.mcp_url)  # no token — sid-keyed identity
+        async with c:
+            await c.call_tool("mockup_mock__remember", {"value": "doomed"})
+
+            handover_file = tmp_path / "handover.json"
+            async with httpx.AsyncClient() as http:
+                r = await http.post(
+                    f"{combiner.base_url}/handover/prepare",
+                    json={"path": str(handover_file)},
+                    timeout=5.0,
+                )
+                assert r.status_code == 200
+            combiner.terminate()
+            successor = await procs.start_combiner(
+                cfg, port=port, extra_args=["--restore", str(handover_file)]
+            )
+            await successor.wait_server_state("mockup", ("ready",))
+
+            # The held connection's next call presents the dead id and fails.
+            with pytest.raises(Exception):
+                await c.call_tool("mockup_mock__recall", {})
+
+        # Reconnect: clean fresh session, state honestly gone.
+        async with Client(successor.mcp_url) as c2:
+            with pytest.raises(Exception, match="nothing remembered"):
+                await c2.call_tool("mockup_mock__recall", {})
+
 
 async def _text_of(result) -> str:
     return result.content[0].text
