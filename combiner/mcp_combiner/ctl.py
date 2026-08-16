@@ -500,9 +500,7 @@ async def cmd_restart_combiner(args: argparse.Namespace) -> int:
         if not os.path.isfile(config):
             print(f"restart: config file not found: {config}", file=sys.stderr)
             return 2
-        serve_argv = _combiner_serve_argv(
-            config, args.host or "127.0.0.1", args.port or 9741, []
-        )
+        serve_argv = _combiner_serve_argv(config, args.host or "127.0.0.1", args.port or 9741, [])
 
     # Health-poll / URL target: explicit flags win; otherwise read host/port from
     # the argv we are about to run (a reused command may serve off-default).

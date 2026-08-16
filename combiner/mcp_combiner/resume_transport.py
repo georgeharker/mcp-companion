@@ -108,9 +108,7 @@ class ResumableStreamableHttpTransport(StreamableHttpTransport):
         elif verify_factory is not None:
             http_client = verify_factory(headers=headers, timeout=timeout, auth=self.auth)
         else:
-            http_client = create_mcp_http_client(
-                headers=headers, timeout=timeout, auth=self.auth
-            )
+            http_client = create_mcp_http_client(headers=headers, timeout=timeout, auth=self.auth)
         # ---- end mirror; the changed part follows --------------------------
 
         async with (
@@ -142,18 +140,14 @@ class ResumableStreamableHttpTransport(StreamableHttpTransport):
                 )
 
             try:
-                async with ClientSession(
-                    read_stream, write_stream, **session_kwargs
-                ) as session:
+                async with ClientSession(read_stream, write_stream, **session_kwargs) as session:
                     if self.resume_session_id is not None:
                         # Re-announce initialized: idempotent server-side, and
                         # the SDK client starts its standalone GET stream
                         # (server-initiated notifications) on exactly this send.
                         await session.send_notification(
                             mt.ClientNotification(
-                                mt.InitializedNotification(
-                                    method="notifications/initialized"
-                                )
+                                mt.InitializedNotification(method="notifications/initialized")
                             )
                         )
                     yield session

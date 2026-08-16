@@ -49,9 +49,7 @@ def registry() -> IsolatedSessionRegistry:
 
 
 class TestLiveTier:
-    def test_acquire_miss_then_register_then_hit(
-        self, registry: IsolatedSessionRegistry
-    ) -> None:
+    def test_acquire_miss_then_register_then_hit(self, registry: IsolatedSessionRegistry) -> None:
         assert registry.acquire("srv", "tok", None) is None
         client: Any = FakeClient()
         registry.register("srv", "tok", client, None)
@@ -61,9 +59,7 @@ class TestLiveTier:
         assert registry.acquire("srv", "other", None) is None
         assert registry.acquire("other", "tok", None) is None
 
-    async def test_acquire_refreshes_grace_clock(
-        self, registry: IsolatedSessionRegistry
-    ) -> None:
+    async def test_acquire_refreshes_grace_clock(self, registry: IsolatedSessionRegistry) -> None:
         client: Any = FakeClient()
         entry = registry.register("srv", "tok", client, None)
         # Backdate the entry past the grace window, then acquire: the acquire
@@ -106,9 +102,7 @@ class TestParkAndForget:
         assert client.disconnected
         assert registry.pop_parked("srv", "tok") is None
 
-    async def test_ttl_forgets_parked_entry(
-        self, registry: IsolatedSessionRegistry
-    ) -> None:
+    async def test_ttl_forgets_parked_entry(self, registry: IsolatedSessionRegistry) -> None:
         parked = ParkedSession(
             session_id="sid-old", protocol_version=None, url="http://127.0.0.1:1/mcp"
         )
@@ -134,9 +128,7 @@ class TestParkAndForget:
         assert client.transport.terminate_on_close is False
         assert registry.parked[("srv", "tok")].session_id == "sid-h"
 
-    async def test_close_all_default_terminates(
-        self, registry: IsolatedSessionRegistry
-    ) -> None:
+    async def test_close_all_default_terminates(self, registry: IsolatedSessionRegistry) -> None:
         client: Any = _resumable_client("sid-t")
         registry.register("srv", "tok", client, None)
         await registry.close_all()

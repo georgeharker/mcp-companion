@@ -580,7 +580,9 @@ class TestLifecycleState:
         # The actual register() path (no fake): entry exists, no attempt made.
         mgr = ConnectionManager()
         mgr._connections["a"] = _ManagedConnection(
-            name="a", config=None, srv=None  # type: ignore[arg-type]
+            name="a",
+            config=None,
+            srv=None,  # type: ignore[arg-type]
         )
         assert mgr.lifecycle_state("a") == "starting"
 

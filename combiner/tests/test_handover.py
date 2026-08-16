@@ -79,17 +79,13 @@ class TestRoundTrip:
 
     async def test_version_mismatch_refused_and_deleted(self, tmp_path: Path) -> None:
         path = tmp_path / "handover.json"
-        path.write_text(
-            json.dumps({"version": HANDOVER_VERSION + 1, "created_at": time.time()})
-        )
+        path.write_text(json.dumps({"version": HANDOVER_VERSION + 1, "created_at": time.time()}))
         assert load_handover(str(path)) is False
         assert not path.exists()
 
     async def test_stale_snapshot_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "handover.json"
-        path.write_text(
-            json.dumps({"version": HANDOVER_VERSION, "created_at": time.time() - 3600})
-        )
+        path.write_text(json.dumps({"version": HANDOVER_VERSION, "created_at": time.time() - 3600}))
         assert load_handover(str(path)) is False
         assert not path.exists()
 
@@ -108,9 +104,9 @@ class TestCtlHelpers:
         ]
         # No-op when absent; strips repeated pairs.
         assert _strip_flag_with_value(["x", "y"], "--restore") == ["x", "y"]
-        assert _strip_flag_with_value(
-            ["--restore", "a", "z", "--restore", "b"], "--restore"
-        ) == ["z"]
+        assert _strip_flag_with_value(["--restore", "a", "z", "--restore", "b"], "--restore") == [
+            "z"
+        ]
 
 
 @pytest.mark.e2e
@@ -132,9 +128,7 @@ class TestHandoverE2E:
 
         def _chat(c) -> Client:
             return Client(
-                StreamableHttpTransport(
-                    c.mcp_url, headers={"X-MCP-Combiner-Session": token}
-                )
+                StreamableHttpTransport(c.mcp_url, headers={"X-MCP-Combiner-Session": token})
             )
 
         async with _chat(combiner) as c:
@@ -219,9 +213,7 @@ class TestHandoverE2E:
 
         def _chat(c) -> Client:
             return Client(
-                StreamableHttpTransport(
-                    c.mcp_url, headers={"X-MCP-Combiner-Session": token}
-                )
+                StreamableHttpTransport(c.mcp_url, headers={"X-MCP-Combiner-Session": token})
             )
 
         async with _chat(combiner) as c:

@@ -118,9 +118,7 @@ def register_routes(
             return JSONResponse({"error": "body must be {'path': <str>}"}, status_code=400)
         parent = Path(path).expanduser().parent
         if not parent.is_dir():
-            return JSONResponse(
-                {"error": f"directory does not exist: {parent}"}, status_code=400
-            )
+            return JSONResponse({"error": f"directory does not exist: {parent}"}, status_code=400)
         RUNTIME.handover_path = str(Path(path).expanduser())
         logger.info("handover: shutdown will write %s", RUNTIME.handover_path)
         return JSONResponse({"status": "armed", "path": RUNTIME.handover_path})

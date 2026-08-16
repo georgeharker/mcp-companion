@@ -139,9 +139,7 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
     if isinstance(transport, StreamableHttpTransport) and not isinstance(
         transport, ResumableStreamableHttpTransport
     ):
-        transport = ResumableStreamableHttpTransport(
-            url=transport.url, headers=transport.headers
-        )
+        transport = ResumableStreamableHttpTransport(url=transport.url, headers=transport.headers)
 
     # OAuth-isolated: borrow the primer connection's shared, refreshed auth and
     # gate per-chat session creation on the primer's eager auth completing.

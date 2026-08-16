@@ -175,9 +175,7 @@ class IsolatedSessionRegistry:
 
     # -- factory-side operations -------------------------------------------
 
-    def acquire(
-        self, server: str, token: str, session: ServerSession | None
-    ) -> LiveEntry | None:
+    def acquire(self, server: str, token: str, session: ServerSession | None) -> LiveEntry | None:
         """Return the live entry for (server, token), tracking the session.
 
         Touches ``last_activity`` (the factory runs per proxied call, so this
@@ -230,6 +228,7 @@ class IsolatedSessionRegistry:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 return
+
             # The DELETE's session teardown must finish (and the ServerSession
             # be collected out of the weakset) before a sweep can park; retry
             # a few times rather than waiting for the slow background cadence.
@@ -315,9 +314,7 @@ class IsolatedSessionRegistry:
             url=transport.url,
             headers=dict(transport.headers),
         )
-        logger.info(
-            "isolated: parked upstream session for %s (token %s…)", key[0], key[1][:8]
-        )
+        logger.info("isolated: parked upstream session for %s (token %s…)", key[0], key[1][:8])
         return True
 
     async def forget(self, key: tuple[str, str]) -> None:
@@ -329,9 +326,7 @@ class IsolatedSessionRegistry:
         parked = self.parked.pop(key, None)
         if parked is None:
             return
-        logger.info(
-            "isolated: forgetting parked session for %s (token %s…)", key[0], key[1][:8]
-        )
+        logger.info("isolated: forgetting parked session for %s (token %s…)", key[0], key[1][:8])
         with contextlib.suppress(Exception):
             async with httpx.AsyncClient() as http:
                 await http.delete(

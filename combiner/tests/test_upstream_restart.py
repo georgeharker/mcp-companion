@@ -158,9 +158,7 @@ class TestRestartMetaTool:
 
         def _chat() -> Client:
             return Client(
-                StreamableHttpTransport(
-                    combiner.mcp_url, headers={"X-MCP-Combiner-Session": token}
-                )
+                StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token})
             )
 
         async with _chat() as c:
