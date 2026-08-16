@@ -9,6 +9,9 @@ on:
 
 jobs:
   check:
+    # See vendored-drift.yml: distinct check-run names, so branch protection can name
+    # one without matching the other.
+    name: combiner lint, types, tests
     runs-on: ubuntu-latest
     defaults:
       run:

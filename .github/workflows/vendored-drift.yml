@@ -21,6 +21,10 @@ on:
 
 jobs:
   check:
+    # The check-run name is what branch protection matches on, and the bare job id
+    # "check" collides with ci.yml's job of the same name — name it explicitly so the
+    # required status check on main is unambiguous.
+    name: vendored drift
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
