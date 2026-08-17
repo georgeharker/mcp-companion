@@ -10,7 +10,7 @@
       "name": "mcp-combiner",
       "source": "./plugins/claude",
       "description": "Zero-config sharedserver wrapper for mcp-combiner that also auto-registers the combiner's HTTP endpoint as an MCP server. SessionStart attaches; SessionEnd detaches.",
-      "version": "0.11.1"
+      "version": "0.11.2"
     }
   ]
 }
