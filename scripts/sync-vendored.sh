@@ -22,12 +22,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 die() { echo "error: $*" >&2; exit 1; }
 
 UPSTREAM_REPO="georgeharker/sharedserver"
-# Both halves of the same resolver: the Claude hook uses the shell one, the OpenCode
-# plugin imports the TypeScript one. Kept behaviourally identical upstream; vendored
-# byte-identical here so the drift check is a plain diff.
+# Every copy of the same resolver: the Claude hook uses the shell one; the OpenCode
+# plugin and the Pi extension each import the TypeScript one. Kept behaviourally
+# identical upstream; vendored byte-identical here so the drift check is a plain diff.
 VENDORED_PATHS=(
   "plugins/claude/bin/sharedserver"
   "plugins/opencode/src/sharedserver-resolve.ts"
+  "plugins/pi/src/sharedserver-resolve.ts"
 )
 
 command -v curl >/dev/null 2>&1 || die "curl is required to sync vendored files"

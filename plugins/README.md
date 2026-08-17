@@ -1,16 +1,17 @@
-# mcp-combiner plugins (Claude Code & OpenCode)
+# mcp-combiner plugins (Claude Code, OpenCode & Pi)
 
 Standalone editor plugins that run the **mcp-combiner** aggregator via
 [`sharedserver`](https://github.com/georgeharker/sharedserver) and register its
 HTTP endpoint with your agent — the non-CodeCompanion way to share one combiner
 process across Claude Code, OpenCode, and Neovim.
 
-Both plugins live **in this repo** (previously separate repos, now retired):
+The plugins live **in this repo** (previously separate repos, now retired):
 
 | plugin | dir | for |
 |---|---|---|
 | `mcp-combiner` | [`plugins/claude`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude) | Claude Code |
 | `@geohar/opencode-mcp-combiner` | [`plugins/opencode`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode) | OpenCode |
+| `@geohar/pi-mcp-combiner` | [`plugins/pi`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi) | Pi (with [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)) |
 
 Both attach to (or start) the combiner under the sharedserver name
 `mcp-combiner`, so every client shares one refcounted process. When the host
@@ -18,7 +19,7 @@ editor already owns the combiner (CodeCompanion spawns the agent with
 `MCP_COMPANION_COMBINER_URL` set), each plugin **registers only** and does not
 launch — the host owns the lifecycle at its matching version.
 
-## Prerequisites (both plugins)
+## Prerequisites (all plugins)
 
 1. **The combiner CLI** — **nothing to do**, as long as [`uv`](https://docs.astral.sh/uv/)
    is installed: the plugins fetch a pinned `mcp-combiner` from PyPI on demand.
@@ -71,6 +72,11 @@ launch — the host owns the lifecycle at its matching version.
    `MCP_COMBINER_CONFIG` / `CLAUDE_MCP_COMBINER_CONFIG` env vars, then
    `~/.cache/secrets/$USER.mcpservers.json`,
    `~/.config/mcp-combiner/servers.json`, `~/.config/mcp/servers.json`.
+
+4. **(Pi only) [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** — Pi
+   has no MCP of its own; the adapter is what speaks MCP and connects to the
+   combiner. `pi install npm:pi-mcp-adapter`. (Claude Code and OpenCode have
+   native MCP clients and need nothing extra here.)
 
 ## Claude Code — `mcp-combiner`
 
@@ -155,13 +161,44 @@ for the full table.
 
 `$MCP_COMPANION_COMBINER_URL` (host-owned) or `manage: false` → register-only.
 
+## Pi — `@geohar/pi-mcp-combiner`
+
+Pi has no MCP of its own, so two pieces give it the combiner:
+**[`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** (the Pi package that
+speaks MCP, reading its own `mcp.json`) and **this extension** (the process +
+instructions half). Install the adapter, point it at the combiner with a one-line
+`mcp.json` entry (see [`plugins/pi/mcp.json.example`](./pi/mcp.json.example)), and load
+the extension by any of Pi's mechanisms — a symlink into `~/.pi/agent/extensions/`, a
+local path under `settings.json` `extensions`, or the published package under `packages`:
+
+```sh
+npm --prefix plugins/pi run build
+ln -sfn "$PWD/plugins/pi" ~/.pi/agent/extensions/mcp-combiner
+pi install npm:pi-mcp-adapter
+cp plugins/pi/mcp.json.example ~/.config/mcp/mcp.json   # if you have no mcp.json yet
+```
+
+On `session_start` it drives sharedserver exactly like the sibling plugins (releasing on
+`session_shutdown` when `reason === "quit"`); on `before_agent_start` it appends the
+combiner's tool-discovery directive to the system prompt (analogue of the CC plugin's
+SessionStart `additionalContext`). MCP registration is the static `mcp.json` entry —
+Pi's adapter has no in-memory `config` hook like OpenCode's — carrying an optional
+`/mcp/<token>` per-instance grouping token. Env knobs use the `PI_MCP_COMBINER_*`
+namespace mirroring the others. See [`plugins/pi/README.md`](./pi/README.md).
+
+**Verify:** inside Pi, `/mcp` shows `mcp-combiner` connected with the prefixed upstream
+tools; the combiner log shows the attach.
+
+`$MCP_COMPANION_COMBINER_URL` (host-owned) or `PI_MCP_COMBINER_MANAGE=false` →
+instructions-only.
+
 ## How the combiner is resolved
 
-Both plugins pick a combiner the same way, highest first:
+All three plugins pick a combiner the same way, highest first:
 
 | # | Source | Notes |
 |---|--------|-------|
-| 1 | `$CLAUDE_MCP_COMBINER_COMMAND` / `$OPENCODE_MCP_COMBINER_COMMAND`, or the `command` option | explicit; never version-checked |
+| 1 | `$CLAUDE_MCP_COMBINER_COMMAND` / `$OPENCODE_MCP_COMBINER_COMMAND` / `$PI_MCP_COMBINER_COMMAND`, or the `command` option | explicit; never version-checked |
 | 2 | `mcp-combiner` on `PATH` | **only when `>= 0.8.0`**; older is reported and skipped |
 | 3 | `uv run -m mcp_combiner` from `$…_CHECKOUT` / the `checkout` option | the checkout must exist |
 | 4 | `uvx mcp-combiner@<plugin version>` | the zero-install path; falls back to latest if that release is missing |
@@ -169,7 +206,7 @@ Both plugins pick a combiner the same way, highest first:
 The floor at row 2 exists because the plugins depend on combiner ≥ 0.8.0 behaviour
 (`--mcp` serve mode). A too-old `PATH` install is skipped rather than used, so a stale
 binary self-heals into the pinned release instead of failing obscurely — and the skip is
-reported, not silent (Claude Code: SessionStart `systemMessage`; OpenCode: a TUI toast),
+reported, not silent (Claude Code: SessionStart `systemMessage`; OpenCode: a TUI toast; Pi: a UI notification),
 since routing around a binary you installed on purpose should never be invisible.
 
 ## Choosing a port
@@ -178,7 +215,7 @@ The default is `9741`. Changing it takes **two** variables, exported **before** 
 starts:
 
 ```sh
-export CLAUDE_MCP_COMBINER_PORT=9999                        # OPENCODE_… for OpenCode
+export CLAUDE_MCP_COMBINER_PORT=9999                        # OPENCODE_… / PI_… for OpenCode / Pi
 export MCP_COMPANION_COMBINER_URL=http://127.0.0.1:9999/mcp
 ```
 
@@ -203,12 +240,12 @@ scheme the Neovim plugin uses (there, under `stdpath("log")`), defaulted to
 `~/.local/state/mcp-combiner/` (`$XDG_STATE_HOME` respected):
 
 - `mcp-combiner.log` — raw stdout/stderr, captured by sharedserver
-  (`CLAUDE_MCP_COMBINER_LOG` / `OPENCODE_MCP_COMBINER_LOG` or the OpenCode
-  `logFile` option override the path; `none` disables).
+  (`CLAUDE_MCP_COMBINER_LOG` / `OPENCODE_MCP_COMBINER_LOG` / `PI_MCP_COMBINER_LOG`
+  or the OpenCode `logFile` option override the path; `none` disables).
 - `mcp-combiner-py.log` — the combiner's own `--log-file`: fastmcp, OAuth and
-  httpx detail (`CLAUDE_MCP_COMBINER_PYLOG` / `OPENCODE_MCP_COMBINER_PYLOG` or
-  `pyLogFile`; level via `…_LOG_LEVEL` / `logLevel`, default `info`; `none`
-  disables).
+  httpx detail (`CLAUDE_MCP_COMBINER_PYLOG` / `OPENCODE_MCP_COMBINER_PYLOG` /
+  `PI_MCP_COMBINER_PYLOG` or `pyLogFile`; level via `…_LOG_LEVEL` / `logLevel`,
+  default `info`; `none` disables).
 
 The `mcp-combiner start`/`restart` CLI verbs default the same paths. Whichever
 client *starts* the shared process fixes its argv — when Neovim launched the
@@ -238,13 +275,15 @@ effect.
 ## Related plugins (other tools, same pattern)
 
 - **crib** (cribsheet memory + code index): `@geohar/opencode-cribsheet` /
-  the `cribsheet` Claude Code plugin — in the
+  `@geohar/pi-cribsheet` / the `cribsheet` Claude Code plugin — in the
   [cribsheet](https://github.com/georgeharker/cribsheet) repo.
-- **svg-mcp**: `@geohar/opencode-svg-mcp` / the `svg-mcp` Claude Code plugin — in
-  the [svg-mcp](https://github.com/georgeharker/svg-mcp) repo.
+- **svg-mcp**: `@geohar/opencode-svg-mcp` / `@geohar/pi-svg-mcp` / the `svg-mcp`
+  Claude Code plugin — in the [svg-mcp](https://github.com/georgeharker/svg-mcp) repo.
 - **sharedserver** (generic process manager): `@geohar/opencode-sharedserver` — in
   the [sharedserver](https://github.com/georgeharker/sharedserver) repo.
 
-Each per-tool plugin **stands down** (registers/launches nothing) when a combiner
-already serves that backend — set `MCP_COMBINER=1`, or run `mcp-combiner
-env-disable` to emit the per-backend `MCP_COMBINER_SERVES_*` exports.
+Each per-tool plugin (Claude Code, OpenCode, and Pi alike) **stands down**
+(registers/launches nothing) when a combiner already serves that backend — set
+`MCP_COMBINER=1`, or run `mcp-combiner env-disable` to emit the per-backend
+`MCP_COMBINER_SERVES_*` exports. The Pi extensions keep injecting their directive
+either way, since the tools are present via the combiner.

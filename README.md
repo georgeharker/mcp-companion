@@ -181,13 +181,13 @@ curl -X POST http://127.0.0.1:9741/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
 ```
 
-### Plugins (standalone Claude Code & OpenCode)
+### Plugins (standalone Claude Code, OpenCode & Pi)
 
 Outside CodeCompanion, install a plugin so your agent runs and registers the
-combiner itself (one refcounted process shared across clients). Both plugins live
+combiner itself (one refcounted process shared across clients). All three plugins live
 in this repo — **[`plugins/`](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)**.
 
-Prerequisites (once, for either plugin): [`uv`](https://docs.astral.sh/uv/),
+Prerequisites (once, for any plugin): [`uv`](https://docs.astral.sh/uv/),
 `cargo install sharedserver`, and a `servers.json` at
 `~/.config/mcp-combiner/servers.json` (see [MCP Server Config](#mcp-server-config)).
 
@@ -199,6 +199,10 @@ pinned release from PyPI on demand. Then:
   with `/mcp` (an `mcp-combiner` server with prefixed tools).
 - **OpenCode:** add `"@geohar/opencode-mcp-combiner@latest"` to your `opencode.json`
   `plugin` list.
+- **Pi:** `pi install npm:pi-mcp-adapter` (Pi's MCP client), drop the combiner into
+  its `mcp.json` ([`plugins/pi/mcp.json.example`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi/mcp.json.example)),
+  and load the `@geohar/pi-mcp-combiner` extension (symlink into
+  `~/.pi/agent/extensions/`, or list it under `settings.json` `packages`).
 
 See **[plugins/README.md](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)** for the full walkthrough (config discovery order, env
 knobs, troubleshooting) and the host-owned (`MCP_COMPANION_COMBINER_URL`)
@@ -290,6 +294,10 @@ restarts:
 - **The OpenCode plugin** registers a per-instance token on its URL (all of an
   OpenCode instance's sessions share one MCP connection, so per-instance is
   its natural granularity).
+- **The Pi extension** carries a per-instance token on its `mcp.json` URL path
+  (`/mcp/<token>`), via `pi-mcp-adapter` — the same per-instance granularity as
+  OpenCode. (Owning the connection directly, for per-chat identity keyed on Pi's
+  durable session id, is a documented future option — see `plugins/pi`.)
 
 A connection with **no token** falls back to its wire `Mcp-Session-Id` as the
 grouping key — fine within one combiner lifetime, but that id is minted by the

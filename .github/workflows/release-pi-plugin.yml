@@ -1,0 +1,56 @@
+name: Release (pi-mcp-combiner)
+
+# Publishes the @geohar/pi-mcp-combiner npm plugin on the unified release tag (v*), in
+# lockstep with the whole repo — one vX.Y.Z tag releases the combiner pyproject, the
+# Claude Code plugin, the OpenCode plugin, and this Pi extension together. The
+# version-match check enforces plugins/pi/package.json == tag. Release: bump every
+# manifest with scripts/bump-version.sh <version>, then push the vX.Y.Z tag.
+#
+# Mirrors release-opencode-plugin.yml's shape: tag-triggered, trusted publishing
+# (OIDC, no secrets), an environment gate. npm equivalent of PyPI Trusted Publishing:
+#
+#   One-time setup at https://www.npmjs.com/ → the package → Settings → Trusted
+#   Publisher (or create the publisher first if the package is new), with:
+#       repository:   georgeharker/mcp-companion
+#       workflow:     release-pi-plugin.yml
+#       environment:  npm
+#   Reuses the same GitHub environment named "npm" the OpenCode release uses.
+#
+# No NPM_TOKEN needed once the trusted publisher is configured — OIDC authenticates
+# the publish and generates provenance.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write          # OIDC: trusted publishing + provenance
+      contents: read
+    defaults:
+      run:
+        working-directory: plugins/pi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          # NB: no registry-url — it writes an .npmrc expecting NODE_AUTH_TOKEN,
+          # which shadows OIDC trusted publishing and makes `npm publish` 404.
+      - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+      - name: Verify tag matches package version
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag v$tag does not match plugin version $pkg — bump plugins/pi/package.json"
+            exit 1
+          fi
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - name: Publish to npm (trusted publishing + provenance)
+        run: npm publish --provenance --access public

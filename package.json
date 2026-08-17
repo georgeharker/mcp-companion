@@ -1,0 +1,9 @@
+{
+  "name": "mcp-companion-pi-shim",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Root shim so `pi install git:github.com/georgeharker/mcp-companion` finds the Pi extension under plugins/pi. Not published — the installable npm package is @geohar/pi-mcp-combiner (published from plugins/pi). Kept minimal: no dependencies, no \"type\", no \"workspaces\", so it stays invisible to combiner/pyproject.toml and to scripts/bump-version.sh.",
+  "pi": {
+    "extensions": ["./plugins/pi/src/index.ts"]
+  }
+}

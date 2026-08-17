@@ -18,6 +18,7 @@ Everything lives in the [overview and quick start](README.md):
 |------------|---------|
 | Use the combiner from **Claude Code** | [Install the Claude Code plugin](plugins/README.md#claude-code--mcp-combiner) |
 | Use the combiner from **OpenCode** | [Install the OpenCode plugin](plugins/README.md#opencode--geoharopencode-mcp-combiner) |
+| Use the combiner from **Pi** | [Install the Pi extension](plugins/README.md#pi--geoharpi-mcp-combiner) |
 | Run the combiner standalone | [MCP Combiner (standalone)](README.md#mcp-combiner-standalone) |
 | Write a servers config | [MCP Server Config](README.md#mcp-server-config) |
 | Set up OAuth / bearer auth | [Authentication](README.md#authentication) |
