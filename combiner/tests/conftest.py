@@ -40,6 +40,16 @@ FAST_TIMING_ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep an ambient ``MCP_COMBINER_AUTH_TOKEN`` (from the developer's shell or
+    secrets injection) out of tests. Otherwise ``create_app`` / a spawned combiner
+    reads it, enables inbound bearer auth, and every round-trip 401s. Tests that
+    exercise auth set it explicitly via ``monkeypatch.setenv`` (which runs after
+    this and wins)."""
+    monkeypatch.delenv("MCP_COMBINER_AUTH_TOKEN", raising=False)
+
+
 def free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
