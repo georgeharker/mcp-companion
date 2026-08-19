@@ -151,6 +151,19 @@ end
 ---
 ---@param opts { url: string, method: string?, headers: table<string,string>?, body: string?, timeout: number?, callback: fun(response: {status: integer, body: string}) }
 function M.request(opts)
+    -- Present the combiner's inbound bearer when it is locked down
+    -- (MCP_COMBINER_AUTH_TOKEN). Every caller of this helper is combiner-bound
+    -- (the control channel + /sessions filter REST), and the combiner's gate now
+    -- covers /sessions and /handover too — so these calls must carry the token.
+    -- os.getenv, not vim.env: this may run in a fast event context. Never clobber
+    -- an Authorization the caller set explicitly.
+    local tok = os.getenv("MCP_COMBINER_AUTH_TOKEN")
+    if tok and tok ~= "" then
+        opts.headers = opts.headers or {}
+        if not opts.headers["Authorization"] and not opts.headers["authorization"] then
+            opts.headers["Authorization"] = "Bearer " .. tok
+        end
+    end
     if has_vim_net then
         -- request_vim_net(opts)  -- enable when vim.net is ready
         request_curl(opts)

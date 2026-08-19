@@ -22,7 +22,8 @@ import types
 import uvicorn
 
 from mcp_combiner import ctl
-from mcp_combiner.asgi import ServeOptions, create_app, resolve_auth_token
+from mcp_combiner.asgi import ServeOptions, create_app
+from mcp_combiner.inbound_auth import resolve_auth_token
 from mcp_combiner.schemafix import SCHEMA_FIXES
 from mcp_combiner.sharedserver import cleanup as cleanup_sharedservers
 
@@ -272,7 +273,7 @@ def _serve(args: argparse.Namespace) -> None:
         restore=args.restore,
         log_file=args.log_file,
         log_level=args.log_level,
-        auth_token=resolve_auth_token(args.auth_token_file),
+        auth_token=resolve_auth_token("MCP_COMBINER_AUTH_TOKEN", args.auth_token_file),
     )
 
     _setup_logging(options.log_level, options.log_file)

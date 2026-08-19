@@ -9,19 +9,17 @@ goes through RUNTIME instead of reaching into server-module privates.
 
 from __future__ import annotations
 
-import hmac
 import logging
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
 
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request as StarletteRequest
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 
+from mcp_combiner.inbound_auth import BearerAuthMiddleware, resolve_auth_token
 from mcp_combiner.runtime import RUNTIME
 from mcp_combiner.server import create_combiner
 from mcp_combiner.sharedserver import register_for_cleanup
@@ -95,81 +93,32 @@ class ServeOptions:
             input_validation=_tristate("MCP_COMBINER_INPUT_VALIDATION"),
             output_validation=_tristate("MCP_COMBINER_OUTPUT_VALIDATION"),
             stale_tool_grace=float(grace_env) if grace_env else None,
-            auth_token=resolve_auth_token(None),
+            auth_token=resolve_auth_token("MCP_COMBINER_AUTH_TOKEN"),
         )
 
 
-def resolve_auth_token(token_file: str | None) -> str | None:
-    """Resolve the inbound bearer token that gates the /mcp surface.
+def combiner_protected_path(path: str) -> bool:
+    """The combiner's protected surface for :class:`BearerAuthMiddleware`.
 
-    Precedence: an explicit ``--auth-token-file`` (daemon-side convenience) wins
-    over the ``MCP_COMBINER_AUTH_TOKEN`` env var. Blank / whitespace-only / an
-    unreadable file all resolve to ``None``, which leaves the endpoint OPEN —
-    the default, so nothing changes until a token is provisioned. Env delivery
-    is the operator's job (secrets injection); the combiner never generates or
-    persists a token itself.
+    Gates the ``/mcp`` tool endpoint AND the control routes that mutate session
+    state or arm a handover (``/sessions*``, ``/handover*``) — those manipulate
+    the running server and must not be reachable unauthenticated once a token is
+    set. ``/health`` stays OPEN: it carries no state and liveness probes / ops /
+    the Neovim host poll it without a bearer.
+
+    Widening here has a corollary: the combiner's OWN control callers must now
+    present the token — the ``mcp-combiner`` ctl (``_auth_headers`` in ctl.py) and
+    the Neovim host's REST client (http.lua) both do.
     """
-    if token_file:
-        try:
-            tok = Path(token_file).read_text(encoding="utf-8").strip()
-        except OSError as e:
-            logger.error("auth: could not read --auth-token-file %s (%s)", token_file, e)
-            tok = ""
-        if tok:
-            return tok
-        logger.warning(
-            "auth: --auth-token-file %s yielded no token; /mcp stays unauthenticated", token_file
-        )
-    env_tok = (os.environ.get("MCP_COMBINER_AUTH_TOKEN") or "").strip()
-    return env_tok or None
-
-
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Require ``Authorization: Bearer <token>`` on the /mcp tool surface.
-
-    Installed ONLY when a token is configured (see :func:`resolve_auth_token`);
-    when absent the middleware is not added at all, so the default remains an
-    unauthenticated localhost endpoint.
-
-    Scope is deliberately the /mcp path family only — the tool-execution and
-    upstream-data surface. ``/health`` and the localhost ``/sessions*`` control
-    routes are left open: they carry no tool access, and the Neovim host / ops
-    drive them without presenting the bearer.
-
-    It does NOT advertise OAuth: a missing/wrong token returns a plain 401 with
-    NO ``WWW-Authenticate: Bearer`` header, precisely so standards clients (e.g.
-    pi-mcp-adapter, whose probe keys on a Bearer challenge) surface an honest
-    auth failure instead of falling into Dynamic Client Registration. Our
-    clients present the token pre-emptively, so no challenge is needed.
-    """
-
-    def __init__(self, app: Any, token: str) -> None:
-        super().__init__(app)
-        self._token = token
-
-    @staticmethod
-    def _extract_bearer(header: str | None) -> str | None:
-        if not header:
-            return None
-        scheme, _, value = header.partition(" ")
-        if scheme.lower() != "bearer":
-            return None
-        value = value.strip()
-        return value or None
-
-    async def dispatch(
-        self, request: StarletteRequest, call_next: RequestResponseEndpoint
-    ) -> Response:
-        path = request.url.path
-        if path == "/mcp" or path.startswith("/mcp/"):
-            provided = self._extract_bearer(request.headers.get("authorization"))
-            # Constant-time compare; the guard keeps compare_digest off ``None``.
-            if provided is None or not hmac.compare_digest(provided, self._token):
-                _mcp_log.warning(
-                    "auth: rejected %s %s (missing/invalid bearer)", request.method, path
-                )
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+    if path == "/health":
+        return False
+    return (
+        path == "/mcp"
+        or path.startswith("/mcp/")
+        or path == "/sessions"
+        or path.startswith("/sessions/")
+        or path.startswith("/handover")
+    )
 
 
 class TokenRewriteMiddleware(BaseHTTPMiddleware):
@@ -402,6 +351,8 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
     # request is rejected before any token rewrite or session bookkeeping runs.
     # Only installed when a token is configured; otherwise the endpoint is open.
     if options.auth_token:
-        app.add_middleware(BearerAuthMiddleware, token=options.auth_token)
-        logger.info("auth: inbound bearer required on /mcp")
+        app.add_middleware(
+            BearerAuthMiddleware, token=options.auth_token, is_protected=combiner_protected_path
+        )
+        logger.info("auth: inbound bearer required on /mcp, /sessions, /handover")
     return app

@@ -50,8 +50,11 @@ mcp-combiner --config … --auth-token-file ~/secrets/combiner-token
 
 - Unset (both) → endpoint stays open (default; nothing changes).
 - `--auth-token-file` wins over the env var; a blank/unreadable file → stays open.
-- Scope is the `/mcp` tool surface only; `/health` and the localhost `/sessions*`
-  control routes are left open.
+- **Scope**: `/mcp` **and** the control routes that mutate the running server —
+  `/sessions*` (session filters) and `/handover*` (restart handover). `/health`
+  stays open for liveness probes. Because the control routes are gated, the
+  combiner's own callers present the token too: the `mcp-combiner` ctl and the
+  Neovim host's REST client both read `MCP_COMBINER_AUTH_TOKEN`.
 - A missing/wrong token gets a plain `401` — no `WWW-Authenticate: Bearer`, so
   standards clients surface an honest auth error instead of falling into OAuth /
   Dynamic Client Registration. Clients present the token pre-emptively.
@@ -59,6 +62,36 @@ mcp-combiner --config … --auth-token-file ~/secrets/combiner-token
 The companion clients pick the token up from the **same `MCP_COMBINER_AUTH_TOKEN`
 env var** (Claude Code, OpenCode, Pi, and the Neovim host) — provision it once in
 your environment (or via each client's documented hook) and it flows to all of them.
+
+### Reusing the gate on other FastMCP servers
+
+The middleware lives in `mcp_combiner/inbound_auth.py` and is **self-contained**
+(stdlib + starlette only), so a sibling FastMCP server (e.g. `cribsheet`,
+`svg-mcp`) can vendor the file and gate its own `/mcp`. Each server names its own
+env var — set them to the same value for one shared secret, or distinct values for
+per-service isolation:
+
+| server | env var |
+|---|---|
+| mcp-combiner | `MCP_COMBINER_AUTH_TOKEN` |
+| cribsheet | `CRIBSHEET_AUTH_TOKEN` |
+| svg-mcp | `SVG_MCP_AUTH_TOKEN` |
+
+```python
+from inbound_auth import BearerAuthMiddleware, resolve_auth_token
+
+token = resolve_auth_token("CRIBSHEET_AUTH_TOKEN")   # or a --auth-token-file
+if token:
+    app.add_middleware(
+        BearerAuthMiddleware, token=token,
+        is_protected=lambda path: path != "/health",  # plain servers: gate all but health
+    )
+```
+
+The combiner, in turn, presents the backend's token when it connects — add it to
+that server's `servers.json` entry: `{"auth": {"bearer": "${CRIBSHEET_AUTH_TOKEN}"}}`
+(or a `headers` map). See [Authentication → Bearer token](../README.md#authentication)
+in the top-level README.
 
 ## Development
 

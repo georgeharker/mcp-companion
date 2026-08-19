@@ -33,11 +33,23 @@ def _base_url(args: argparse.Namespace) -> str:
     return f"http://{args.host}:{args.port}"
 
 
+def _auth_headers() -> dict[str, str]:
+    """Present the inbound bearer on ctl's HTTP / MCP calls when the combiner is
+    locked down (``MCP_COMBINER_AUTH_TOKEN``). ctl runs in the operator's shell,
+    so it inherits the same token; unset ⇒ no header and the endpoint is open.
+    Needed because gating widened past /mcp to the control routes ctl drives
+    (/sessions, /handover) — see asgi.combiner_protected_path."""
+    tok = (os.environ.get("MCP_COMBINER_AUTH_TOKEN") or "").strip()
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
 async def _rest(
     args: argparse.Namespace, method: str, path: str, body: Any | None = None
 ) -> tuple[int, Any]:
     async with httpx.AsyncClient() as http:
-        r = await http.request(method, f"{_base_url(args)}{path}", json=body, timeout=10.0)
+        r = await http.request(
+            method, f"{_base_url(args)}{path}", json=body, headers=_auth_headers(), timeout=10.0
+        )
         try:
             return r.status_code, r.json()
         except ValueError:
@@ -47,8 +59,10 @@ async def _rest(
 async def _call_meta(args: argparse.Namespace, tool: str, tool_args: dict[str, Any]) -> str:
     """Invoke a combiner__* meta-tool over a short-lived MCP control session."""
     from fastmcp import Client
+    from fastmcp.client.transports.http import StreamableHttpTransport
 
-    async with Client(f"{_base_url(args)}/mcp") as client:
+    transport = StreamableHttpTransport(f"{_base_url(args)}/mcp", headers=_auth_headers())
+    async with Client(transport) as client:
         result = await client.call_tool(tool, tool_args)
         parts = []
         for item in result.content:
@@ -279,7 +293,7 @@ async def _arm_handover(host: str, port: int, path: str) -> bool:
     url = f"http://{host}:{port}/handover/prepare"
     try:
         async with httpx.AsyncClient() as http:
-            r = await http.post(url, json={"path": path}, timeout=3.0)
+            r = await http.post(url, json={"path": path}, headers=_auth_headers(), timeout=3.0)
             return r.status_code == 200
     except httpx.HTTPError:
         return False

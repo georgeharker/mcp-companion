@@ -684,9 +684,10 @@ the moment you bind beyond `127.0.0.1`. Set an inbound **bearer token** and ever
 client must present `Authorization: Bearer <token>`:
 
 - **Combiner**: `MCP_COMBINER_AUTH_TOKEN` env, or `--auth-token-file PATH` (the file
-  wins). Unset ⇒ open (default; nothing changes). Only the `/mcp` tool surface is
-  gated; `/health` and the localhost `/sessions*` control routes stay open. A
-  missing/wrong token gets a plain `401` — no OAuth challenge advertised.
+  wins). Unset ⇒ open (default; nothing changes). Gates `/mcp` **and** the control
+  routes that mutate the server (`/sessions*`, `/handover*`); `/health` stays open.
+  A missing/wrong token gets a plain `401` — no OAuth challenge advertised. (The
+  `mcp-combiner` ctl and the Neovim host present the token automatically.)
 - **Neovim**: set `combiner.auth_token` (or export `MCP_COMBINER_AUTH_TOKEN`) — it is
   passed to the spawned combiner AND presented by the plugin's own HTTP client:
 
@@ -699,6 +700,15 @@ client must present `Authorization: Bearer <token>`:
 - **Claude Code / OpenCode / Pi**: each reads the same `MCP_COMBINER_AUTH_TOKEN`
   from its environment and sends the bearer automatically (Pi via the
   `/mcp-combiner install-config` command). See the combiner and per-plugin READMEs.
+
+**Backends behind the combiner** (`cribsheet`, `svg-mcp`, …) are their own loopback
+HTTP servers, so the combiner's bearer does **not** cover a local process hitting
+them directly. Each can gate its own `/mcp` by vendoring the combiner's
+`inbound_auth.py` (self-contained) and naming its own env var — `CRIBSHEET_AUTH_TOKEN`,
+`SVG_MCP_AUTH_TOKEN` (set them to the same value for one shared secret, or distinct
+for isolation). The combiner then presents that token via the backend's `servers.json`
+entry: `{"auth": {"bearer": "${CRIBSHEET_AUTH_TOKEN}"}}`. See the combiner README's
+[Reusing the gate](combiner/README.md#reusing-the-gate-on-other-fastmcp-servers).
 
 ---
 
