@@ -320,11 +320,14 @@ def create_combiner(
         local_servers: list[str] = []
         for name, srv in enabled.items():
             # isolate is HTTP/SSE-only; an explicit true on a stdio server can't
-            # be honoured (it would need a subprocess per chat).
+            # be honoured (it would need a subprocess per chat, a deliberate
+            # non-goal). All chats share the one stdio session — surface that a
+            # stateful stdio server will bleed state across chats.
             if srv.isolate and not conn_manager.is_http_server(srv):
                 logger.warning(
-                    "Server '%s': isolate=true ignored — only HTTP/SSE servers "
-                    "support per-chat sessions (stdio has one session per process)",
+                    "Server '%s': isolate=true ignored — stdio has one session per "
+                    "process, so all chats share it (a stateful server leaks state "
+                    "across chats). Run it over HTTP/SSE for per-chat sessions.",
                     name,
                 )
 

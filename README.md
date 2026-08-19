@@ -278,6 +278,16 @@ upstream session per chat** (still one upstream server *instance*, shared
 transport). The server is handed a distinct, stable `Mcp-Session-Id` per chat
 and partitions its per-session state automatically — no clash.
 
+> **stdio servers cannot be isolated.** `isolate` is **HTTP/SSE-only**: a stdio
+> server is one subprocess with a single MCP session, so `"isolate": true` on a
+> stdio entry is **ignored** (with a startup warning) and *all chats share its one
+> session* — a stateful stdio server therefore leaks state across chats (one
+> global "current document" for everyone). True per-chat isolation would require
+> spawning **a subprocess per chat**, which the combiner deliberately does not do
+> (unbounded processes for a marginal case). If you need per-chat state, run the
+> server over **HTTP/SSE** and set `isolate: true` there — which is exactly why the
+> stateful sibling servers (svg-mcp, cribsheet) are HTTP, not stdio.
+
 #### Chat identity — grouping tokens
 
 "Per chat" is keyed by the chat's **grouping token** (the
