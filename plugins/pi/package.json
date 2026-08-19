@@ -26,6 +26,7 @@
         "prepublishOnly": "npm run clean && npm run build"
     },
     "keywords": [
+        "pi-package",
         "pi",
         "pi-extension",
         "pi-mono",
