@@ -1,6 +1,6 @@
 {
     "name": "@geohar/pi-mcp-combiner",
-    "version": "0.11.2",
+    "version": "0.12.0",
     "description": "Pi extension: run the mcp-combiner MCP aggregator via sharedserver and inject its tool-discovery directive. Pairs with pi-mcp-adapter, which makes the combiner's tools reachable from Pi.",
     "type": "module",
     "main": "dist/index.js",
