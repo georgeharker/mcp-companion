@@ -543,8 +543,13 @@ const McpCombinerPlugin: Plugin = async ({ client }, options) => {
             log("info", `mcp "${mcpName}" already configured by the user; leaving as-is`)
             return
         }
-        cfg.mcp[mcpName] = { type: "remote", url, enabled: true }
-        log("info", `registered mcp "${mcpName}" → ${url}`)
+        // When the combiner is locked down (MCP_COMBINER_AUTH_TOKEN), present the
+        // bearer on every request. Unset → no header, endpoint is open. Env
+        // delivery is the user's (secrets injection); the token is not persisted.
+        const authToken = process.env.MCP_COMBINER_AUTH_TOKEN?.trim()
+        const headers = authToken ? { Authorization: `Bearer ${authToken}` } : undefined
+        cfg.mcp[mcpName] = { type: "remote", url, enabled: true, ...(headers ? { headers } : {}) }
+        log("info", `registered mcp "${mcpName}" → ${url}${headers ? " (bearer auth)" : ""}`)
     }
     // The directive: appended to the system prompt each session (analogue of the CC
     // plugin's SessionStart additionalContext). Contributed unconditionally — the

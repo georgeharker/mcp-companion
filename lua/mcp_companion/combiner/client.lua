@@ -302,6 +302,17 @@ function Client:_http_request(method, path, body, timeout_ms, callback)
             table.insert(headers, "X-MCP-Combiner-Session: " .. self.token)
         end
 
+        -- Present the inbound bearer when the combiner is locked down. Sourced
+        -- from MCP_COMBINER_AUTH_TOKEN (inherited env, or exported from a Lua
+        -- auth_token by combiner.setup). Absent → endpoint is open, no header.
+        -- NB: os.getenv, not vim.env — this runs inside the libuv TCP callback
+        -- (a "fast event context") where vim.env's getenv is disallowed. A
+        -- vim.env assignment in setup calls setenv, so os.getenv still sees it.
+        local auth_token = os.getenv("MCP_COMBINER_AUTH_TOKEN")
+        if auth_token and auth_token ~= "" then
+            table.insert(headers, "Authorization: Bearer " .. auth_token)
+        end
+
         if body then
             table.insert(headers, "Content-Length: " .. #body)
         else

@@ -676,6 +676,30 @@ require("mcp_companion").setup({
 When you change the encryption key, existing cached tokens become unreadable and you'll
 need to re-authenticate with OAuth servers.
 
+### Inbound authentication (locking down `/mcp`)
+
+The above is backend auth (combiner → upstream servers). Separately, the combiner's
+own `/mcp` endpoint is **unauthenticated by default** — fine on loopback, but open
+the moment you bind beyond `127.0.0.1`. Set an inbound **bearer token** and every
+client must present `Authorization: Bearer <token>`:
+
+- **Combiner**: `MCP_COMBINER_AUTH_TOKEN` env, or `--auth-token-file PATH` (the file
+  wins). Unset ⇒ open (default; nothing changes). Only the `/mcp` tool surface is
+  gated; `/health` and the localhost `/sessions*` control routes stay open. A
+  missing/wrong token gets a plain `401` — no OAuth challenge advertised.
+- **Neovim**: set `combiner.auth_token` (or export `MCP_COMBINER_AUTH_TOKEN`) — it is
+  passed to the spawned combiner AND presented by the plugin's own HTTP client:
+
+  ```lua
+  require("mcp_companion").setup({
+      combiner = { auth_token = "…" },  -- or read from your own secret store
+  })
+  ```
+
+- **Claude Code / OpenCode / Pi**: each reads the same `MCP_COMBINER_AUTH_TOKEN`
+  from its environment and sends the bearer automatically (Pi via the
+  `/mcp-combiner install-config` command). See the combiner and per-plugin READMEs.
+
 ---
 
 ## Neovim Integration

@@ -22,7 +22,7 @@ import types
 import uvicorn
 
 from mcp_combiner import ctl
-from mcp_combiner.asgi import ServeOptions, create_app
+from mcp_combiner.asgi import ServeOptions, create_app, resolve_auth_token
 from mcp_combiner.schemafix import SCHEMA_FIXES
 from mcp_combiner.sharedserver import cleanup as cleanup_sharedservers
 
@@ -175,6 +175,18 @@ def _add_serve_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--auth-token-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Require inbound clients to present 'Authorization: Bearer <token>' "
+            "on /mcp, verified against the token read from this file. A daemon-side "
+            "alternative to the MCP_COMBINER_AUTH_TOKEN env var (the file wins if "
+            "both are set). Unset by both => the endpoint is unauthenticated "
+            "(default), so nothing changes until a token is provisioned."
+        ),
+    )
+    parser.add_argument(
         "--log-file",
         metavar="PATH",
         default=None,
@@ -260,6 +272,7 @@ def _serve(args: argparse.Namespace) -> None:
         restore=args.restore,
         log_file=args.log_file,
         log_level=args.log_level,
+        auth_token=resolve_auth_token(args.auth_token_file),
     )
 
     _setup_logging(options.log_level, options.log_file)

@@ -1,7 +1,9 @@
 {
   "mcpServers": {
     "mcp-combiner": {
-      "url": "http://127.0.0.1:9741/mcp"
+      "url": "http://127.0.0.1:9741/mcp",
+      "auth": "bearer",
+      "bearerTokenEnv": "MCP_COMBINER_AUTH_TOKEN"
     }
   }
 }

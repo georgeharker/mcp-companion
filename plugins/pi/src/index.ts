@@ -27,7 +27,7 @@
 // to "which combiner / which sharedserver am I on, and why".
 
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -277,17 +277,27 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         return { systemPrompt: `${event.systemPrompt}\n\n${COMBINER_DIRECTIVE}` }
     })
 
-    // ── /mcp-combiner command: inspect the extension (verb: system-prompt) ──
+    // ── /mcp-combiner command: inspect + configure the extension ──
+    // verbs: system-prompt (show the injected directive), install-config (write
+    // the pi-mcp-adapter mcp.json entry, incl. bearer-auth wiring).
     pi.registerCommand("mcp-combiner", {
-        description: "mcp-combiner extension — verb: system-prompt (show the injected directive)",
+        description: "mcp-combiner — verbs: system-prompt (show directive), install-config [path] (write mcp.json)",
         getArgumentCompletions: (prefix) => completeVerbs(prefix),
         handler: (args, ctx) => {
-            const verb = args.trim()
-            if (verb === "" || verb === "system-prompt") {
+            const [verb, ...rest] = args.trim().split(/\s+/)
+            const v = verb ?? ""
+            if (v === "" || v === "system-prompt") {
                 showDirective(ctx, "mcp-combiner", COMBINER_DIRECTIVE, wantInstructions)
                 return
             }
-            ctx.ui?.notify?.(`mcp-combiner: unknown verb "${verb}". Try: system-prompt`, "warn")
+            if (v === "install-config") {
+                installConfig(ctx, rest.join(" ").trim() || undefined)
+                return
+            }
+            ctx.ui?.notify?.(
+                `mcp-combiner: unknown verb "${v}". Try: system-prompt, install-config`,
+                "warn",
+            )
         },
     })
 
@@ -409,7 +419,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
 // directive this extension injects — the show-command pattern from pi-custom-system-prompt,
 // since `before_agent_start` injections are per-turn and never appear in Pi's own
 // `/system-prompt` (which reports the base prompt only).
-const COMMAND_VERBS = ["system-prompt"]
+const COMMAND_VERBS = ["system-prompt", "install-config"]
 function completeVerbs(prefix: string): AutocompleteItem[] | null {
     const p = prefix.trim()
     const matches = COMMAND_VERBS.filter((v) => v.startsWith(p))
@@ -430,6 +440,97 @@ function showDirective(ctx: ExtensionCommandContext, label: string, directive: s
             ? `${directive.slice(0, SHOW_LIMIT)}\n\n… (${directive.length} chars total)`
             : directive
     ctx.ui?.notify?.(`${head}\n\n${body}`, "info")
+}
+
+// ── /mcp-combiner install-config: write the pi-mcp-adapter mcp.json entry ──
+// A USER-INVOKED write (not the extension silently managing another extension's
+// config): on request, merge the combiner entry into pi-mcp-adapter's mcp.json,
+// wired for the combiner's optional inbound bearer auth:
+//
+//   { "url": "…/mcp", "auth": "bearer", "bearerTokenEnv": "MCP_COMBINER_AUTH_TOKEN" }
+//
+// - auth:"bearer" → the adapter attaches `Authorization: Bearer <token>` (it gates
+//   the header on `auth === "bearer"` — NOT on bearerTokenEnv alone, and never when
+//   auth is false/undefined), AND makes supportsOAuth() false so a wrong/missing
+//   token surfaces as an honest 401 instead of a Dynamic-Client-Registration 404.
+// - bearerTokenEnv → names the env var the token is read from at connect (nothing
+//   written to disk). Combiner enforces only when MCP_COMBINER_AUTH_TOKEN is set on
+//   ITS side; unset ⇒ open, the env var is unset here too so no header is sent.
+// The one shape is correct whether or not auth is enabled.
+
+function expandHome(p: string): string {
+    if (p === "~") return homedir()
+    if (p.startsWith("~/")) return join(homedir(), p.slice(2))
+    return p
+}
+
+/** The URL the adapter should reach the combiner at — the host-owned URL if an
+ *  editor supervises it, else host:port/mcp with the same defaults the extension
+ *  serves on. A grouping-path token, if wanted, is preserved from any existing
+ *  entry rather than invented here. */
+function defaultCombinerUrl(): string {
+    const explicit = env("MCP_COMPANION_COMBINER_URL")
+    if (explicit) return explicit
+    const host = env("PI_MCP_COMBINER_HOST") ?? "127.0.0.1"
+    let port = DEFAULT_PORT
+    const raw = env("PI_MCP_COMBINER_PORT")
+    if (raw !== undefined) {
+        const n = Number(raw)
+        if (Number.isInteger(n) && n > 0) port = n
+    }
+    return `http://${host}:${port}/mcp`
+}
+
+function installConfig(ctx: ExtensionCommandContext, pathArg?: string): void {
+    const target = pathArg ? expandHome(pathArg) : join(homedir(), ".config", "mcp", "mcp.json")
+    const key = "mcp-combiner"
+
+    // Read + parse existing (tolerate absence; refuse to clobber non-JSON).
+    let doc: Record<string, unknown> = {}
+    if (existsSync(target)) {
+        try {
+            const parsed = JSON.parse(readFileSync(target, "utf8"))
+            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+                ctx.ui?.notify?.(`mcp-combiner: ${target} is not a JSON object; not overwriting`, "error")
+                return
+            }
+            doc = parsed as Record<string, unknown>
+        } catch (e) {
+            ctx.ui?.notify?.(`mcp-combiner: ${target} is not valid JSON; not overwriting (${e})`, "error")
+            return
+        }
+    }
+
+    const servers = (doc.mcpServers ??= {}) as Record<string, Record<string, unknown>>
+    const prev = (servers[key] ?? {}) as Record<string, unknown>
+    const before = JSON.stringify(prev)
+    // Preserve any existing url (e.g. a /mcp/<token> grouping path the user set)
+    // and any other fields; only ensure the three auth-wiring keys.
+    servers[key] = {
+        ...prev,
+        url: typeof prev.url === "string" && prev.url ? prev.url : defaultCombinerUrl(),
+        auth: "bearer",
+        bearerTokenEnv: "MCP_COMBINER_AUTH_TOKEN",
+    }
+    const existed = before !== "{}" && Object.keys(prev).length > 0
+    const changed = before !== JSON.stringify(servers[key])
+
+    try {
+        mkdirSync(dirname(target), { recursive: true })
+        writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8")
+    } catch (e) {
+        ctx.ui?.notify?.(`mcp-combiner: failed to write ${target} (${e})`, "error")
+        return
+    }
+
+    const what = !existed ? "added" : changed ? "updated" : "already configured"
+    ctx.ui?.notify?.(
+        `mcp-combiner: ${what} "${key}" in ${target}\n` +
+            `Sends "Authorization: Bearer $MCP_COMBINER_AUTH_TOKEN" when that env var is set ` +
+            `(auth:"bearer" both sends the token and suppresses OAuth probing). ` +
+            `Run /reload so pi-mcp-adapter re-reads mcp.json.`,
+        "info",
+    )
 }
 
 function makeLog(ctx: ExtensionContext, notify: boolean): LogFn {

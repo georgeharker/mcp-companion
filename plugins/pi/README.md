@@ -57,11 +57,35 @@ project-local `.pi/mcp.json`, or global `~/.config/mcp/mcp.json`:
 {
   "mcpServers": {
     "mcp-combiner": {
-      "url": "http://127.0.0.1:9741/mcp"
+      "url": "http://127.0.0.1:9741/mcp",
+      "auth": "bearer",
+      "bearerTokenEnv": "MCP_COMBINER_AUTH_TOKEN"
     }
   }
 }
 ```
+
+Or let the extension write it for you — **`/mcp-combiner install-config`** merges
+exactly this entry into `~/.config/mcp/mcp.json` (or a path you pass), preserving
+any other servers and any existing `url` you set. (It only writes when you ask —
+the extension never edits the adapter's config on its own.)
+
+`"auth": "bearer"` with `"bearerTokenEnv"` is the correct single pairing — it does
+two jobs at once:
+
+- **Sends the token.** `pi-mcp-adapter` only attaches `Authorization: Bearer …`
+  when `auth === "bearer"` (`server-manager.ts`); `bearerTokenEnv` names the env
+  var it reads at connect. So if you lock the combiner down with an inbound bearer
+  (`MCP_COMBINER_AUTH_TOKEN`, see the combiner README), the header is presented —
+  nothing is written to disk. **Note:** `bearerTokenEnv` alone, or with `auth:
+  false`, does **not** send the header — the adapter gates it on `auth === "bearer"`.
+- **Suppresses OAuth.** `auth: "bearer"` also makes the adapter's `supportsOAuth()`
+  false, so a wrong/missing-token 401 surfaces as an honest error instead of the
+  spurious `Failed to start OAuth … DCR rejected (HTTP 404)` probe.
+
+Harmless when the combiner is **open**: the env var is unset, so no header is sent,
+the endpoint returns 200, and OAuth still never fires. So this one entry is correct
+whether or not inbound auth is enabled.
 
 (See [`mcp.json.example`](./mcp.json.example).) To give this Pi instance its own chat
 identity toward the combiner — parking its isolated upstream sessions separately — add a

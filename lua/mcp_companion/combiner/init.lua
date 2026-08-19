@@ -23,6 +23,14 @@ M._job = nil
 function M.setup(config)
     _config = config
     _configured = true
+    -- A Lua-supplied auth token is exported so it is inherited uniformly: the
+    -- spawned combiner enforces it (read at serve time) and this plugin's HTTP
+    -- client presents it (both read MCP_COMBINER_AUTH_TOKEN). An already-set env
+    -- var is left untouched — inherited env is the other supported source.
+    local tok = config.combiner and config.combiner.auth_token
+    if tok and tok ~= "" then
+        vim.env.MCP_COMBINER_AUTH_TOKEN = tok
+    end
 end
 
 --- Start the combiner process and connect
@@ -159,6 +167,14 @@ local function _combiner_env()
     -- Pass encryption key if configured
     if _config.combiner.token_key then
         env.MCP_COMBINER_TOKEN_KEY = _config.combiner.token_key
+    end
+    -- Pass the inbound bearer token so the spawned combiner enforces it. Sourced
+    -- from vim.env, which covers BOTH inherited env and a Lua-set auth_token
+    -- (M.setup exports the latter there). Set explicitly rather than relying on
+    -- env inheritance, since the spawn env is this table.
+    local auth_token = vim.env.MCP_COMBINER_AUTH_TOKEN
+    if auth_token and auth_token ~= "" then
+        env.MCP_COMBINER_AUTH_TOKEN = auth_token
     end
     return env
 end

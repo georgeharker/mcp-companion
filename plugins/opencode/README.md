@@ -87,6 +87,15 @@ all defaults.
 | `manage` | `true` | Start the combiner. `false` → **register only** (something else runs it). |
 | `notify` | `true` | Show TUI toasts for attach/health outcomes. |
 
+### Inbound authentication
+
+If the combiner is locked down with an inbound bearer token (see the combiner
+README), set **`MCP_COMBINER_AUTH_TOKEN`** in this plugin's environment. When
+present, the registered `mcp` entry carries `Authorization: Bearer <token>` on
+every request (and the same var is passed to the combiner when this plugin
+starts it). Unset → no header, and an unauthenticated combiner returns 200 as
+before. The token is read from the env only — never written to OpenCode's config.
+
 ### Combiner command resolution
 
 In priority order: `command` option → `$OPENCODE_MCP_COMBINER_COMMAND`

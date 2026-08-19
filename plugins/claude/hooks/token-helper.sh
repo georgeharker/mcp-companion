@@ -18,6 +18,39 @@
 
 set -u
 
+# --- Inbound auth (optional) --------------------------------------------------
+# When the combiner is locked down with a bearer token (MCP_COMBINER_AUTH_TOKEN),
+# EVERY connection must carry `Authorization: Bearer <token>` — independent of
+# the grouping token, and including the abstain case below. Unset => the combiner
+# is open and no auth header is emitted. Env delivery is the user's (secrets
+# injection). `emit` merges this with the X-MCP-Combiner-Session header so all
+# exit paths present a single, correct header object.
+auth_token="${MCP_COMBINER_AUTH_TOKEN:-}"
+
+# JSON-escape a value (backslash and doublequote only — sufficient for a header
+# value; the session token is separately sanitized to [A-Za-z0-9._-]).
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+# Print the header JSON object: Authorization (when a token is set) plus
+# X-MCP-Combiner-Session (when $1 is non-empty). Either may be absent → {}.
+emit() {
+  local sess="${1:-}"
+  local parts=()
+  if [[ -n "$auth_token" ]]; then
+    parts+=("\"Authorization\":\"Bearer $(json_escape "$auth_token")\"")
+  fi
+  if [[ -n "$sess" ]]; then
+    parts+=("\"X-MCP-Combiner-Session\":\"$sess\"")
+  fi
+  local IFS=,
+  printf '{%s}' "${parts[*]}"
+}
+
 # --- Abstain under a supervisor -----------------------------------------------
 # When the endpoint URL already carries a token in its path (/mcp/<token>),
 # a host editor (nvim / CodeCompanion) minted this session's identity and the
@@ -26,7 +59,9 @@ set -u
 url="${CLAUDE_CODE_MCP_SERVER_URL:-}"
 case "$url" in
   */mcp/?*)
-    printf '{}'
+    # Abstain on the SESSION token (the URL already carries one), but still
+    # present the bearer if the combiner requires it.
+    emit ""
     exit 0
     ;;
 esac
@@ -38,7 +73,7 @@ esac
 override="${MCP_COMBINER_CC_TOKEN:-}"
 override="${override//[^a-zA-Z0-9._-]/}"
 if [[ -n "$override" ]]; then
-  printf '{"X-MCP-Combiner-Session": "%s"}' "$override"
+  emit "$override"
   exit 0
 fi
 
@@ -60,8 +95,9 @@ find_claude_pid() {
 }
 
 if ! claude_pid="$(find_claude_pid)"; then
-  # No claude in the parent chain (unexpected): no identity to present.
-  printf '{}'
+  # No claude in the parent chain (unexpected): no identity to present, but the
+  # bearer (if configured) still must be.
+  emit ""
   exit 0
 fi
 
@@ -96,4 +132,4 @@ if [[ -z "$session_id" ]]; then
   (umask 077 && printf '%s' "$session_id" >"$token_file") 2>/dev/null
 fi
 
-printf '{"X-MCP-Combiner-Session": "cc-%s"}' "$session_id"
+emit "cc-$session_id"

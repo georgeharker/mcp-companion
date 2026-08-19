@@ -18,6 +18,10 @@ local M = {}
 --- @field startup_timeout number Seconds to wait for combiner health. Default 30.
 --- @field request_timeout number Default timeout for MCP requests in seconds. Default 60.
 --- @field token_key? string Encryption key for OAuth token storage (or set MCP_COMBINER_TOKEN_KEY env var)
+--- @field auth_token? string Inbound bearer token locking down the combiner's /mcp endpoint. When set,
+---   it is exported as MCP_COMBINER_AUTH_TOKEN so the spawned combiner enforces it AND this plugin's
+---   own HTTP client presents it. Leave nil to inherit MCP_COMBINER_AUTH_TOKEN from the environment
+---   (or to run unauthenticated when neither is set — the default).
 --- @field input_validation? boolean Tri-state JSON-schema validation of tool *input* arguments at the
 ---   combiner proxy. nil (default): leave the combiner default (off — inputs are coerced, not strictly
 ---   validated). true: force strict input validation on. false: force it off. Passed as
@@ -135,6 +139,13 @@ M.defaults = {
         startup_timeout = 30,
         request_timeout = 60,
         token_key = nil,
+        -- Inbound bearer token that locks down the combiner's /mcp endpoint.
+        -- Unset (default): inherit MCP_COMBINER_AUTH_TOKEN from the environment,
+        -- or run unauthenticated if that is also unset. Set here to supply the
+        -- token from Lua — it is exported as MCP_COMBINER_AUTH_TOKEN so the
+        -- spawned combiner enforces it and this plugin's HTTP client presents it:
+        --   auth_token = "…"   -- or better, read from your own secret store
+        auth_token = nil,
         log = {
             level = "info",
             file = true, -- true = default path, string = path, false = disabled
