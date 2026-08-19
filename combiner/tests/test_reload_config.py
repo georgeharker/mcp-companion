@@ -366,3 +366,75 @@ async def test_restart_stdio_empty_answer_keeps_slice_silent(
     finally:
         srv._server_tool_cache.pop("crib", None)
         srv._server_tool_seen.pop("crib", None)
+
+
+async def test_reload_added_stdio_primes_before_broadcast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reloading in a NEW stdio/sharedserver server must prime it (started →
+    ready) so its tools become listable, exactly as combiner__enable_server does.
+
+    Without the prime, reload mounts the server but broadcasts
+    tools/list_changed before the upstream can answer tools/list — clients
+    re-fetch and the new tools are absent, with no later notification once the
+    server primes. (HTTP-added servers escape this because _mount_server's
+    connect() fires on_tools_ready; stdio/sharedserver ones do not.)"""
+    import mcp_combiner.server as srv
+
+    cfg_path = tmp_path / "servers.json"
+    # An HTTP server that stays byte-identical across the reload, so only the
+    # added stdio server is touched.
+    _write(cfg_path, {"alpha": _http("http://localhost:1111/mcp")})
+    config = CombinerConfig.load(str(cfg_path))
+
+    combiner = FakeCombiner()
+    conn = FakeConnManager()
+    ss = FakeSSManager(sharedserver_backed={"crib"})
+
+    order: list[str] = []
+
+    from fastmcp.tools.function_tool import FunctionTool
+
+    async def _list_tools(self: Any) -> list[Any]:
+        order.append("list_tools")
+        return [
+            FunctionTool(
+                fn=lambda: None,
+                name="crib_ping",
+                description="",
+                parameters={"type": "object", "properties": {}},
+            )
+        ]
+
+    monkeypatch.setattr(FakeProvider, "list_tools", _list_tools)
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
+    monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
+    monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
+    monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
+    monkeypatch.setattr(toolcache_mod, "clear_tool_cache", lambda: order.append("clear"))
+
+    register_meta_tools(combiner, config, conn, ss)
+    # alpha mounted+connected from startup; crib is not present yet.
+    mount_server_provider(combiner, object(), "alpha")
+    conn.connected.add("alpha")
+
+    # Add a stdio server to the on-disk config and reload it in.
+    _write(
+        cfg_path,
+        {"alpha": _http("http://localhost:1111/mcp"), "crib": {"command": "true"}},
+    )
+
+    try:
+        result = await combiner.tools["combiner__reload_config"]()
+        assert "mounted=['crib']" in result
+        # The added stdio server was primed — its provider listed tools. This is
+        # exactly what the pre-fix reload skipped (list_tools never ran).
+        assert "list_tools" in order
+        # Primed strictly BEFORE any broadcast, never after.
+        assert order.index("list_tools") < order.index("invalidate")
+        # Its tools are now confirmed and listable.
+        assert "crib" in srv._server_tool_cache
+        assert [str(t.name) for t in srv._server_tool_cache["crib"]] == ["crib_ping"]
+    finally:
+        srv._server_tool_cache.pop("crib", None)
+        srv._server_tool_seen.pop("crib", None)

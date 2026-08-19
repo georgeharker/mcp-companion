@@ -346,7 +346,7 @@ def register_meta_tools(
         Returns:
             A summary of what changed.
         """
-        from mcp_combiner.toolcache import invalidate_tool_cache
+        from mcp_combiner.toolcache import invalidate_tool_cache, prime_server_tools
 
         try:
             new_cfg = CombinerConfig.load(config.config_path)
@@ -393,6 +393,15 @@ def register_meta_tools(
                 continue
             try:
                 await _mount_server(name, srv)
+                # Announce only once the server can list tools, mirroring
+                # combiner__enable_server. An HTTP server's connect() (inside
+                # _mount_server) already fired on_tools_ready, but a stdio/
+                # sharedserver upstream sits at "started" until it is primed —
+                # without this its tools never transition to ready, so the
+                # invalidate_tool_cache() broadcast below reaches clients before
+                # the new tools exist and they never appear on reload.
+                if not conn_manager.is_http_server(srv):
+                    await prime_server_tools(combiner, name)
                 mounted.append(name)
             except Exception as e:
                 failed.append(f"{name} ({e})")
