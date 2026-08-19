@@ -1,6 +1,6 @@
 {
   "name": "mcp-combiner",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Manage the mcp-combiner process across Claude Code sessions via the sharedserver CLI, and auto-register its HTTP endpoint as the 'mcp-combiner' MCP server. SessionStart attaches; SessionEnd detaches. Combiner survives Claude restarts within the grace period and is shared with other clients (nvim, OpenCode) that use the same name.",
   "author": {
     "name": "George Harker"
