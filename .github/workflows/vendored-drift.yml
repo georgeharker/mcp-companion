@@ -32,12 +32,23 @@ jobs:
       - name: Re-sync vendored files
         run: scripts/sync-vendored.sh
 
-      - name: Fail if the working tree changed
+      - name: Check for vendored drift (stamp-only lag warns, code drift fails)
         run: |
-          if ! git diff --quiet; then
-            echo "::error::vendored files are out of date — run scripts/sync-vendored.sh and commit"
-            git --no-pager diff --stat
-            git --no-pager diff
-            exit 1
+          changed="$(git diff --name-only)"
+          if [ -z "$changed" ]; then
+            echo "vendored files match upstream $(cat plugins/.sharedserver-version)"
+            exit 0
           fi
-          echo "vendored files match upstream $(cat plugins/.sharedserver-version)"
+          # Only the version stamp moved: the vendored CODE is byte-identical, upstream
+          # just cut a release that did not touch the resolver. Not drift worth failing
+          # on — warn so the stamp is refreshed on a future commit, but pass.
+          if [ "$changed" = "plugins/.sharedserver-version" ]; then
+            echo "::warning::vendored code is byte-identical to upstream; only the .sharedserver-version stamp lags. Run scripts/sync-vendored.sh and commit to refresh it."
+            git --no-pager diff plugins/.sharedserver-version
+            exit 0
+          fi
+          # Real drift: the vendored code itself differs from upstream.
+          echo "::error::vendored code is out of date — run scripts/sync-vendored.sh and commit"
+          git --no-pager diff --stat
+          git --no-pager diff
+          exit 1
