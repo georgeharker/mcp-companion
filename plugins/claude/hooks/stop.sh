@@ -23,10 +23,12 @@ find_claude_pid() {
   return 1
 }
 
-# Remove the chat-identity file the SessionStart hook wrote for token-helper.sh.
-# Unconditional (start.sh writes it even under a host nvim); best-effort.
+# Remove the relay files the SessionStart hook wrote for token-helper.sh — the
+# chat-identity token and the inbound-auth bearer. Unconditional (start.sh writes
+# them even under a host nvim); best-effort.
 if _claude_pid="$(find_claude_pid)"; then
-  rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/mcp-companion/cc-token-${_claude_pid}" 2>/dev/null
+  _state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/mcp-companion"
+  rm -f "$_state_dir/cc-token-${_claude_pid}" "$_state_dir/cc-bearer-${_claude_pid}" 2>/dev/null
 fi
 
 # Mirror start.sh: when launched under CodeCompanion / mcp-companion the combiner

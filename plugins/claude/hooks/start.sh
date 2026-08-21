@@ -119,10 +119,25 @@ if [[ -n "$_hook_input" ]]; then
 fi
 # Defense in depth: the value lands in an HTTP header — keep it to token-safe chars.
 _session_id="${_session_id//[^a-zA-Z0-9._-]/}"
-if [[ -n "$_session_id" ]] && _claude_pid="$(find_claude_pid)"; then
+if _claude_pid="$(find_claude_pid)"; then
   _token_dir="${XDG_STATE_HOME:-$HOME/.local/state}/mcp-companion"
   if mkdir -p "$_token_dir" 2>/dev/null; then
-    (umask 077 && printf '%s' "$_session_id" >"$_token_dir/cc-token-${_claude_pid}") 2>/dev/null
+    # Relay the inbound-auth bearer to token-helper.sh. This hook runs with the
+    # FULL environment — Claude Code does NOT redact SessionStart hooks — so it can
+    # read MCP_COMBINER_AUTH_TOKEN, which the headersHelper cannot: CC strips
+    # *TOKEN*/*KEY*/*SECRET*-named vars from that subprocess's env, and this var's
+    # name contains "TOKEN". Written BEFORE cc-token so the helper's existing
+    # wait-for-cc-token poll doubles as the bearer barrier (no extra latency).
+    # Unset/empty ⇒ remove any stale relay, so turning the lock-down OFF does not
+    # leave the helper presenting a dead bearer.
+    _bearer_file="$_token_dir/cc-bearer-${_claude_pid}"
+    if [[ -n "${MCP_COMBINER_AUTH_TOKEN:-}" ]]; then
+      (umask 077 && printf '%s' "${MCP_COMBINER_AUTH_TOKEN}" >"$_bearer_file") 2>/dev/null
+    else
+      rm -f "$_bearer_file" 2>/dev/null
+    fi
+    [[ -n "$_session_id" ]] &&
+      (umask 077 && printf '%s' "$_session_id" >"$_token_dir/cc-token-${_claude_pid}") 2>/dev/null
   fi
 fi
 

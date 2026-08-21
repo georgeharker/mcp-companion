@@ -18,14 +18,59 @@
 
 set -u
 
+# --- Find the claude process (same walk as start.sh) --------------------------
+# $PPID is the ephemeral hook-wrapper shell; walk the parent chain to the real
+# claude process. Used both to key the relay files start.sh wrote and, below,
+# as the private rendezvous key for the session id. Resolved ONCE, up front,
+# because the inbound-auth resolution that follows needs it too.
+find_claude_pid() {
+  local pid=$PPID
+  local comm
+  while [[ "$pid" -gt 1 ]]; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
+    [[ -z "$comm" ]] && break
+    if [[ "${comm##*/}" == "claude" ]]; then
+      echo "$pid"
+      return 0
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [[ -z "$pid" ]] && break
+  done
+  return 1
+}
+claude_pid="$(find_claude_pid || true)"
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/mcp-companion"
+
 # --- Inbound auth (optional) --------------------------------------------------
-# When the combiner is locked down with a bearer token (MCP_COMBINER_AUTH_TOKEN),
-# EVERY connection must carry `Authorization: Bearer <token>` — independent of
-# the grouping token, and including the abstain case below. Unset => the combiner
-# is open and no auth header is emitted. Env delivery is the user's (secrets
-# injection). `emit` merges this with the X-MCP-Combiner-Session header so all
-# exit paths present a single, correct header object.
+# When the combiner is locked down with a bearer token, EVERY connection must
+# carry `Authorization: Bearer <token>` — independent of the grouping token, and
+# including the abstain case below. Unset/empty => the combiner is open and no
+# auth header is emitted.
+#
+# The token is NOT read from this process's own env. Claude Code redacts
+# environment variables whose NAMES look secret-like (contain TOKEN/KEY/SECRET/…)
+# before spawning a headersHelper subprocess — and `MCP_COMBINER_AUTH_TOKEN`
+# contains "TOKEN", so it is ALWAYS stripped here even though the daemon (started
+# by the SessionStart hook, which is NOT redacted) sees it fine. So start.sh — in
+# its unredacted env — relays the token into `cc-bearer-<pid>`, mode 600, and we
+# read it back from there. The env var is still honoured first for non-CC clients
+# (nvim/OpenCode/Pi) that reach this file with an intact environment.
+read_bearer_relay() { # echoes the relayed bearer, or nothing
+  local f
+  [[ -z "$claude_pid" ]] && return 0
+  f="$state_dir/cc-bearer-${claude_pid}"
+  [[ -s "$f" ]] || return 0
+  local t
+  t="$(cat "$f" 2>/dev/null)"
+  printf '%s' "${t%$'\n'}"
+}
 auth_token="${MCP_COMBINER_AUTH_TOKEN:-}"
+# Best-effort immediate read: covers the early-return branches below. The normal
+# path re-reads after its session-id poll, which closes the SessionStart race
+# (start.sh writes cc-bearer BEFORE cc-token, so once the poll sees the token
+# file the bearer file is already there — no extra polling needed).
+[[ -z "$auth_token" ]] && auth_token="$(read_bearer_relay)"
 
 # JSON-escape a value (backslash and doublequote only — sufficient for a header
 # value; the session token is separately sanitized to [A-Za-z0-9._-]).
@@ -77,24 +122,7 @@ if [[ -n "$override" ]]; then
   exit 0
 fi
 
-# --- Find the claude process (same walk as start.sh) --------------------------
-find_claude_pid() {
-  local pid=$PPID
-  local comm
-  while [[ "$pid" -gt 1 ]]; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
-    [[ -z "$comm" ]] && break
-    if [[ "${comm##*/}" == "claude" ]]; then
-      echo "$pid"
-      return 0
-    fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [[ -z "$pid" ]] && break
-  done
-  return 1
-}
-
-if ! claude_pid="$(find_claude_pid)"; then
+if [[ -z "$claude_pid" ]]; then
   # No claude in the parent chain (unexpected): no identity to present, but the
   # bearer (if configured) still must be.
   emit ""
@@ -109,7 +137,7 @@ fi
 #
 # MCP connections race the SessionStart hook at startup; poll briefly (well
 # inside the helper's 10s budget) before falling back.
-token_file="${XDG_STATE_HOME:-$HOME/.local/state}/mcp-companion/cc-token-${claude_pid}"
+token_file="$state_dir/cc-token-${claude_pid}"
 for _ in 1 2 3 4 5 6; do
   [[ -s "$token_file" ]] && break
   sleep 0.5
@@ -131,5 +159,10 @@ if [[ -z "$session_id" ]]; then
   mkdir -p "$(dirname "$token_file")" 2>/dev/null
   (umask 077 && printf '%s' "$session_id" >"$token_file") 2>/dev/null
 fi
+
+# The session poll above doubles as the bearer barrier: start.sh writes
+# cc-bearer before cc-token, so if the token file is now present the bearer file
+# is too. Re-read if the up-front best-effort read raced ahead of the hook.
+[[ -z "$auth_token" ]] && auth_token="$(read_bearer_relay)"
 
 emit "cc-$session_id"
