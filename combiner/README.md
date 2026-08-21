@@ -63,6 +63,17 @@ The companion clients pick the token up from the **same `MCP_COMBINER_AUTH_TOKEN
 env var** (Claude Code, OpenCode, Pi, and the Neovim host) — provision it once in
 your environment (or via each client's documented hook) and it flows to all of them.
 
+> **Claude Code caveat.** Claude Code strips secret-looking env-var names
+> (`*TOKEN*`/`*KEY*`/`*SECRET*`/…) from the `headersHelper` subprocess it spawns, so
+> that helper cannot read `MCP_COMBINER_AUTH_TOKEN` from its own environment. The
+> Claude plugin works around it: the `SessionStart` hook (which runs with the full,
+> unredacted environment) relays the token to the helper via a mode-`600`
+> `cc-bearer-<pid>` file under `$XDG_STATE_HOME/mcp-companion/`, written before the
+> session-id file and removed on `SessionEnd`. It's written once per SessionStart and
+> persists across combiner reconnects, so the helper re-reads it without the hook
+> re-running. The daemon is unaffected — it too is launched by that hook, not by a
+> headersHelper. (mcp-companion ≥ 0.13.3.)
+
 ### Reusing the gate on other FastMCP servers
 
 The middleware lives in `mcp_combiner/inbound_auth.py` and is **self-contained**

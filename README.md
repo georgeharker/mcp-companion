@@ -707,9 +707,21 @@ client must present `Authorization: Bearer <token>`:
   })
   ```
 
-- **Claude Code / OpenCode / Pi**: each reads the same `MCP_COMBINER_AUTH_TOKEN`
-  from its environment and sends the bearer automatically (Pi via the
-  `/mcp-combiner install-config` command). See the combiner and per-plugin READMEs.
+- **Claude Code**: set `MCP_COMBINER_AUTH_TOKEN` in the environment you launch
+  `claude` from, as usual — but there's a subtlety worth knowing. Claude Code
+  **redacts environment variables whose names look secret-like** (contain
+  `TOKEN`/`KEY`/`SECRET`/…) before spawning a plugin's `headersHelper`, so the
+  helper that builds the `Authorization` header never sees `MCP_COMBINER_AUTH_TOKEN`
+  in its own environment. The plugin bridges that gap: its `SessionStart` hook runs
+  with the **full** (unredacted) environment, reads the token, and relays it to the
+  helper through a mode-`600` file (`$XDG_STATE_HOME/mcp-companion/cc-bearer-<pid>`,
+  removed on session end). Net effect: one env var, bearer presented automatically.
+  (Since v0.13.3 — earlier versions could not authenticate a locked-down combiner
+  from Claude Code, because the helper's environment came up empty and Claude Code
+  then fell into OAuth / Dynamic Client Registration and surfaced a `404`.)
+- **OpenCode / Pi**: each reads the same `MCP_COMBINER_AUTH_TOKEN` from its
+  environment and sends the bearer automatically (Pi via the
+  `/mcp-combiner install-config` command). See the per-plugin READMEs.
 
 **Backends behind the combiner** (`cribsheet`, `svg-mcp`, …) are their own loopback
 HTTP servers, so the combiner's bearer does **not** cover a local process hitting
