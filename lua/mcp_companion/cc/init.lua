@@ -125,12 +125,27 @@ local function build_combiner_entry(agent_capabilities, token)
             combiner_url,
             tostring(token_in_url)
         )
+        -- Header is always sent; it is the primary correlation channel.
+        local headers = { { name = "X-MCP-Combiner-Session", value = token } }
+        -- Present the inbound bearer when the combiner is locked down. Sourced from
+        -- MCP_COMBINER_AUTH_TOKEN (inherited env, or exported to vim.env from a Lua
+        -- auth_token by combiner.setup — see combiner/init.lua). Absent → the combiner
+        -- is open, so send no auth header. This mirrors the nvim direct client
+        -- (combiner/client.lua presents the same bearer): the ACP-injected transport
+        -- must carry it too, or the agent's own MCP client (e.g. pi via pi-mcp-adapter)
+        -- connects to a locked /mcp with no Authorization and gets a 401. Literal value
+        -- (not "$env:…") so any compliant ACP agent forwards it verbatim; only agents
+        -- that support header injection can reach a locked combiner (see token_in_url
+        -- note above re: header-dropping agents).
+        local auth_token = vim.env.MCP_COMBINER_AUTH_TOKEN
+        if auth_token and auth_token ~= "" then
+            table.insert(headers, { name = "Authorization", value = "Bearer " .. auth_token })
+        end
         return {
             type = "http",
             name = "mcp-combiner",
             url = combiner_url,
-            -- Header is always sent; it is the primary correlation channel.
-            headers = { { name = "X-MCP-Combiner-Session", value = token } },
+            headers = headers,
         }
     else
         -- stdio via mcp-remote: token must ride in the URL (env/header not forwarded).
