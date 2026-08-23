@@ -1,6 +1,6 @@
 {
     "name": "@geohar/opencode-mcp-combiner",
-    "version": "0.13.3",
+    "version": "0.13.4",
     "description": "OpenCode plugin: run the mcp-combiner MCP aggregator via sharedserver and register its endpoint with OpenCode.",
     "type": "module",
     "main": "dist/index.js",
