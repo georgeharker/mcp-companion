@@ -2,7 +2,7 @@
 name: docs (branch push)
 
 on:
-  workflow_dispatch:   # manual run: deploys the selected branch to its prefix
+  workflow_dispatch: # manual run: deploys the selected branch to its prefix
   push:
     branches: [main]
     paths:

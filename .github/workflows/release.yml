@@ -48,14 +48,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: combiner/dist/   # path is relative to the repo root, not working-directory
+          path: combiner/dist/ # path is relative to the repo root, not working-directory
 
   publish:
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write          # required for Trusted Publishing (OIDC)
+      id-token: write # required for Trusted Publishing (OIDC)
     steps:
       - uses: actions/download-artifact@v4
         with:

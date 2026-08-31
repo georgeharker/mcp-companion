@@ -294,10 +294,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                 installConfig(ctx, rest.join(" ").trim() || undefined)
                 return
             }
-            ctx.ui?.notify?.(
-                `mcp-combiner: unknown verb "${v}". Try: system-prompt, install-config`,
-                "warn",
-            )
+            ctx.ui?.notify?.(`mcp-combiner: unknown verb "${v}". Try: system-prompt, install-config`, "warn")
         },
     })
 

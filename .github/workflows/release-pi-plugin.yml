@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: npm
     permissions:
-      id-token: write          # OIDC: trusted publishing + provenance
+      id-token: write # OIDC: trusted publishing + provenance
       contents: read
     defaults:
       run:
