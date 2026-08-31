@@ -22,6 +22,7 @@ def _hermetic_state_dirs(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
+
 # ── pure argv builders ─────────────────────────────────────────────
 
 
