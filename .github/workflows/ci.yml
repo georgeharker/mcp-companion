@@ -17,7 +17,7 @@ jobs:
       run:
         working-directory: combiner
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -55,7 +55,7 @@ jobs:
     # Self-contained Lua tests only (no combiner/CodeCompanion/network needed).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Neovim
         uses: rhysd/action-setup-vim@v1

@@ -34,8 +34,8 @@ jobs:
       run:
         working-directory: plugins/pi
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           # NB: no registry-url — it writes an .npmrc expecting NODE_AUTH_TOKEN,

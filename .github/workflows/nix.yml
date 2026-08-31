@@ -44,7 +44,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Skip the rest of the job (rather than fail) when the flake hasn't
       # landed yet — keeps the workflow safe to merge ahead of PR #6.
