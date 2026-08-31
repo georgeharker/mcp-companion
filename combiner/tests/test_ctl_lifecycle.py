@@ -10,6 +10,18 @@ import pytest
 
 from mcp_combiner import ctl
 
+
+@pytest.fixture(autouse=True)
+def _hermetic_state_dirs(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hermetic-tier guard: the nix build sandbox (and any read-only HOME) makes
+    # `~/.local/state` and `~/.cache` unwritable — HOME is `/homeless-shelter`
+    # there — and ctl's default log dir + cache dir resolve under HOME when the
+    # XDG vars are unset. `_resolve_capture_log` makedirs those paths, so the
+    # restart tests would die with PermissionError instead of testing ctl.
+    # Redirect both to tmp_path so this module stays sandbox-safe.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
 # ── pure argv builders ─────────────────────────────────────────────
 
 
