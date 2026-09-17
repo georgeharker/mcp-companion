@@ -474,5 +474,15 @@ class ToolProcessingMiddleware(Middleware):
                                 uri = tui["resourceUri"]
                         except Exception:  # noqa: BLE001 — lookup failures never fail the call
                             pass
+                    # Normalize to the NAMESPACED form the browser uses: the
+                    # stored tool meta carries the upstream uri, but resources/
+                    # list (and therefore every widget URL) serves the
+                    # server-namespaced one. A form mismatch silently splits the
+                    # session in two — the hold publishes to one, the widget
+                    # listens on the other, and the widget spins forever.
+                    if uri and call_server and not uri.startswith(f"ui://{call_server}/{call_server}/"):
+                        from mcp_combiner.toolcache import namespace_uri
+
+                        uri = namespace_uri(uri, call_server)
                     result = await hold_for_widget(context, result, str(tool_name), token, uri)
             return result
