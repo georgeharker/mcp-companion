@@ -30,6 +30,13 @@ class TitleRow implements TuiComponent {
         this.theme = theme
     }
 
+    /** pi-tui Component contract (invalidate is REQUIRED — MouseRegion calls it
+     *  unconditionally): drop the width cache so the next render re-styles
+     *  (theme changes). Same pattern as panel.ts. */
+    invalidate(): void {
+        this.cached = null
+    }
+
     render(width: number): string[] {
         const safeWidth = Math.max(1, Math.floor(width))
         if (this.cached?.width === safeWidth) return this.cached.lines
@@ -70,6 +77,11 @@ class CompactResult implements TuiComponent {
         this.expanded = options.expanded
         this.isError = isError
         this.theme = theme
+    }
+
+    /** pi-tui Component contract — see TitleRow.invalidate. */
+    invalidate(): void {
+        this.cached = null
     }
 
     render(width: number): string[] {

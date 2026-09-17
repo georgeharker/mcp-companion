@@ -480,7 +480,11 @@ class ToolProcessingMiddleware(Middleware):
                     # server-namespaced one. A form mismatch silently splits the
                     # session in two — the hold publishes to one, the widget
                     # listens on the other, and the widget spins forever.
-                    if uri and call_server and not uri.startswith(f"ui://{call_server}/{call_server}/"):
+                    if (
+                        uri
+                        and call_server
+                        and not uri.startswith(f"ui://{call_server}/{call_server}/")
+                    ):
                         from mcp_combiner.toolcache import namespace_uri
 
                         uri = namespace_uri(uri, call_server)

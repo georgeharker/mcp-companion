@@ -68,8 +68,15 @@ export type ToolCallContext = ExtensionContext & {
 
 export type TextBlock = { type: "text"; text: string }
 
-/** pi's TUI Component contract: an object whose render(width) returns styled lines. */
-export type TuiComponent = { render(width: number): string[] }
+/** pi's TUI Component contract (pi-tui's Component). invalidate() is REQUIRED,
+ *  not optional: MouseRegion.invalidate calls it unconditionally, and a component
+ *  missing it crashes pi with "this.child.invalidate is not a function" the first
+ *  time the transcript invalidates (session restore, theme change, resize).
+ *  Renderers must at minimum no-op it / drop any width cache. */
+export type TuiComponent = {
+    render(width: number): string[]
+    invalidate(): void
+}
 
 /** The theme slice renderers receive (pi passes its live theme). */
 export type RenderTheme = { fg: (color: string, text: string) => string; bold?: (text: string) => string }
