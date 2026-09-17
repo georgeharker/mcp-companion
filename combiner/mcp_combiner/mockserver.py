@@ -518,39 +518,73 @@ class MockServer:
             # svg-mcp's preview widget so the whole mcp-app family reads alike.
             return """<!doctype html><html><head><meta charset='utf-8'><style>
 :root { color-scheme: dark; }
-body { margin: 0; padding: 24px; font: 13px/1.4 system-ui, sans-serif;
+body { margin: 0; padding: 16px; font: 12px/1.4 ui-monospace, monospace;
        background: #1a1b1e; color: #e6e6e6; }
-h1 { font-size: 14px; font-weight: 600; margin: 0 0 12px; display: flex;
+h1 { font-size: 13px; font-weight: 600; margin: 0 0 10px; display: flex;
      align-items: center; gap: 8px; }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: #f0883e;
-       box-shadow: 0 0 6px #f0883e; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #f0883e;
+       box-shadow: 0 0 6px #f0883e; transition: background .2s; }
 .dot.live { background: #57ab5a; box-shadow: 0 0 6px #57ab5a; }
-p { color: #9aa0a6; margin: 0 0 14px; }
-button { background: #2f3136; color: #e6e6e6; border: 1px solid #44464c;
-         border-radius: 6px; padding: 4px 9px; font: inherit; cursor: pointer;
-         margin-right: 8px; }
-button:hover { background: #3a3d43; }
-#log { margin-top: 14px; padding: 8px; border: 1px solid #34363b;
-       border-radius: 6px; min-height: 40px; color: #9aa0a6; white-space: pre-wrap; }
+#state { color: #9aa0a6; font-weight: 400; }
+#log { margin-top: 10px; padding: 6px; border: 1px solid #34363b;
+       border-radius: 6px; min-height: 200px; max-height: 380px; overflow-y: auto;
+       color: #9aa0a6; white-space: pre-wrap; word-break: break-all; }
+.ok { color: #57ab5a; }
 </style></head><body>
-<h1><span class='dot' id='dot'></span>mock widget</h1>
-<p>Buttons fire the mcp-app protocol through the host bridge.</p>
-<button onclick='prompt()'>prompt</button>
-<button onclick='call()'>call tool</button>
+<h1><span class='dot' id='dot'></span>mock widget <span id='state'>(handshaking)</span></h1>
 <div id='log'>ready</div>
 <script>
-function rpc(method, params) {
-  parent.postMessage({ type: 'mcp', method, params }, '*');
-  const log = document.getElementById('log');
-  log.textContent += '\\n→ ' + method;
+const logEl = document.getElementById('log');
+const stateEl = document.getElementById('state');
+function log(s, cls) {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = s;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
 }
-function prompt() {
-  rpc('ui/message', { role: 'user', content: { type: 'text', text: 'hello' } });
+let rpcId = 1; const pending = new Map();
+function send(msg) { window.parent.postMessage(msg, '*'); }
+function call(method, params) {
+  return new Promise((res) => {
+    const id = rpcId++;
+    pending.set(id, res);
+    send({ jsonrpc: '2.0', id, method, params });
+    log('-> ' + method);
+  });
 }
-function call() {
-  rpc('tools/call', { name: 'mock__widget_ping', arguments: { msg: 'ping' } });
-  document.getElementById('dot').classList.add('live');
-}}
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || typeof d !== 'object') return;
+  if (d.id && pending.has(d.id)) {
+    const res = pending.get(d.id); pending.delete(d.id);
+    log('<- response[' + d.id + ']: ' + JSON.stringify(d.result ?? d.error).slice(0, 240), 'ok');
+    res(d.result ?? d.error);
+    return;
+  }
+  const label = d.method || d.type || 'message';
+  log('<- ' + label + ' ' + JSON.stringify(d.params ?? {}).slice(0, 280));
+  // Delivery probe: echo every bridged message back through the host's
+  // recording path so tests can verify the full chain server-side.
+  send({
+    type: 'mcp',
+    method: 'ui/message',
+    params: { type: 'notify', kind: label, params: d.params },
+  });
+  if (label.includes('tool-result')) {
+    document.getElementById('dot').classList.add('live');
+    stateEl.textContent = '(data received)';
+  }
+});
+// mcp-app handshake: initialize, then notifications/initialized
+call('ui/initialize', {
+  appInfo: { name: 'mock-widget', version: '1.0.0' },
+  appCapabilities: { tools: { listChanged: false }, logging: {} },
+}).then((r) => {
+  log('handshake OK: ' + JSON.stringify(r).slice(0, 240), 'ok');
+  stateEl.textContent = '(initialized)';
+  send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+}).catch((e) => log('handshake FAILED: ' + JSON.stringify(e)));
 </script>
 </body></html>"""
 

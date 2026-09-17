@@ -559,7 +559,13 @@ def build_host_html(
     const eventSource = new EventSource(UI_BASE + "/events?session=" + encodeURIComponent(SESSION_TOKEN));
     eventSource.onopen = () => setDot("live");
     eventSource.onerror = () => setDot("");
+    const sseDebug = (kind, payload) => {{
+      // Delivery probe: record on the session that this page received the
+      // event, so tests verify the full chain server-side.
+      void post("/proxy/ui/message", {{ type: "intent", intent: `sse-${{kind}}`, params: payload }}).catch(() => {{}});
+    }};
     eventSource.addEventListener("tool-input", (event) => {{
+      sseDebug("tool-input", JSON.parse(event.data));
       try {{
         bridge.sendToolInput(JSON.parse(event.data));
       }} catch (error) {{
@@ -567,6 +573,7 @@ def build_host_html(
       }}
     }});
     eventSource.addEventListener("tool-result", (event) => {{
+      sseDebug("tool-result", JSON.parse(event.data));
       try {{
         bridge.sendToolResult(JSON.parse(event.data));
       }} catch (error) {{
