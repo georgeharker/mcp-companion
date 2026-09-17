@@ -422,6 +422,22 @@ def build_host_html(
 
     let consentGranted = !REQUIRE_TOOL_CONSENT;
 
+    // Widget-bound payloads (tool-input/tool-result) can arrive from the server
+    // BEFORE the widget finishes booting (a large app initializes seconds after
+    // its frame loads). The bridge silently drops sends that precede the
+    // handshake — so buffer until oninitialized, then flush in order.
+    const pendingWidget = [];
+    let bridgeReady = false;
+    const deliverToWidget = (kind, payload) => {{
+      if (kind === "tool-input") bridge.sendToolInput(payload);
+      else if (kind === "tool-result") bridge.sendToolResult(payload);
+      else if (kind === "tool-cancelled") bridge.sendToolCancelled(payload);
+    }};
+    const deliverOrQueue = (kind, payload) => {{
+      if (bridgeReady) deliverToWidget(kind, payload);
+      else pendingWidget.push({{ kind, payload }});
+    }};
+
     const bridge = new AppBridge(
       null,
       {{ name: "mcp-combiner", version: "1.0.0" }},
@@ -518,6 +534,8 @@ def build_host_html(
     }};
 
     bridge.oninitialized = () => {{
+      bridgeReady = true;
+      for (const {{ kind, payload }} of pendingWidget.splice(0)) deliverToWidget(kind, payload);
       bridge.sendToolInput({{ arguments: TOOL_ARGS }});
       setStatus("Connected");
     }};
@@ -567,7 +585,7 @@ def build_host_html(
     eventSource.addEventListener("tool-input", (event) => {{
       sseDebug("tool-input", JSON.parse(event.data));
       try {{
-        bridge.sendToolInput(JSON.parse(event.data));
+        deliverOrQueue("tool-input", JSON.parse(event.data));
       }} catch (error) {{
         showError("Failed to forward tool input: " + String(error));
       }}
@@ -575,7 +593,7 @@ def build_host_html(
     eventSource.addEventListener("tool-result", (event) => {{
       sseDebug("tool-result", JSON.parse(event.data));
       try {{
-        bridge.sendToolResult(JSON.parse(event.data));
+        deliverOrQueue("tool-result", JSON.parse(event.data));
       }} catch (error) {{
         showError("Failed to forward tool result: " + String(error));
       }}
