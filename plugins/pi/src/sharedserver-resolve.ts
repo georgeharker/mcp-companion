@@ -7,7 +7,8 @@
 // shell side. Edit it HERE; consumers re-sync.
 //
 // Everything repo-specific arrives through ResolveConfig rather than being hardcoded,
-// mirroring bin/sharedserver.conf.
+// mirroring bin/sharedserver.conf. Compiled with the package tsconfig —
+// `npx tsc --noEmit` is the authoritative gate.
 
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"

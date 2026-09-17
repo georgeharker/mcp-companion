@@ -24,6 +24,17 @@ from mcp_combiner.runtime import RUNTIME
 from mcp_combiner.server import create_combiner
 from mcp_combiner.sharedserver import register_for_cleanup
 
+
+def _env_hold_timeout() -> float:
+    """Stage 2 widget-hold budget (seconds). Must fit the CLIENT's own request
+    timeout — pi defaults to 60s, so the default sits under it."""
+    raw = os.environ.get("MCP_COMBINER_UI_HOLD_TIMEOUT", "50")
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("invalid MCP_COMBINER_UI_HOLD_TIMEOUT=%r — using 50s", raw)
+        return 50.0
+
 logger = logging.getLogger(__name__)
 
 _mcp_log = logging.getLogger("mcp-combiner.requests")
@@ -343,6 +354,7 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
         combiner,
         base_origin=f"http://{options.host}:{options.port}",
         sandbox_relay_port=options.port + 1,
+        hold_timeout=_env_hold_timeout(),
     )
 
     # Register manager for cleanup on exit

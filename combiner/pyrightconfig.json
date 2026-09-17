@@ -1,0 +1,6 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": ["mcp_combiner", "tests"],
+  "extraPaths": ["."]
+}

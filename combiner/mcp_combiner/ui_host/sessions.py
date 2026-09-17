@@ -13,6 +13,7 @@ cross-restart recovery.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -41,6 +42,24 @@ class UiSession:
     messages: list[dict[str, Any]] = field(default_factory=list, init=False)
     contexts: list[dict[str, Any]] = field(default_factory=list, init=False)
     intents: list[dict[str, Any]] = field(default_factory=list, init=False)
+    # Stage 2: widget-bound SSE events (tool-input / tool-result / tool-cancelled)
+    # consumed by /events; an asyncio.Event the holder awaits for completion.
+    events: asyncio.Queue[dict[str, Any]] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=64), init=False
+    )
+    done: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+
+    def publish(self, event: str, data: Any) -> None:
+        """Queue an SSE event for this session's /events consumer (bounded)."""
+        if self.events.qsize() < 64:
+            self.events.put_nowait({"event": event, "data": data})
+
+    def mark_completed(self, reason: str) -> None:
+        """Signal completion WITHOUT evicting — the holder (if any) resolves,
+        folds state, and evicts afterwards."""
+        if self.completed is None:
+            self.completed = reason
+        self.done.set()
 
     def touch(self) -> None:
         self.last_seen = time.time()

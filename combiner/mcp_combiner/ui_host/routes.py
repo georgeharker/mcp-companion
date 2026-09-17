@@ -30,7 +30,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from .sessions import UiSession, UiSessionRegistry, call_as_token, read_as_token, resource_contents
+from .sessions import (
+    SESSION_TTL_SECONDS,
+    UiSession,
+    UiSessionRegistry,
+    call_as_token,
+    read_as_token,
+    resource_contents,
+)
 from .templates import (
     SANDBOX_PROXY_PATH,
     build_host_html,
@@ -53,11 +60,16 @@ class UiHostConfig:
     base_origin: str
     # Relay binds the same host on port+1 (the second loopback/tailscale origin).
     sandbox_relay_port: int
+    # Stage 2: how long a tool call referencing a widget stays in flight before
+    # the holder resolves with the recorded state. Must fit the CLIENT's own
+    # request timeout (pi default 60s), so the default sits under it.
+    hold_timeout: float = 50.0
 
 
 class UiHost:
     def __init__(self, config: UiHostConfig) -> None:
         self.config = config
+        self.hold_timeout = config.hold_timeout
         self.registry = UiSessionRegistry()
 
     # -- helpers ---------------------------------------------------------
@@ -277,8 +289,10 @@ class UiHost:
         if isinstance(authorized, JSONResponse):
             return authorized
         session, body = authorized
-        session.completed = str(body.get("params", {}).get("reason", "done"))
-        await self.registry.close_session(session)
+        # Mark WITHOUT evicting: a Stage 2 holder awaiting this session resolves
+        # and evicts itself; a Stage 1 session lingers (completed) so the
+        # retrieval loop can still read what the user did, until the TTL.
+        session.mark_completed(str(body.get("params", {}).get("reason", "done")))
         return JSONResponse({"ok": True, "result": {}})
 
     async def _proxy_ui_open_link(self, request: Request) -> Response:
@@ -309,13 +323,18 @@ class UiHost:
 
         async def stream() -> AsyncIterator[str]:
             yield "event: ready\ndata: {}\n\n"
-            completed = session.completed
-            while not completed:
-                await asyncio.sleep(2)
-                session.touch()
-                if session.completed:
-                    completed = session.completed
-                    yield "event: session-complete\ndata: {}\n\n"
+            while True:
+                try:
+                    evt = await asyncio.wait_for(session.events.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    session.touch()
+                    if session.idle_seconds > SESSION_TTL_SECONDS:
+                        return
+                    continue
+                import json as _json
+
+                yield f"event: {evt['event']}\ndata: {_json.dumps(evt['data'])}\n\n"
+                if evt["event"] == "session-complete":
                     return
 
         # Stream the generator — an EventSource client (the host page's status

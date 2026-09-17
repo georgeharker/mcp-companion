@@ -19,6 +19,7 @@ docs/designs/interactive-resource-host.md#Testing).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -89,7 +90,8 @@ def _result_text(result: Any) -> str:
     the text of TextContent blocks; a non-text first block is a test bug)."""
     for block in result.content:
         if block.type == "text":
-            return block.text
+            text: str = block.text
+            return text
     raise AssertionError(f"no text content in tool result: {result.content}")
 
 
@@ -381,3 +383,106 @@ class TestInboundAuth:
             )
         assert r.status_code == 200, r.text
         assert "mock widget" in r.text
+
+
+class TestStage2Hold:
+    """Stage 2: a tool result referencing a widget resource holds the call in
+    flight while the user interacts; completion (or timeout) resolves it with
+    the recorded state folded into the result."""
+
+    async def _held_call_setup(
+        self, procs: ProcFactory, tmp_path: Path, env: dict[str, str] | None = None
+    ) -> tuple[CombinerHandle, str, Client[Any], str]:
+        tools_path = write_tools_spec(tmp_path / "tools.json", _SPEC)
+        cfg = write_servers_config(
+            tmp_path / "servers.json",
+            {"mock": stdio_mock_entry("mock", tools_path=tools_path)},
+        )
+        combiner = await procs.start_combiner(cfg, env=env)
+        await combiner.wait_server_state("mock", ("ready",))
+        token = _token()
+        probe = Client(f"{combiner.mcp_url}/{token}probe-probe")  # distinct token
+        async with Client(f"{combiner.mcp_url}/{token}") as c:
+            tools = await c.list_tools()
+        matches = [t.name for t in tools if t.name.endswith("mock__widget_open")]
+        assert matches, f"widget-open tool not mounted: {[t.name for t in tools]}"
+        tool: str = matches[0]
+        return combiner, token, probe, tool
+
+    async def test_call_holds_until_widget_completes(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner, token, probe, tool = await self._held_call_setup(procs, tmp_path)
+        widget_uri = await _namespaced_widget_uri(combiner, token, {})
+
+        async with probe, Client(f"{combiner.mcp_url}/{token}") as agent:
+            call = asyncio.create_task(agent.call_tool(tool, {}))
+
+            # The hold engages as soon as the result references the widget.
+            async def held() -> bool:
+                for _ in range(40):
+                    s = await probe.call_tool("combiner__ui_sessions", {"chat_id": token})
+                    doc = json.loads(_result_text(s))
+                    if doc.get("open") == 1:
+                        return True
+                    await asyncio.sleep(0.25)
+                return False
+
+            assert await held(), "call was not held for the widget session"
+
+            # The user opens the widget (host page attaches the same session)...
+            r, session_token = await _open_widget(combiner, token, widget_uri)
+            assert r.status_code == 200
+            assert session_token
+
+            # ...interacts (the SSE stream carries the tool result)...
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                async with http.stream(
+                    "GET",
+                    f"{combiner.base_url}/ui/{token}/events",
+                    params={"session": session_token},
+                ) as stream:
+                    seen: list[bytes] = []
+                    async for chunk in stream.aiter_bytes():
+                        seen.append(chunk)
+                        joined = b"".join(seen)
+                        if b"event: tool-result" in joined:
+                            break
+                    assert any(b"tool-input" in c or b"tool-result" in c for c in seen)
+
+            # ...and signals done. The held call resolves with the fold.
+            done = await _proxy(combiner, token, session_token, "ui/complete", {"reason": "done"})
+            assert done.json()["ok"] is True
+
+            result = await asyncio.wait_for(call, timeout=10.0)
+            texts = [b.text for b in result.content if b.type == "text"]
+            assert any("completed=done" in t for t in texts), texts
+            assert any("/ui/" in t and token in t for t in texts), texts
+
+            # The retrieval loop still sees the session (linger-until-TTL).
+            m = await probe.call_tool("combiner__ui_messages", {"chat_id": token})
+            doc = json.loads(_result_text(m))
+            # The linger-until-TTL design: the completed session is still
+            # retrievable even though the holder resolved the call.
+            assert doc["token"] == token
+
+    async def test_hold_times_out_and_returns_recorded_state(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner, token, probe, tool = await self._held_call_setup(
+            procs, tmp_path, env={"MCP_COMBINER_UI_HOLD_TIMEOUT": "2"}
+        )
+        widget_uri = await _namespaced_widget_uri(combiner, token, {})
+        r, session_token = await _open_widget(combiner, token, widget_uri)
+        assert r.status_code == 200
+
+        async with probe, Client(f"{combiner.mcp_url}/{token}") as agent:
+            call = asyncio.create_task(agent.call_tool(tool, {}))
+            result = await asyncio.wait_for(call, timeout=15.0)
+            texts = [b.text for b in result.content if b.type == "text"]
+            assert any("completed=timeout" in t for t in texts), texts
+
+            # The widget session completed-by-timeout: done, retrievable.
+            s = await probe.call_tool("combiner__ui_sessions", {"chat_id": token})
+            doc = json.loads(_result_text(s))
+            assert doc["sessions"][0]["completed"] == "timeout"

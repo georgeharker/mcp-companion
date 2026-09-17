@@ -26,9 +26,17 @@ from .sessions import UiSessionRegistry
 __all__ = ["UiHost", "UiHostConfig", "UiSessionRegistry"]
 
 
-def attach_ui_host(combiner: FastMCP, base_origin: str, sandbox_relay_port: int) -> UiHost:
+def attach_ui_host(
+    combiner: FastMCP, base_origin: str, sandbox_relay_port: int, hold_timeout: float = 50.0
+) -> UiHost:
     """Attach the /ui/{token}/... route family to the combiner's app."""
-    host = UiHost(UiHostConfig(base_origin=base_origin, sandbox_relay_port=sandbox_relay_port))
+    host = UiHost(
+        UiHostConfig(
+            base_origin=base_origin,
+            sandbox_relay_port=sandbox_relay_port,
+            hold_timeout=hold_timeout,
+        )
+    )
     host.attach(combiner)
 
     from mcp_combiner.runtime import RUNTIME

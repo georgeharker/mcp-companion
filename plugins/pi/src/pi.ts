@@ -5,7 +5,8 @@
 // exactly the surface we touch — three lifecycle events, `registerCommand`, `exec`,
 // and `sendMessage`. Kept deliberately minimal: a wider mirror would rot against a
 // moving upstream. Signatures follow the published extension docs
-// (https://pi.dev/docs/latest/extensions).
+// (https://pi.dev/docs/latest/extensions). Compiled with the package tsconfig
+// (plugins/pi/tsconfig.json) — `npx tsc --noEmit` is the authoritative gate.
 
 export type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork"
 export type SessionShutdownReason = "quit" | "reload" | "new" | "resume" | "fork"

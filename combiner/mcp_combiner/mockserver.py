@@ -489,6 +489,21 @@ class MockServer:
             state.record_call("mock__widget_ping", ctx.session_id)
             return f"widget said: {msg}"
 
+        @mcp_srv.tool(
+            name="mock__widget_open",
+            description=(
+                "Returns a result referencing the mock widget resource — the "
+                "Stage 2 tool-triggered shape (result meta ui.resourceUri)."
+            ),
+        )
+        async def mock__widget_open(ctx: Context) -> ToolResult:
+            state.record_session(ctx)
+            state.record_call("mock__widget_open", ctx.session_id)
+            return ToolResult(
+                content=[mcp.types.TextContent(type="text", text="Task list ready.")],
+                meta={"ui": {"resourceUri": "ui://mock/mock/widget"}},
+            )
+
         @mcp_srv.resource(
             "ui://mock/widget",
             name="widget",

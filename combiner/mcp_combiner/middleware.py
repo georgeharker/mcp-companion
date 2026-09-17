@@ -444,4 +444,20 @@ class ToolProcessingMiddleware(Middleware):
             # answered); for HTTP the reconnect monitor already restored it.
             if call_server and RUNTIME.tools.clear_failure(call_server):
                 logger.info("Server '%s' recovered on a successful call", call_server)
+
+            # Stage 2 — interactive resource hold: a result referencing a ui://
+            # resource means the upstream wants its output rendered as a widget.
+            # The holder keeps the call in flight while the user interacts,
+            # then folds the recorded widget state into the returned result.
+            # Meta-tools and nvim tools never reference widgets — skip them.
+            if (
+                RUNTIME.ui_host is not None
+                and context.fastmcp_context is not None
+                and not str(tool_name).startswith("combiner__")
+            ):
+                from mcp_combiner.ui_host.holder import hold_for_widget
+
+                token = nvim_proxy.token_for_session(context.fastmcp_context.session_id)
+                if token:
+                    result = await hold_for_widget(context, result, str(tool_name), token)
             return result
