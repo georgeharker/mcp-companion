@@ -248,7 +248,7 @@ def create_combiner(
     # Configurable stale-tool grace: how long a disconnected server keeps serving
     # its last-known tools before they're dropped. Default STALE_TOOL_GRACE.
     if stale_tool_grace is not None:
-        RUNTIME.tools.stale_grace = float(stale_tool_grace)
+        RUNTIME.tools.stale_grace = stale_tool_grace
         logger.info("Stale-tool grace set to %.0fs", RUNTIME.tools.stale_grace)
 
     # Replace the MCP SDK's per-call jsonschema.validate (which rebuilds the
@@ -460,3 +460,7 @@ def create_combiner(
     if return_ss_manager:
         return combiner, ss_manager
     return combiner
+
+
+# (ui-host attach moved to asgi.py's create_app — the only place ServeOptions'
+#  resolved host/port exist; see mcp_combiner/asgi.py.)

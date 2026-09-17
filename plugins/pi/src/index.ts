@@ -1,9 +1,7 @@
-// Pi extension: run the `mcp-combiner` MCP aggregator via the `sharedserver` CLI so it
-// is available to Pi through `pi-mcp-adapter`.
+// Pi extension: run the `mcp-combiner` MCP aggregator via the `sharedserver` CLI so
+// it is available to Pi — and BE the MCP client for it (the adapter half).
 //
-// Pi has no MCP of its own; `pi-mcp-adapter` (a separate Pi package) is what actually
-// talks MCP, reading its own `mcp.json`. This extension is the OTHER half — the exact
-// counterpart of the process side of the Claude Code and OpenCode plugins:
+// Two halves, the counterpart of the Claude Code and OpenCode plugins:
 //
 //   1. Process — drive `sharedserver use … -- <combiner> --mcp --config … --port …` so
 //      the combiner is running and refcounted, SHARED with any other client (Claude
@@ -11,15 +9,17 @@
 //      `session_start` (Pi forbids background startup from the factory) and released in
 //      `session_shutdown` — but only on `reason === "quit"`, since reload/new/resume/
 //      fork keep the same Pi process alive and a fresh `session_start` re-attaches.
-//   2. Instructions — append the combiner's tool-discovery directive to the system
+//   2. Client — speak MCP directly to the combiner (streamable HTTP, per-Pi-session
+//      grouping token, elicitation bridge) and register the mcp() proxy tool, so no
+//      second package (pi-mcp-adapter) is needed. Connection + per-project exposure
+//      come from the shared MCP config ladder (.pi/mcp.json & co.); Pi-side knobs
+//      (tool name, lazy/eager, kill-switch) from
+//      $PI_CODING_AGENT_DIR/extensions/mcp-combiner.json. See docs/adapter-design.md.
+//
+//   3. Instructions — append the combiner's tool-discovery directive to the system
 //      prompt via `before_agent_start` (analogue of the CC plugin's SessionStart
 //      additionalContext and the OpenCode plugin's system.transform hook). The combiner
-//      also serves the same text as its MCP `instructions`, which pi-mcp-adapter
-//      surfaces on connect — this is the guaranteed, client-native belt to that braces.
-//
-// Registration itself (pointing pi-mcp-adapter at the combiner) is a single `mcp.json`
-// entry — see mcp.json.example and the README. That is static, CC-style, by design;
-// this extension deliberately does not write another extension's config.
+//      also serves the same text as its MCP `instructions` — belt to that braces.
 //
 // The sharedserver resolution/fetch and the combiner command ladder are ported
 // faithfully from plugins/opencode/src/index.ts — same floor, same warnings, same
@@ -29,7 +29,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type {
     AutocompleteItem,
@@ -37,8 +37,26 @@ import type {
     ExtensionCommandContext,
     ExtensionContext,
     SessionShutdownEvent,
+    SessionStartEvent,
 } from "./pi.js"
 import { resolveSharedserver } from "./sharedserver-resolve.js"
+import { CombinerConnection } from "./client/connection.js"
+import { createMcpTool } from "./client/proxy-tool.js"
+import { agentDir, loadSettings, settingsPath } from "./client/settings.js"
+import { resolveSessionConfig, type SessionConfig } from "./client/config-ladder.js"
+import { metaToolCall, statusText as controlStatusText } from "./client/control.js"
+import { openCombinerPanel } from "./client/panel.js"
+import { syncPromptCommands } from "./client/prompts.js"
+import { syncResourceTools } from "./client/resources.js"
+import {
+    activateFromSearch,
+    applyServerFilter,
+    RESERVED_TOOL_NAMES,
+    syncAllowlistTools,
+    type DirectToolDeps,
+} from "./client/direct-tools.js"
+import { updateFooter } from "./client/footer.js"
+import { createScriptTool } from "./client/script.js"
 
 const DEFAULT_PORT = 9741
 const DEFAULT_NAME = "mcp-combiner"
@@ -233,19 +251,33 @@ function resolveConfig(log: LogFn): string | undefined {
  *  would over-decrement sharedserver's refcount). */
 type Attachment = { binary: string; name: string }
 let attachment: Attachment | null = null
-let cleanupInstalled = false
+
+/** Process-global guard — jiti loads extensions with moduleCache:false, so every
+ *  session bind (parent + each subagent child) re-instantiates this module with
+ *  fresh module state. Symbol.for survives that isolation (same trick
+ *  pi-permission-system's service.ts uses), so the signal handlers are installed
+ *  exactly once per process no matter how many sessions bind. */
+const CLEANUP_GUARD = Symbol.for("mcp-companion:cleanup-installed")
 
 function installProcessCleanup() {
-    if (cleanupInstalled) return
-    cleanupInstalled = true
+    const g = globalThis as Record<symbol, boolean | undefined>
+    if (g[CLEANUP_GUARD]) return
+    g[CLEANUP_GUARD] = true
     // Belt to the session_shutdown("quit") braces: if Pi is killed hard enough that
     // session_shutdown never fires, still release the refcount. Idempotent via `detach`.
     process.on("exit", () => detach())
     for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as NodeJS.Signals[]) {
-        process.on(sig, () => {
+        const handler = () => {
             detach()
+            // Remove our listener before re-raising: re-killing with the handler
+            // still installed re-delivers the signal to it forever (loop verified —
+            // ctrl+c wedged pi instead of exiting). Gone, the re-raise falls through
+            // to the default disposition and terminates; the idempotent "exit"
+            // belt stays for any path that gets there.
+            process.removeListener(sig, handler)
             process.kill(process.pid, sig)
-        })
+        }
+        process.on(sig, handler)
     }
 }
 
@@ -269,6 +301,237 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
     // plugins' distinction.
     const hostOwned = env("MCP_COMPANION_COMBINER_URL") !== undefined && env("PI_MCP_COMBINER_PORT") === undefined
 
+    // ── client half: be the adapter ──────────────────────────────
+    // Connect to the combiner over streamable HTTP and register the mcp() proxy tool
+    // (docs/adapter-design.md). Runs in host-owned mode too — the host owns the
+    // process; we still own OUR connection to it. Connection URL precedence:
+    // PI_MCP_COMBINER_URL → settings file → shared-ladder combiner entry → serve
+    // defaults (host:port/mcp).
+    const settings = loadSettings()
+    const toolName = env("PI_MCP_COMBINER_TOOL_NAME") ?? settings.toolName
+
+    // Client-half gate: explicit env > settings file > "auto" (default) — off when
+    // pi-mcp-adapter is detected installed. Existing adapter users therefore upgrade
+    // to zero behaviour change; fresh installs get the one-package experience.
+    const adapterInstalled = adapterPackageInstalled()
+
+    function resolveAdapterChoice(): boolean | "auto" {
+        const e = env("PI_MCP_COMBINER_ADAPTER")?.toLowerCase()
+        if (e === "off" || e === "false" || e === "0") return false
+        if (e === "on" || e === "true" || e === "1") return true
+        if (e === "auto") return "auto"
+        return settings.adapter
+    }
+    const adapterChoice = resolveAdapterChoice()
+    const adapterEnabled = adapterChoice === "auto" ? !adapterInstalled : adapterChoice
+    let adapterOffReason: string | undefined
+    if (!adapterEnabled) {
+        adapterOffReason =
+            adapterChoice === false
+                ? "explicitly disabled (adapter:false or PI_MCP_COMBINER_ADAPTER=off)"
+                : `pi-mcp-adapter detected installed — leaving MCP to it (set "adapter": true in ${settingsPath()} to take over)`
+    }
+
+    // The client log starts on stderr; once a session binds, mirror to ctx.ui.notify.
+    let uiNotify: ((message: string, level?: "info" | "warn" | "error") => void) | undefined
+    const clientLog: LogFn = (level, message) => {
+        const line = `mcp-combiner: ${message}`
+        if (uiNotify) {
+            let uiLevel: "info" | "warn" | "error" = "info"
+            if (level === "warn") uiLevel = "warn"
+            else if (level === "error") uiLevel = "error"
+            uiNotify(line, uiLevel)
+        } else if (level !== "info") {
+            process.stderr.write(`${line}\n`)
+        }
+    }
+
+    let connection: CombinerConnection | undefined
+    // Session-config HOLDER: everything the ladder shapes, resolved against a SESSION
+    // cwd (worktree subagents / project switches get their own project layers).
+    // Factory-time resolution with process.cwd() is the pre-session default; every
+    // session_start re-resolves with ctx.cwd and updates the holder in place.
+    let sessionCfg: SessionConfig | undefined
+    const envUrl = env("MCP_COMPANION_COMBINER_URL") ?? env("PI_MCP_COMBINER_URL")
+    const connInputsFor = (cfg: SessionConfig) => ({
+        baseUrl: cfg.baseUrl,
+        bearerTokenEnv: cfg.bearerTokenEnv ?? "MCP_COMBINER_AUTH_TOKEN",
+        urlToken: cfg.urlToken,
+    })
+    const registeredDirect = new Set<string>()
+    const directReserved = new Set<string>(RESERVED_TOOL_NAMES)
+    directReserved.add(toolName)
+    directReserved.add(`${toolName}Script`)
+    const directDepsFor = (conn: CombinerConnection): DirectToolDeps => ({
+        connection: conn,
+        registered: registeredDirect,
+        reserved: directReserved,
+        register: (tool) => pi.registerTool(tool),
+        log: clientLog,
+    })
+    if (adapterEnabled) {
+        sessionCfg = resolveSessionConfig({
+            cwd: process.cwd(),
+            envUrl,
+            settingsUrl: settings.url,
+            defaultUrl: defaultCombinerUrl(),
+        })
+        connection = new CombinerConnection(connInputsFor(sessionCfg), clientLog)
+        const activeConn = connection // narrowed for the activation closure below
+        pi.registerTool(
+            createMcpTool({
+                connection,
+                toolName,
+                getServerFilter: () => sessionCfg?.serverFilter,
+                onSearchMatches: (tools) =>
+                    sessionCfg?.directSpec === "search" ? activateFromSearch(tools, directDepsFor(activeConn)) : [],
+            }),
+        )
+        if (settings.scriptMode) {
+            pi.registerTool(createScriptTool({ connection, name: `${toolName}Script` }))
+        }
+        if (sessionCfg.otherServers.length && !adapterPackageInstalled()) {
+            clientLog(
+                "info",
+                `note: ${sessionCfg.otherServers.length} non-combiner server(s) in the mcp.json ladder are not ` +
+                    `connected by this extension (${sessionCfg.otherServers.join(", ")})`,
+            )
+        }
+    }
+
+    if (!adapterEnabled && notify) {
+        // One info line per session when auto/legacy mode is active, so the state is
+        // visible without running /mcp-combiner status.
+        pi.on("session_start", (_event, ctx) => {
+            ctx.ui?.notify?.(`mcp-combiner: client half off — ${adapterOffReason}`, "info")
+        })
+    }
+
+    if (connection) {
+        const conn = connection // captured non-optional for the handlers below
+        const registeredPrompts = new Set<string>()
+        const registeredResources = new Set<string>()
+        let footerTimer: NodeJS.Timeout | undefined
+        let uiCtx: ExtensionContext["ui"] | undefined
+
+        const refreshFooter = () => {
+            if (uiCtx)
+                void updateFooter(conn, uiCtx, settings.mcpFooterKey, settings.mcpFooterStatus).catch(() => undefined)
+        }
+        const syncPrompts = () => {
+            if (!settings.prompts) return
+            void syncPromptCommands(pi, conn, toolName, registeredPrompts, (m, l) => clientLog(l, m)).catch(
+                () => undefined,
+            )
+        }
+        const syncResources = () => {
+            if (!settings.exposeResources) return
+            void syncResourceTools(
+                (tool) => pi.registerTool(tool),
+                conn,
+                registeredResources,
+                sessionCfg?.serverFilter,
+                (m, l) => clientLog(l, m),
+            ).catch(() => undefined)
+        }
+        const syncDirect = () => {
+            // Allowlist mode only — "search" registers nothing upfront.
+            const spec = sessionCfg?.directSpec
+            if (!Array.isArray(spec) || spec.length === 0) return
+            void conn
+                .listTools()
+                .then((tools) => {
+                    syncAllowlistTools(applyServerFilter(tools, sessionCfg?.serverFilter), spec, directDepsFor(conn))
+                })
+                .catch(() => undefined)
+        }
+        conn.setHooks({
+            onToolsChanged: () => {
+                syncPrompts()
+                syncResources()
+                syncDirect()
+                refreshFooter()
+            },
+            onStateChange: () => refreshFooter(),
+        })
+
+        pi.on("session_start", (event, ctx) => {
+            try {
+                uiNotify = notify && ctx.hasUI && ctx.ui?.notify ? (m, l) => ctx.ui?.notify?.(m, l) : undefined
+                uiCtx = ctx.ui
+                conn.bindUi({ hasUI: ctx.hasUI && Boolean(ctx.ui?.select && ctx.ui?.input), ui: ctx.ui })
+                // Per-session config re-resolution: worktrees and project switches read
+                // THEIR project layers (.mcp.json / .pi/mcp.json); a changed URL rebinds.
+                sessionCfg = resolveSessionConfig({
+                    cwd: ctx.cwd,
+                    envUrl,
+                    settingsUrl: settings.url,
+                    defaultUrl: defaultCombinerUrl(),
+                })
+                conn.rebind(connInputsFor(sessionCfg))
+                conn.setToken(sessionToken(event, ctx))
+                // Per-project exposure: pending filters apply server-side before first connect.
+                const filter = sessionCfg.serverFilter
+                if (filter) {
+                    void conn
+                        .applyFilter(filter)
+                        .catch((e) =>
+                            clientLog("warn", `filter apply failed: ${e instanceof Error ? e.message : String(e)}`),
+                        )
+                }
+                if (sessionCfg.otherServers.length && !adapterPackageInstalled()) {
+                    clientLog(
+                        "info",
+                        `note: ${sessionCfg.otherServers.length} non-combiner server(s) in the mcp.json ladder are not ` +
+                            `connected by this extension (${sessionCfg.otherServers.join(", ")})`,
+                    )
+                }
+                // Prompts/resources need the connection at session start to register their
+                // surfaces, so they imply an eager connect; otherwise lazy waits for the
+                // first call. A directTools allowlist needs the surface from turn one too.
+                if (
+                    settings.lazy === "eager" ||
+                    settings.prompts ||
+                    settings.exposeResources ||
+                    Array.isArray(sessionCfg.directSpec)
+                ) {
+                    void conn
+                        .ensureConnected()
+                        .then(() => {
+                            refreshFooter()
+                            syncPrompts()
+                            syncResources()
+                            syncDirect()
+                        })
+                        .catch(() => undefined)
+                }
+                refreshFooter()
+                if (footerTimer) clearInterval(footerTimer)
+                footerTimer = setInterval(refreshFooter, 30_000)
+                footerTimer.unref?.()
+                if (toolName === "mcp" && adapterInstalled) {
+                    clientLog(
+                        "warn",
+                        "adapter forced ON while pi-mcp-adapter is installed — both register an `mcp` tool. " +
+                            "Rename ours (settings toolName / PI_MCP_COMBINER_TOOL_NAME), uninstall the adapter, " +
+                            "or revert to adapter auto (PI_MCP_COMBINER_ADAPTER=auto)",
+                    )
+                }
+            } catch (e) {
+                // A throwing session_start handler would silently kill the footer and
+                // surface registration for the whole session — surface it instead.
+                clientLog("error", `session setup failed: ${e instanceof Error ? e.message : String(e)}`)
+            }
+        })
+        pi.on("session_shutdown", () => {
+            if (footerTimer) {
+                clearInterval(footerTimer)
+                footerTimer = undefined
+            }
+            void conn.reset("session shutdown")
+        })
+    }
+
     // ── instructions: appended every turn (analogue of the sibling plugins) ──
     pi.on("before_agent_start", (event) => {
         if (!wantInstructions || !COMBINER_DIRECTIVE) return
@@ -277,16 +540,77 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         return { systemPrompt: `${event.systemPrompt}\n\n${COMBINER_DIRECTIVE}` }
     })
 
-    // ── /mcp-combiner command: inspect + configure the extension ──
-    // verbs: system-prompt (show the injected directive), install-config (write
-    // the pi-mcp-adapter mcp.json entry, incl. bearer-auth wiring).
+    // ── /mcp-combiner command: inspect + drive the extension and the combiner ──
+    // verbs: status (combiner health + this session's view), enable/disable/
+    // restart-server <srv> (combiner meta-tools through our client), system-prompt
+    // (show the injected directive), install-config [path] (write the shared mcp.json
+    // combiner entry — legacy pairing with pi-mcp-adapter, now also read by our ladder).
     pi.registerCommand("mcp-combiner", {
-        description: "mcp-combiner — verbs: system-prompt (show directive), install-config [path] (write mcp.json)",
+        description:
+            "mcp-combiner — verbs: status, enable <srv>, disable <srv>, restart-server <srv>, system-prompt, install-config [path]",
         getArgumentCompletions: (prefix) => completeVerbs(prefix),
         handler: (args, ctx) => {
             const [verb, ...rest] = args.trim().split(/\s+/)
             const v = verb ?? ""
-            if (v === "" || v === "system-prompt") {
+            if (v === "panel") {
+                if (!connection) {
+                    ctx.ui?.notify?.(
+                        `mcp-combiner: client half off${adapterOffReason ? ` — ${adapterOffReason}` : ""}`,
+                        "warn",
+                    )
+                    return
+                }
+                void openCombinerPanel(
+                    {
+                        connection,
+                        toolName,
+                        getToken: () => connection.sessionToken,
+                        getFilter: () => sessionCfg?.serverFilter,
+                        notify: (m, l) => ctx.ui?.notify?.(m, l),
+                    },
+                    ctx.ui,
+                )
+                return
+            }
+            if (v === "" || v === "status") {
+                if (!connection) {
+                    ctx.ui?.notify?.(
+                        `mcp-combiner: client half off${adapterOffReason ? ` — ${adapterOffReason}` : ""}`,
+                        "warn",
+                    )
+                    return
+                }
+                void controlStatusText(connection, ctx.cwd)
+                    .then((t) => ctx.ui?.notify?.(t, "info"))
+                    .catch((e) =>
+                        ctx.ui?.notify?.(
+                            `mcp-combiner: status failed (${e instanceof Error ? e.message : String(e)})`,
+                            "error",
+                        ),
+                    )
+                return
+            }
+            if (v === "enable" || v === "disable" || v === "restart-server") {
+                const server = rest[0]
+                if (!connection) {
+                    ctx.ui?.notify?.("mcp-combiner: client half disabled", "warn")
+                    return
+                }
+                if (!server) {
+                    ctx.ui?.notify?.(`mcp-combiner: ${v} needs a server name`, "warn")
+                    return
+                }
+                void metaToolCall(connection, v, server)
+                    .then((t) => ctx.ui?.notify?.(t, "info"))
+                    .catch((e) =>
+                        ctx.ui?.notify?.(
+                            `mcp-combiner: ${v} failed (${e instanceof Error ? e.message : String(e)})`,
+                            "error",
+                        ),
+                    )
+                return
+            }
+            if (v === "system-prompt") {
                 showDirective(ctx, "mcp-combiner", COMBINER_DIRECTIVE, wantInstructions)
                 return
             }
@@ -294,7 +618,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                 installConfig(ctx, rest.join(" ").trim() || undefined)
                 return
             }
-            ctx.ui?.notify?.(`mcp-combiner: unknown verb "${v}". Try: system-prompt, install-config`, "warn")
+            ctx.ui?.notify?.(`mcp-combiner: unknown verb "${v}". Try: ${COMMAND_VERBS.join(", ")}`, "warn")
         },
     })
 
@@ -410,13 +734,34 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
     })
 }
 
-// ── helpers ────────────────────────────────────────────────────────
+// ── helpers ────────────────────────────────────────────────────
+
+// ── client-half helpers ──
+
+/** Best-effort detection of an installed pi-mcp-adapter package (coexistence warn). */
+function adapterPackageInstalled(): boolean {
+    return existsSync(join(agentDir(), "npm", "node_modules", "pi-mcp-adapter"))
+}
+
+/** Grouping token for this Pi session: `pi-<sessionId>`. A resumed chat continues the
+ *  previous chat's combiner identity (its parked upstream sessions survive); new/fork
+ *  deliberately start fresh — a fork is a new chat, and sharing would clash upstream. */
+function sessionToken(event: SessionStartEvent, ctx: ExtensionContext): string {
+    if (event.reason === "resume" && event.previousSessionFile) {
+        const m = basename(event.previousSessionFile).match(
+            /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
+        )
+        if (m) return `pi-${m[1]}`
+    }
+    const sid = ctx.sessionManager?.getSessionId?.()
+    return `pi-${sid ?? process.pid}`
+}
 
 // The verbs the extension's slash command understands. `system-prompt` shows the
 // directive this extension injects — the show-command pattern from pi-custom-system-prompt,
 // since `before_agent_start` injections are per-turn and never appear in Pi's own
 // `/system-prompt` (which reports the base prompt only).
-const COMMAND_VERBS = ["system-prompt", "install-config"]
+const COMMAND_VERBS = ["status", "panel", "enable", "disable", "restart-server", "system-prompt", "install-config"]
 function completeVerbs(prefix: string): AutocompleteItem[] | null {
     const p = prefix.trim()
     const matches = COMMAND_VERBS.filter((v) => v.startsWith(p))
@@ -498,7 +843,10 @@ function installConfig(ctx: ExtensionCommandContext, pathArg?: string): void {
         }
     }
 
-    const servers = (doc.mcpServers ??= {}) as Record<string, Record<string, unknown>>
+    if (typeof doc.mcpServers !== "object" || doc.mcpServers === null) {
+        doc.mcpServers = {}
+    }
+    const servers = doc.mcpServers as Record<string, Record<string, unknown>>
     const prev = (servers[key] ?? {}) as Record<string, unknown>
     const before = JSON.stringify(prev)
     // Preserve any existing url (e.g. a /mcp/<token> grouping path the user set)
@@ -520,7 +868,7 @@ function installConfig(ctx: ExtensionCommandContext, pathArg?: string): void {
         return
     }
 
-    const what = !existed ? "added" : changed ? "updated" : "already configured"
+    const what = existed ? (changed ? "updated" : "already configured") : "added"
     ctx.ui?.notify?.(
         `mcp-combiner: ${what} "${key}" in ${target}\n` +
             `Sends "Authorization: Bearer $MCP_COMBINER_AUTH_TOKEN" when that env var is set ` +
@@ -536,7 +884,10 @@ function makeLog(ctx: ExtensionContext, notify: boolean): LogFn {
         // Pi has no structured plugin log sink like OpenCode's client.app.log; surface
         // through the UI when there is one (and the user has not opted out), else stderr.
         if (notify && ctx.hasUI && ctx.ui?.notify) {
-            ctx.ui.notify(line, level === "error" ? "error" : level === "warn" ? "warn" : "info")
+            let uiLevel: "info" | "warn" | "error" = "info"
+            if (level === "warn") uiLevel = "warn"
+            else if (level === "error") uiLevel = "error"
+            ctx.ui.notify(line, uiLevel)
         } else if (level === "error" || level === "warn") {
             process.stderr.write(`${line}\n`)
         }

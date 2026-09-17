@@ -49,6 +49,15 @@ _MCP_TOKEN_PATH_RE = re.compile(r"^/mcp/([A-Za-z0-9][A-Za-z0-9._-]{7,199})(/.*)?
 # mcp-session-id — a different namespace from Context.session_id. Preserved.
 
 
+def _grace_env_to_float(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 @dataclass
 class ServeOptions:
     """Everything serve mode needs, resolved from CLI args (or env fallback)."""
@@ -92,7 +101,7 @@ class ServeOptions:
             schema_fixes=[f for f in fixes_env.split(",") if f] if fixes_env else [],
             input_validation=_tristate("MCP_COMBINER_INPUT_VALIDATION"),
             output_validation=_tristate("MCP_COMBINER_OUTPUT_VALIDATION"),
-            stale_tool_grace=float(grace_env) if grace_env else None,
+            stale_tool_grace=_grace_env_to_float(grace_env),
             auth_token=resolve_auth_token("MCP_COMBINER_AUTH_TOKEN"),
         )
 
@@ -198,6 +207,7 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
             # Replace any existing value so URL wins over a stale header.
             hdr = _ACP_TOKEN_HEADER.encode()
             headers = [(k, v) for (k, v) in request.scope["headers"] if k.lower() != hdr]
+            assert url_token is not None  # the enclosing branch established it
             headers.append((hdr, url_token.encode()))
             request.scope["headers"] = headers
 
@@ -324,6 +334,17 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
         return_ss_manager=True,
     )
 
+    # Interactive resource host (mcp-app widgets): /ui/<token>/... on this app.
+    # The sandbox relay binds a SECOND loopback origin (host+1) in __main__ —
+    # provider HTML must never be same-origin with this capability-holding page.
+    from mcp_combiner.ui_host import attach_ui_host
+
+    attach_ui_host(
+        combiner,
+        base_origin=f"http://{options.host}:{options.port}",
+        sandbox_relay_port=options.port + 1,
+    )
+
     # Register manager for cleanup on exit
     register_for_cleanup(ss_manager)
 
@@ -355,4 +376,9 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
             BearerAuthMiddleware, token=options.auth_token, is_protected=combiner_protected_path
         )
         logger.info("auth: inbound bearer required on /mcp, /sessions, /handover")
+    # The UI host's loopback clients read this to present the same bearer on
+    # their /mcp/<token> calls (the middleware does not exempt loopback).
+    from mcp_combiner.runtime import RUNTIME
+
+    RUNTIME.inbound_auth_token = options.auth_token
     return app

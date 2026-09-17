@@ -19,3 +19,4 @@ _quarto-deploy.yml
 /combiner/dist/
 *.egg-info/
 .DS_Store
+/node_modules

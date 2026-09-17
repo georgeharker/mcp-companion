@@ -1,0 +1,9 @@
+{
+  "$comment": "Pi-side settings for the mcp-combiner extension's client half. Copy to $PI_CODING_AGENT_DIR/extensions/mcp-combiner.json (default ~/.config/pi/agent/extensions/). Connection URL and per-project server exposure live in the shared MCP config ladder (.pi/mcp.json / ~/.config/mcp/mcp.json) instead — see README. Env vars (PI_MCP_COMBINER_*) win over this file. adapter: true = we are the MCP tool; false = legacy mode (pi-mcp-adapter owns MCP, this extension only launches the process + injects instructions); \"auto\" (default) = false when pi-mcp-adapter is detected installed, true otherwise.",
+  "toolName": "combiner",
+  "lazy": "lazy",
+  "adapter": "auto",
+  "exposeResources": true,
+  "prompts": true,
+  "notify": true
+}

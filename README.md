@@ -107,7 +107,7 @@ mcp-combiner session allow --servers a,b --token <uuid>  # allow-list (WIP)
 `start`, `stop`, and `restart` manage the **combiner's own process** through
 [sharedserver](https://github.com/georgeharker/sharedserver) — the native-CLI
 equivalent of the Claude plugin's `SessionStart` hook. They are distinct from
-`enable`/`disable`/`restart-server`, which drive an *already-running* combiner
+`enable`/`disable`/`restart-server`, which drive an _already-running_ combiner
 over its control API.
 
 - **`start`** runs `sharedserver use` to launch (or attach to) the combiner and
@@ -128,18 +128,18 @@ over its control API.
 
   `restart` is the **sanctioned** restart, and it carries session state across:
   before stopping, it arms a one-shot **handover** (`POST /handover/prepare`) —
-  the dying combiner parks its per-chat isolated upstream sessions *without
-  terminating them* (the backing servers keep running and keep their state)
+  the dying combiner parks its per-chat isolated upstream sessions _without
+  terminating them_ (the backing servers keep running and keep their state)
   and writes token filters, nvim binds, and per-token upstream session ids to
   a mode-600 file that the successor consumes via `--restore` (deleted on
   consume; refused if stale). A reconnecting chat that presents its grouping
   token then resumes its exact upstream sessions — a stateful server like
   `svg-mcp` still has the chat's documents, mid-conversation. Only this path
   gets the handover: crashes and `sharedserver admin kill` boot fresh (config
-  + supervisor re-assertion), and a combiner too wedged to answer the prepare
-  call restarts restore-less. Tokenless chats always come back fresh — their
-  wire session id died with the old process (see
-  [Chat identity](#chat-identity--grouping-tokens)).
+  - supervisor re-assertion), and a combiner too wedged to answer the prepare
+    call restarts restore-less. Tokenless chats always come back fresh — their
+    wire session id died with the old process (see
+    [Chat identity](#chat-identity--grouping-tokens)).
 
 `start`/`restart` accept `--config` (default: `$MCP_COMBINER_CONFIG`,
 `$CLAUDE_MCP_COMBINER_CONFIG`, then standard locations), `--name` (sharedserver
@@ -199,10 +199,12 @@ pinned release from PyPI on demand. Then:
   with `/mcp` (an `mcp-combiner` server with prefixed tools).
 - **OpenCode:** add `"@geohar/opencode-mcp-combiner@latest"` to your `opencode.json`
   `plugin` list.
-- **Pi:** `pi install npm:pi-mcp-adapter` (Pi's MCP client), drop the combiner into
-  its `mcp.json` ([`plugins/pi/mcp.json.example`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi/mcp.json.example)),
-  and load the `@geohar/pi-mcp-combiner` extension (symlink into
-  `~/.pi/agent/extensions/`, or list it under `settings.json` `packages`).
+- **Pi:** load the `@geohar/pi-mcp-combiner` extension (symlink into
+  `~/.pi/agent/extensions/`, or list it under `settings.json` `packages`) — it runs
+  the combiner **and speaks MCP to it itself** (no second package).
+  [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter) is optional — the
+  extension auto-defers when it's present (see
+  [`plugins/pi/README.md`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi#readme)).
 
 See **[plugins/README.md](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)** for the full walkthrough (config discovery order, env
 knobs, troubleshooting) and the host-owned (`MCP_COMPANION_COMBINER_URL`)
@@ -242,46 +244,46 @@ format is supported:
 
 ### Supported transport types
 
-| Transport | Config | Description |
-|---|---|---|
-| `stdio` | `command` + `args` | Spawns a local process (default) |
-| `http` | `url` | Connects to a remote HTTP MCP endpoint |
-| `sse` | `url` | Connects via Server-Sent Events |
+| Transport | Config             | Description                            |
+| --------- | ------------------ | -------------------------------------- |
+| `stdio`   | `command` + `args` | Spawns a local process (default)       |
+| `http`    | `url`              | Connects to a remote HTTP MCP endpoint |
+| `sse`     | `url`              | Connects via Server-Sent Events        |
 
 ### Per-server options
 
-| Field | Type | Description |
-|---|---|---|
-| `command` | `string` | Executable for stdio transport |
-| `args` | `string[]` | Arguments for the command |
-| `env` | `object` | Environment variables (supports interpolation) |
-| `url` | `string` | URL for http/sse transport |
-| `headers` | `object` | HTTP headers (supports interpolation) |
-| `transport` | `string` | `"stdio"`, `"http"`, or `"sse"` (auto-detected from presence of `url`) |
-| `disabled` | `boolean` | Skip this server |
-| `autoApprove` | `bool \| string[]` | Auto-approve spec — see [Auto-approve spec](#auto-approve-spec) |
-| `auth` | `string\|object` | Authentication config (see below) |
-| `sharedServer` | `string` | Name of a `sharedServers` entry to start before connecting (see below) |
-| `toolFilter` | `string[]` | Glob patterns; only matching tool names are exposed (empty = all) |
-| `permissions` | `object` | Opt-in per-call allow/deny/elicit policy for this server's tools — see [Combiner-side tool-call permissions](#combiner-side-tool-call-permissions) |
-| `isolate` | `boolean` | Give each chat its own upstream MCP session — see [isolate](#isolate--per-chat-sessions) |
+| Field          | Type               | Description                                                                                                                                        |
+| -------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `command`      | `string`           | Executable for stdio transport                                                                                                                     |
+| `args`         | `string[]`         | Arguments for the command                                                                                                                          |
+| `env`          | `object`           | Environment variables (supports interpolation)                                                                                                     |
+| `url`          | `string`           | URL for http/sse transport                                                                                                                         |
+| `headers`      | `object`           | HTTP headers (supports interpolation)                                                                                                              |
+| `transport`    | `string`           | `"stdio"`, `"http"`, or `"sse"` (auto-detected from presence of `url`)                                                                             |
+| `disabled`     | `boolean`          | Skip this server                                                                                                                                   |
+| `autoApprove`  | `bool \| string[]` | Auto-approve spec — see [Auto-approve spec](#auto-approve-spec)                                                                                    |
+| `auth`         | `string\|object`   | Authentication config (see below)                                                                                                                  |
+| `sharedServer` | `string`           | Name of a `sharedServers` entry to start before connecting (see below)                                                                             |
+| `toolFilter`   | `string[]`         | Glob patterns; only matching tool names are exposed (empty = all)                                                                                  |
+| `permissions`  | `object`           | Opt-in per-call allow/deny/elicit policy for this server's tools — see [Combiner-side tool-call permissions](#combiner-side-tool-call-permissions) |
+| `isolate`      | `boolean`          | Give each chat its own upstream MCP session — see [isolate](#isolate--per-chat-sessions)                                                           |
 
 ### isolate — per-chat sessions
 
 By default every chat shares one persistent upstream connection to an HTTP/SSE
-server, and therefore one upstream `Mcp-Session-Id`. A *stateful* server that
+server, and therefore one upstream `Mcp-Session-Id`. A _stateful_ server that
 keys state on the session — e.g. a server that tracks a "current document" —
 then sees all chats as the same session, so two concurrent chats clash.
 
 Set `"isolate": true` on such a server and the combiner opens a **separate
-upstream session per chat** (still one upstream server *instance*, shared
+upstream session per chat** (still one upstream server _instance_, shared
 transport). The server is handed a distinct, stable `Mcp-Session-Id` per chat
 and partitions its per-session state automatically — no clash.
 
 > **stdio servers cannot be isolated.** `isolate` is **HTTP/SSE-only**: a stdio
 > server is one subprocess with a single MCP session, so `"isolate": true` on a
-> stdio entry is **ignored** (with a startup warning) and *all chats share its one
-> session* — a stateful stdio server therefore leaks state across chats (one
+> stdio entry is **ignored** (with a startup warning) and _all chats share its one
+> session_ — a stateful stdio server therefore leaks state across chats (one
 > global "current document" for everyone). True per-chat isolation would require
 > spawning **a subprocess per chat**, which the combiner deliberately does not do
 > (unbounded processes for a marginal case). If you need per-chat state, run the
@@ -292,7 +294,7 @@ and partitions its per-session state automatically — no clash.
 
 "Per chat" is keyed by the chat's **grouping token** (the
 `X-MCP-Combiner-Session` header, or a `/mcp/<token>` URL path — the URL form
-wins when both are present). Tokens are minted *outside* the combiner by
+wins when both are present). Tokens are minted _outside_ the combiner by
 whoever owns the chat, which is what makes them stable across combiner
 restarts:
 
@@ -304,10 +306,12 @@ restarts:
 - **The OpenCode plugin** registers a per-instance token on its URL (all of an
   OpenCode instance's sessions share one MCP connection, so per-instance is
   its natural granularity).
-- **The Pi extension** carries a per-instance token on its `mcp.json` URL path
-  (`/mcp/<token>`), via `pi-mcp-adapter` — the same per-instance granularity as
-  OpenCode. (Owning the connection directly, for per-chat identity keyed on Pi's
-  durable session id, is a documented future option — see `plugins/pi`.)
+- **The Pi extension** owns its MCP connection and mints a per-chat token
+  (`pi-<session-id>`) on its URL path (`/mcp/<token>`) — each Pi chat gets its own
+  isolated upstream identity, subagents included (each child session binds fresh);
+  a resumed chat continues its identity. The future option noted here previously
+  (owning the connection directly) is now the shipped behaviour — see
+  `plugins/pi`.
 
 A connection with **no token** falls back to its wire `Mcp-Session-Id` as the
 grouping key — fine within one combiner lifetime, but that id is minted by the
@@ -322,7 +326,7 @@ timers (configure via a top-level `"isolation"` section):
   one dropped less than `grace_seconds` (default 300) ago; quick reconnects
   reattach instantly. An explicit session DELETE from the client skips the
   grace and parks immediately.
-- **parked** — disconnected *without terminating* the upstream session; only
+- **parked** — disconnected _without terminating_ the upstream session; only
   `token → (Mcp-Session-Id, protocolVersion)` is kept. The token's next
   appearance resumes the same upstream session (state intact), falling back to
   a fresh one if the server expired it.
@@ -415,30 +419,30 @@ sharedserver:
 }
 ```
 
-The `sharedServers` key is separate from `mcpServers` — it describes *how to run* the
-process; the `mcpServers` entry describes *how to connect* to it.  Multiple server
+The `sharedServers` key is separate from `mcpServers` — it describes _how to run_ the
+process; the `mcpServers` entry describes _how to connect_ to it. Multiple server
 entries can reference the same `sharedServers` entry.
 
 **`sharedServers` entry fields:**
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `command` | `string` | **required** | Executable to run (e.g. `"uvx"`) |
-| `args` | `string[]` | `[]` | Arguments to the command (supports interpolation) |
-| `env` | `object` | `{}` | Extra environment variables (supports interpolation) |
-| `grace_period` | `string` | — | How long to keep the process alive after the last client detaches (e.g. `"30m"`) |
-| `health_timeout` | `integer` | `30` | Seconds to poll the server URL after start before giving up |
+| Field            | Type       | Default      | Description                                                                      |
+| ---------------- | ---------- | ------------ | -------------------------------------------------------------------------------- |
+| `command`        | `string`   | **required** | Executable to run (e.g. `"uvx"`)                                                 |
+| `args`           | `string[]` | `[]`         | Arguments to the command (supports interpolation)                                |
+| `env`            | `object`   | `{}`         | Extra environment variables (supports interpolation)                             |
+| `grace_period`   | `string`   | —            | How long to keep the process alive after the last client detaches (e.g. `"30m"`) |
+| `health_timeout` | `integer`  | `30`         | Seconds to poll the server URL after start before giving up                      |
 
 ### Environment variable interpolation
 
 All config fields support `${VAR}` interpolation with optional defaults:
 
-| Syntax | Description |
-|---|---|
-| `${VAR}` | Expands to `$VAR` value, empty string if unset |
-| `${env:VAR}` | Same as `${VAR}` (VS Code / Claude Desktop compat) |
-| `${VAR:-default}` | Expands to `$VAR` if set, otherwise `default` |
-| `${env:VAR:-default}` | Same with `env:` prefix |
+| Syntax                | Description                                        |
+| --------------------- | -------------------------------------------------- |
+| `${VAR}`              | Expands to `$VAR` value, empty string if unset     |
+| `${env:VAR}`          | Same as `${VAR}` (VS Code / Claude Desktop compat) |
+| `${VAR:-default}`     | Expands to `$VAR` if set, otherwise `default`      |
+| `${env:VAR:-default}` | Same with `env:` prefix                            |
 
 Expansion applies to: `command`, `args`, `env`, `url`, and `headers` fields.
 Interpolation happens at runtime (when connecting to servers), not at config
@@ -504,14 +508,14 @@ When `client_id` is provided, dynamic client registration is skipped.
 
 ### OAuth options
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `client_id` | `string` | — | Pre-registered OAuth client ID (skips dynamic registration) |
-| `client_secret` | `string` | — | Client secret (used with `client_id`) |
-| `scopes` | `string\|string[]` | — | OAuth scopes to request |
-| `client_metadata_url` | `string` | — | CIMD URL (alternative to dynamic registration) |
-| `cache_tokens` | `boolean` | `true` | Persist tokens to disk for this server (overrides global setting) |
-| `callback_port` | `integer` | — | Local port for the OAuth redirect callback (e.g. `9876`). Required when the auth provider validates redirect URIs strictly (Google, GitHub, etc.) — must match the URI registered in your OAuth app. |
+| Field                 | Type               | Default | Description                                                                                                                                                                                          |
+| --------------------- | ------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `client_id`           | `string`           | —       | Pre-registered OAuth client ID (skips dynamic registration)                                                                                                                                          |
+| `client_secret`       | `string`           | —       | Client secret (used with `client_id`)                                                                                                                                                                |
+| `scopes`              | `string\|string[]` | —       | OAuth scopes to request                                                                                                                                                                              |
+| `client_metadata_url` | `string`           | —       | CIMD URL (alternative to dynamic registration)                                                                                                                                                       |
+| `cache_tokens`        | `boolean`          | `true`  | Persist tokens to disk for this server (overrides global setting)                                                                                                                                    |
+| `callback_port`       | `integer`          | —       | Local port for the OAuth redirect callback (e.g. `9876`). Required when the auth provider validates redirect URIs strictly (Google, GitHub, etc.) — must match the URI registered in your OAuth app. |
 
 ### OAuth token caching
 
@@ -588,12 +592,12 @@ can restart freely without invalidating any sessions.
 
 **When to use this vs. standard OAuth 2.1:**
 
-| | Standard OAuth 2.1 | External provider mode |
-|---|---|---|
-| Token issued by | MCP server (JWT) | Identity provider directly |
-| MCP server restart | Loses client registrations → re-auth needed | Transparent (stateless) |
-| Requires `client_id` | Only if provider doesn't support DCR | Yes (Google/GitHub don't support DCR) |
-| Redirect URI to register | Automatically negotiated | Must match `callback_port` |
+|                          | Standard OAuth 2.1                          | External provider mode                |
+| ------------------------ | ------------------------------------------- | ------------------------------------- |
+| Token issued by          | MCP server (JWT)                            | Identity provider directly            |
+| MCP server restart       | Loses client registrations → re-auth needed | Transparent (stateless)               |
+| Requires `client_id`     | Only if provider doesn't support DCR        | Yes (Google/GitHub don't support DCR) |
+| Redirect URI to register | Automatically negotiated                    | Must match `callback_port`            |
 
 **Configuration example — Google Workspace MCP:**
 
@@ -943,11 +947,11 @@ all MCP tools autonomously without extra configuration.
 The injection adapts to however the adapter's `mcpServers` is configured in
 CodeCompanion:
 
-| `defaults.mcpServers` value | How combiner is injected |
-|---|---|
-| `"inherit_from_config"` | CC calls `transform_to_acp()` to build the server list from `config.mcp.servers`. Our patch wraps that function to also include HTTP servers (upstream only handles stdio) and appends the combiner entry. |
-| `{}` (empty table) | Combiner entry is inserted directly into the table during `ACPSessionPre`, before `_establish_session` reads it. |
-| `{ ... }` (table with entries) | Same as empty table — combiner entry is appended if not already present. User-configured servers are preserved. |
+| `defaults.mcpServers` value    | How combiner is injected                                                                                                                                                                                   |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `"inherit_from_config"`        | CC calls `transform_to_acp()` to build the server list from `config.mcp.servers`. Our patch wraps that function to also include HTTP servers (upstream only handles stdio) and appends the combiner entry. |
+| `{}` (empty table)             | Combiner entry is inserted directly into the table during `ACPSessionPre`, before `_establish_session` reads it.                                                                                           |
+| `{ ... }` (table with entries) | Same as empty table — combiner entry is appended if not already present. User-configured servers are preserved.                                                                                            |
 
 Most ACP adapters ship with `defaults.mcpServers = {}`. Some (e.g. Copilot ACP)
 use `"inherit_from_config"` to pick up servers from the global CC MCP config.
@@ -992,19 +996,19 @@ responsibility.** So tool permissions for these agents are normally configured
 **in the agent itself**, not in mcp-companion. That governs every tool the agent
 can reach through the combiner, including the `neovim_*` tools.
 
-> **Opt-in exception:** the combiner *can* enforce its own allow / deny / **elicit**
+> **Opt-in exception:** the combiner _can_ enforce its own allow / deny / **elicit**
 > policy on top of the agent's — useful when the agent's model is coarse, when one
 > policy should follow a server across every agent, or when you want an interactive
 > prompt for specific tools regardless of client. Off by default; see
 > [Combiner-side tool-call permissions](#combiner-side-tool-call-permissions).
 
-| Agent | Where permissions live | Docs |
-|---|---|---|
-| **Claude Code** | `permissions` (allow / ask / deny rules) in `settings.json`; `/permissions` UI. MCP tools are named `mcp__<server>__<tool>` (e.g. `mcp__mcp-companion__neovim_edit_buffer`). | [Configure permissions](https://code.claude.com/docs/en/permissions) |
-| **OpenCode** | `permission` config (allow / ask / deny), global or per-agent. | [Permissions](https://opencode.ai/docs/permissions/) |
-| **GitHub Copilot** (e.g. `copilot_acp`) | Per-tool confirmation in the chat UI; admins can set an MCP allow-list. | [Build with agents in VS Code](https://code.visualstudio.com/docs/copilot/agents/overview) · [Agent mode + MCP](https://docs.github.com/en/copilot/tutorials/enhance-agent-mode-with-mcp) |
+| Agent                                   | Where permissions live                                                                                                                                                       | Docs                                                                                                                                                                                      |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Claude Code**                         | `permissions` (allow / ask / deny rules) in `settings.json`; `/permissions` UI. MCP tools are named `mcp__<server>__<tool>` (e.g. `mcp__mcp-companion__neovim_edit_buffer`). | [Configure permissions](https://code.claude.com/docs/en/permissions)                                                                                                                      |
+| **OpenCode**                            | `permission` config (allow / ask / deny), global or per-agent.                                                                                                               | [Permissions](https://opencode.ai/docs/permissions/)                                                                                                                                      |
+| **GitHub Copilot** (e.g. `copilot_acp`) | Per-tool confirmation in the chat UI; admins can set an MCP allow-list.                                                                                                      | [Build with agents in VS Code](https://code.visualstudio.com/docs/copilot/agents/overview) · [Agent mode + MCP](https://docs.github.com/en/copilot/tutorials/enhance-agent-mode-with-mcp) |
 
-For example, to make Claude Code *always prompt* before any neovim write/exec
+For example, to make Claude Code _always prompt_ before any neovim write/exec
 tool, add an `ask` rule like `mcp__mcp-companion__neovim_edit_buffer` (or a
 broader pattern) in its `settings.json` per the linked docs.
 
@@ -1048,20 +1052,22 @@ per-server block overrides and extends the global one):
 
 ```jsonc
 {
-  "permissions": {                  // global — applies to every server
-    "default": "allow",             // action when no pattern matches (default: allow = off)
-    "elicitUnavailable": "deny"     // fallback when a call resolves to elicit but the
-  },                                //   client can't prompt (default: deny, secure)
+  "permissions": {
+    // global — applies to every server
+    "default": "allow", // action when no pattern matches (default: allow = off)
+    "elicitUnavailable": "deny", // fallback when a call resolves to elicit but the
+  }, //   client can't prompt (default: deny, secure)
   "mcpServers": {
     "github": {
       "url": "…",
-      "permissions": {              // per-server — overrides/extends the global
-        "deny":    ["*_delete", "delete_*"],           // rejected — never runs
-        "elicit":  ["create_*", "merge_*"],            // prompt the user each call
-        "allow":   ["get_*", "list_*", "search_*"]     // always runs
-      }
-    }
-  }
+      "permissions": {
+        // per-server — overrides/extends the global
+        "deny": ["*_delete", "delete_*"], // rejected — never runs
+        "elicit": ["create_*", "merge_*"], // prompt the user each call
+        "allow": ["get_*", "list_*", "search_*"], // always runs
+      },
+    },
+  },
 }
 ```
 
@@ -1086,11 +1092,11 @@ per-server block overrides and extends the global one):
 
 **Off by default, provably.** With no `permissions` and no per-server block the
 resolved policy is `default: allow` with empty deny/elicit sets — which the
-combiner detects as *inactive* and skips entirely, so the call path is byte-for-byte
+combiner detects as _inactive_ and skips entirely, so the call path is byte-for-byte
 identical to a build without the feature. Turning on a server's `autoApprove` adds
 allow patterns but never activates the gate on its own.
 
-**Scope:** gates tool **calls** only — never tool *publication* (tools still list
+**Scope:** gates tool **calls** only — never tool _publication_ (tools still list
 normally). The combiner meta-tools (`combiner__*`) and the built-in `neovim_*`
 tools are exempt.
 
@@ -1126,13 +1132,13 @@ file.
 Each server shows a lifecycle state reported by the combiner (also returned by
 the `combiner__status` meta-tool, so the UI and the agent never disagree):
 
-| State | Indicator | Meaning |
-|---|---|---|
-| **connected** | green | Tools are listable and callable (fully ready). |
-| **connecting** | amber | Session established, tool set still warming up (common for OAuth servers just after connect). |
-| **disconnected** | grey/red | Down, reconnecting, or a recent call hit a dead transport / crashed subprocess. |
-| **error** | red | Authentication failed — re-enable with `combiner__enable_server` (or `:MCPToggleServer`). |
-| **disabled** | dim | Turned off in config or for this session. |
+| State            | Indicator | Meaning                                                                                       |
+| ---------------- | --------- | --------------------------------------------------------------------------------------------- |
+| **connected**    | green     | Tools are listable and callable (fully ready).                                                |
+| **connecting**   | amber     | Session established, tool set still warming up (common for OAuth servers just after connect). |
+| **disconnected** | grey/red  | Down, reconnecting, or a recent call hit a dead transport / crashed subprocess.               |
+| **error**        | red       | Authentication failed — re-enable with `combiner__enable_server` (or `:MCPToggleServer`).     |
+| **disabled**     | dim       | Turned off in config or for this session.                                                     |
 
 The state is decoupled from the volatile "does this server return tools right
 now" heuristic: a server that is only transiently absent (mid-reconnect, a quick
@@ -1188,14 +1194,14 @@ Agent: [calls todoist_get_tasks autonomously via combiner]
 
 ### Commands
 
-| Command | Description |
-|---|---|
-| `:MCPStatus` | Toggle the status floating window |
-| `:MCPRestart` | Restart the MCP combiner |
-| `:MCPRestartServer <name>` | Restart a single server (stops + respawns its backing process; no full combiner restart) |
-| `:MCPReload` | Re-read the config file and apply server changes without a restart |
-| `:MCPLog` | Open the log file in a buffer |
-| `:MCPToggleServer <name>` | Globally enable/disable a server |
+| Command                                               | Description                                                                                                                                              |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `:MCPStatus`                                          | Toggle the status floating window                                                                                                                        |
+| `:MCPRestart`                                         | Restart the MCP combiner                                                                                                                                 |
+| `:MCPRestartServer <name>`                            | Restart a single server (stops + respawns its backing process; no full combiner restart)                                                                 |
+| `:MCPReload`                                          | Re-read the config file and apply server changes without a restart                                                                                       |
+| `:MCPLog`                                             | Open the log file in a buffer                                                                                                                            |
+| `:MCPToggleServer <name>`                             | Globally enable/disable a server                                                                                                                         |
 | `:MCPSaveProjectConfig [shortest\|allowed\|disabled]` | Snapshot the current chat session's MCP server visibility to `.mcp-companion.json` (see [Per-project defaults](#per-project-defaults-mcp-companionjson)) |
 
 ```lua
@@ -1205,18 +1211,18 @@ vim.keymap.set("n", "<leader>ms", "<cmd>MCPStatus<cr>", { desc = "MCP status" })
 The status window shows combiner state, connected servers, and tool/resource/prompt
 counts. Key bindings:
 
-| Key | Action |
-|---|---|
-| `<CR>` | Expand/collapse the server under the cursor |
-| `e` | Toggle **global** enable/disable (calls `combiner__enable_server` / `combiner__disable_server`) |
-| `p` | Toggle the server's visibility in `.mcp-companion.json` (creates the file if absent; preserves the existing `allowed_servers` / `disabled_servers` shape) |
-| `S` | Toggle the server for **this chat session only** — equivalent to `/mcp-session` on the chat the status window was opened from |
-| `r` | Refresh from the combiner |
-| `R` | Restart the combiner |
-| `x` | Restart the server under the cursor (calls `combiner__restart_server`; respawns its backing process, no full combiner restart) |
-| `c` | Reload the combiner config from disk and apply server changes (calls `combiner__reload_config`; no restart) |
-| `l` / `s` | Switch to logs / status view |
-| `q` | Close the window |
+| Key       | Action                                                                                                                                                    |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<CR>`    | Expand/collapse the server under the cursor                                                                                                               |
+| `e`       | Toggle **global** enable/disable (calls `combiner__enable_server` / `combiner__disable_server`)                                                           |
+| `p`       | Toggle the server's visibility in `.mcp-companion.json` (creates the file if absent; preserves the existing `allowed_servers` / `disabled_servers` shape) |
+| `S`       | Toggle the server for **this chat session only** — equivalent to `/mcp-session` on the chat the status window was opened from                             |
+| `r`       | Refresh from the combiner                                                                                                                                 |
+| `R`       | Restart the combiner                                                                                                                                      |
+| `x`       | Restart the server under the cursor (calls `combiner__restart_server`; respawns its backing process, no full combiner restart)                            |
+| `c`       | Reload the combiner config from disk and apply server changes (calls `combiner__reload_config`; no restart)                                               |
+| `l` / `s` | Switch to logs / status view                                                                                                                              |
+| `q`       | Close the window                                                                                                                                          |
 
 The three toggle keys (`e`, `p`, `S`) form a hierarchy from broadest to
 narrowest scope:
@@ -1234,12 +1240,12 @@ CodeCompanion chat buffer (so it knows which chat to scope the toggle to).
 
 MCP companion writes logs to two locations:
 
-| Log | Default path | Purpose |
-|---|---|---|
-| Plugin log | `~/.local/state/nvim/mcp-companion.log` | Lua-side events (combiner lifecycle, server connections, errors) |
-| Combiner file log | `~/.local/state/nvim/mcp-combiner-py.log` | Python file logger (formatted, level set by `combiner.log_level`) |
-| Combiner stderr capture | `~/.local/state/nvim/mcp-combiner.log` | sharedserver-captured stderr from the Python combiner process |
-| sharedserver logs | `$XDG_RUNTIME_DIR/sharedserver` or `/tmp/sharedserver` | All processes managed by sharedserver |
+| Log                     | Default path                                           | Purpose                                                           |
+| ----------------------- | ------------------------------------------------------ | ----------------------------------------------------------------- |
+| Plugin log              | `~/.local/state/nvim/mcp-companion.log`                | Lua-side events (combiner lifecycle, server connections, errors)  |
+| Combiner file log       | `~/.local/state/nvim/mcp-combiner-py.log`              | Python file logger (formatted, level set by `combiner.log_level`) |
+| Combiner stderr capture | `~/.local/state/nvim/mcp-combiner.log`                 | sharedserver-captured stderr from the Python combiner process     |
+| sharedserver logs       | `$XDG_RUNTIME_DIR/sharedserver` or `/tmp/sharedserver` | All processes managed by sharedserver                             |
 
 Use `:MCPLog` to open the plugin log directly in a Neovim buffer.
 
@@ -1289,14 +1295,14 @@ end)
 
 ### Events
 
-| Event | When |
-|---|---|
-| `combiner_ready` | Combiner connected and all capabilities loaded |
-| `combiner_error` | Combiner encountered an error |
-| `servers_updated` | Server list or capabilities changed |
-| `tool_list_changed` | Tool list changed on a server |
-| `resource_list_changed` | Resource list changed |
-| `prompt_list_changed` | Prompt list changed |
+| Event                   | When                                           |
+| ----------------------- | ---------------------------------------------- |
+| `combiner_ready`        | Combiner connected and all capabilities loaded |
+| `combiner_error`        | Combiner encountered an error                  |
+| `servers_updated`       | Server list or capabilities changed            |
+| `tool_list_changed`     | Tool list changed on a server                  |
+| `resource_list_changed` | Resource list changed                          |
+| `prompt_list_changed`   | Prompt list changed                            |
 
 ### Plugin Configuration
 
@@ -1412,10 +1418,10 @@ system_prompt_resources = { "ai%-assistant%-guide", "project%-context" }
 When using a standard HTTP/LLM adapter (not ACP), MCP tools are available via
 `@`-mention in CodeCompanion chats. Two levels of granularity are supported:
 
-| Mention | Effect |
-|---|---|
-| `@mcp-combiner` | Enable **all** MCP tools from all connected servers (one context block entry) |
-| `@mcp__github` | Enable tools from a single server only (replace `github` with any server name) |
+| Mention         | Effect                                                                         |
+| --------------- | ------------------------------------------------------------------------------ |
+| `@mcp-combiner` | Enable **all** MCP tools from all connected servers (one context block entry)  |
+| `@mcp__github`  | Enable tools from a single server only (replace `github` with any server name) |
 
 With `cc.auto_http_tools = true` (the default), `@mcp-combiner` is added
 automatically to every new chat and all servers are enabled on the combiner for
@@ -1481,7 +1487,7 @@ distinct from both HTTP CC chats and ACP CC chats:
   call (`mcpServers`), and the agent's own MCP client connects back to the
   combiner.
 - **CLI session:** the spawned CLI process is the MCP client. It connects to
-  the combiner using *its own* MCP config (whatever is in the CLI tool's config
+  the combiner using _its own_ MCP config (whatever is in the CLI tool's config
   file). The plugin does not inject a combiner entry into the CLI's process —
   it only allocates a per-session token, applies the server filter to that
   token on the combiner, and registers the session for `:MCPStatus` and
@@ -1573,12 +1579,12 @@ Or hide specific servers from an otherwise-default project:
 }
 ```
 
-| Field | Type | Effect |
-|---|---|---|
-| `allowed_servers` | `string[]` | Whitelist — only these servers are visible. |
-| `disabled_servers` | `string[]` | Blacklist — every other configured server is visible. |
-| `tool_system_prompts` | `boolean` | Override the plugin-level `cc.tool_system_prompts` setting (default `true`). Set `false` here to suppress per-tool natural-language system messages just for this project. |
-| `adapters` | `object` | Per-adapter server filter overrides. Keys are adapter names for chats (e.g. `"moonshot-ai"`, `"claude"`, `"copilot_acp"`) or CLI agent names (e.g. `"claude_code"`). Each value is an object with the same `allowed_servers` / `disabled_servers` shape as the top level, and overrides the top-level filter for sessions using that adapter/agent. Useful when different models need to see different server subsets within the same project. |
+| Field                 | Type       | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allowed_servers`     | `string[]` | Whitelist — only these servers are visible.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `disabled_servers`    | `string[]` | Blacklist — every other configured server is visible.                                                                                                                                                                                                                                                                                                                                                                                          |
+| `tool_system_prompts` | `boolean`  | Override the plugin-level `cc.tool_system_prompts` setting (default `true`). Set `false` here to suppress per-tool natural-language system messages just for this project.                                                                                                                                                                                                                                                                     |
+| `adapters`            | `object`   | Per-adapter server filter overrides. Keys are adapter names for chats (e.g. `"moonshot-ai"`, `"claude"`, `"copilot_acp"`) or CLI agent names (e.g. `"claude_code"`). Each value is an object with the same `allowed_servers` / `disabled_servers` shape as the top level, and overrides the top-level filter for sessions using that adapter/agent. Useful when different models need to see different server subsets within the same project. |
 
 Example with per-adapter overrides:
 
@@ -1659,26 +1665,26 @@ ACP session where the agent has autonomous tool access):
 
 **`combiner__session_disable_server`** — hide a server from this session
 
-| Parameter | Type | Description |
-|---|---|---|
-| `server_name` | `string` (required) | Name of the server to disable |
-| `chat_id` | `string` (optional) | Chat identifier for per-chat filtering when multiple chats share one MCP connection |
+| Parameter     | Type                | Description                                                                         |
+| ------------- | ------------------- | ----------------------------------------------------------------------------------- |
+| `server_name` | `string` (required) | Name of the server to disable                                                       |
+| `chat_id`     | `string` (optional) | Chat identifier for per-chat filtering when multiple chats share one MCP connection |
 
 Returns JSON: `{ "session_id": "...", "action": "disabled", "server": "...", "disabled_servers": [...] }`
 
 **`combiner__session_enable_server`** — restore a hidden server for this session
 
-| Parameter | Type | Description |
-|---|---|---|
+| Parameter     | Type                | Description                     |
+| ------------- | ------------------- | ------------------------------- |
 | `server_name` | `string` (required) | Name of the server to re-enable |
-| `chat_id` | `string` (optional) | Same as above |
+| `chat_id`     | `string` (optional) | Same as above                   |
 
 Returns JSON: `{ "session_id": "...", "action": "enabled", "server": "...", "disabled_servers": [...] }`
 
 **`combiner__session_status`** — get the current session's disabled server list
 
-| Parameter | Type | Description |
-|---|---|---|
+| Parameter | Type                | Description   |
+| --------- | ------------------- | ------------- |
 | `chat_id` | `string` (optional) | Same as above |
 
 Returns JSON: `{ "session_id": "...", "disabled_servers": [...] }`

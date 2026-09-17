@@ -1,161 +1,249 @@
 # @geohar/pi-mcp-combiner
 
-A [Pi](https://pi.dev) extension that makes the **`mcp-combiner`** MCP aggregator
-available to Pi: it starts the combiner (supervised by
-[`sharedserver`](https://github.com/georgeharker/sharedserver)) and appends the
-combiner's tool-discovery directive to the system prompt.
+A [Pi](https://pi.dev) extension that gives Pi the **`mcp-combiner`** MCP aggregator —
+end to end. It starts the combiner (supervised by
+[`sharedserver`](https://github.com/georgeharker/sharedserver)), **speaks MCP to it
+directly** (a built-in client half — no second package required), and surfaces every
+server, tool, resource, and prompt as first-class Pi UX.
+
+Use it **standalone** (recommended) or **alongside
+[`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** — see
+[Two ways to run it](#two-ways-to-run-it).
 
 It is the Pi counterpart of the
 [Claude Code](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude)
-and
-[OpenCode](https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode)
+and [OpenCode](https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode)
 plugins, and shares the same combiner and the same `sharedserver` instance — so Pi,
 Claude Code, OpenCode, and Neovim can all talk to **one** refcounted combiner process.
 
 ## How it fits together
 
-Pi has no MCP of its own. Two pieces give it the combiner:
+Three halves, all in this one package:
 
-1. **[`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** — the Pi package that
-   actually speaks MCP. It reads its own `mcp.json` and connects to the combiner over
-   HTTP. **This extension does not replace it — you install both.**
-2. **This extension** — the process + instructions half, mirroring the sibling plugins:
-   - **Run the combiner** — on `session_start` it drives
-     ```
-     sharedserver use <name> --pid <pi-pid> --grace-period <g> \
-         -- <combiner> --mcp --config <servers.json> --port <port>
-     ```
-     `sharedserver` refcounts by PID with a grace period, so the combiner is shared
-     across clients and outlives any single one. It releases the refcount on
-     `session_shutdown` — but only when `reason === "quit"`, since reload/resume/fork
-     keep the same Pi process and a fresh `session_start` re-attaches.
-   - **Inject instructions** — on `before_agent_start` it appends the combiner's
-     `<server>_`-prefix / "discover before assuming" directive to the system prompt. The
-     combiner also serves the same text as its MCP `instructions`, which `pi-mcp-adapter`
-     surfaces on connect, so this is a belt to those braces.
+1. **Process** — on `session_start` it drives
 
-`sharedserver` itself is fetched automatically if it is not already installed (a pinned
-release via the cargo-dist installer — no Rust toolchain needed), using the exact same
-resolver as the other two plugins.
+   ```sh
+   sharedserver use <name> --pid <pi-pid> --grace-period <g> \
+       -- <combiner> --mcp --config <servers.json> --port <port>
+   ```
+
+   `sharedserver` refcounts by PID with a grace period, so the combiner is shared
+   across clients and outlives any single one. The refcount releases on
+   `session_shutdown` only when `reason === "quit"` — reload/resume/fork keep the same
+   Pi process and a fresh `session_start` re-attaches.
+
+2. **Client** — a thin, combiner-specific MCP client (streamable HTTP, per-Pi-session
+   identity, an elicitation bridge) that registers the agent-facing surface: the
+   `mcp()` proxy tool, a scripting tool, `read_*` resource tools, prompt slash
+   commands, a status footer, and an interactive panel. Everything the hundreds of
+   tool definitions would cost in context is replaced by two or three tool
+   definitions and on-demand discovery.
+3. **Instructions** — on `before_agent_start` it appends the combiner's
+   `<server>_`-prefix / "discover before assuming" directive to the system prompt.
+
+`sharedserver` itself is fetched automatically if not installed (pinned release via
+the cargo-dist installer), and the combiner is resolved from PATH / a checkout /
+a pinned PyPI release — same resolvers as the sibling plugins.
+
+## Two ways to run it
+
+### A. Standalone (recommended)
+
+Install only this extension. Nothing else needed — the client half connects to the
+combiner and registers everything:
+
+```sh
+pi install /path/to/mcp-companion/plugins/pi     # local checkout
+# or the published package under settings.json "packages"
+```
+
+On startup you get: the `mcp` tool (search → describe → call), `mcpScript`,
+`read_<resource>` tools, `/<server>__<prompt>` slash commands, a footer line
+(`14 servers enabled (13 ready) · 671 tools`), and `/mcp-combiner panel`.
+
+### B. Alongside pi-mcp-adapter
+
+Already running pi-mcp-adapter (for other servers, or while evaluating)? The client
+half is gated by a **tri-state**:
+
+| Setting                         | Behaviour                                                                                                                                                                                                |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `"adapter": "auto"` _(default)_ | client **off** when pi-mcp-adapter is detected installed, **on** otherwise — existing adapter setups upgrade with zero behaviour change                                                                  |
+| `"adapter": true`               | client on, adapter stays for other servers. Rename ours (`"toolName": "combiner"`) so both tools coexist, and remove the combiner entry from the shared `mcp.json` so the adapter doesn't double-connect |
+| `"adapter": false`              | legacy mode — process + instructions only; the adapter owns all MCP                                                                                                                                      |
+
+Env override: `PI_MCP_COMBINER_ADAPTER=off|on|auto`. `/mcp-combiner status` reports
+which mode is active and why.
+
+The legacy **`/mcp-combiner install-config`** verb (writes the combiner entry into the
+shared `mcp.json` for the adapter to read) still exists for mode B.
 
 ## Requirements
 
-- **`pi-mcp-adapter`** installed in Pi: `pi install npm:pi-mcp-adapter`.
 - **`mcp-combiner`** available as a command (`uv tool install mcp-combiner`), or just
-  **`uv`** on PATH — a pinned release is fetched from PyPI on demand. Requires combiner
-  ≥ 0.8.0 (the `--mcp` serve flag; version-gated automatically).
-- A combiner **`servers.json`** (see auto-probe locations below).
+  **`uv`** on PATH — a pinned release is fetched from PyPI on demand. Requires
+  combiner ≥ 0.8.0 (version-gated automatically).
+- A combiner **`servers.json`** (auto-probe locations below).
+- pi-mcp-adapter **not** required.
 
-## Install
+## Configuration — three layers
 
-### 1. Point `pi-mcp-adapter` at the combiner
+### 1. Pi settings file — `$PI_CODING_AGENT_DIR/extensions/mcp-combiner.json`
 
-Drop the combiner entry into one of `pi-mcp-adapter`'s `mcp.json` locations — e.g.
-project-local `.pi/mcp.json`, or global `~/.config/mcp/mcp.json`:
+Pi-side knobs (see [`settings.example.json`](./settings.example.json)):
 
-```json
+| Key               | Default  | Effect                                                                                                    |
+| ----------------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `toolName`        | `"mcp"`  | Name of the proxy tool. Rename (e.g. `"combiner"`) to coexist with pi-mcp-adapter's own `mcp`.            |
+| `adapter`         | `"auto"` | Client-half gate — see above.                                                                             |
+| `lazy`            | `"lazy"` | `"eager"` connects at session start; `"lazy"` on first use. Prompts/resources/directTools imply eager.    |
+| `exposeResources` | `true`   | Register `read_<resource>` tools.                                                                         |
+| `prompts`         | `true`   | Register prompt slash commands.                                                                           |
+| `scriptMode`      | `true`   | Register the `<toolName>Script` batching tool.                                                            |
+| `mcpFooterStatus` | `"full"` | Footer text: `"full"` = `N servers enabled (M ready) · T tools`, `"compact"` = `MCP M/N`, `"off"` = none. |
+| `mcpFooterKey`    | `"mcp"`  | The `ctx.ui.setStatus` key the footer publishes under (the slot oh-my-posh-style footers aggregate).      |
+| `url`             | —        | Explicit combiner URL. Env wins.                                                                          |
+| `notify`          | `true`   | Surface lifecycle messages via the Pi UI.                                                                 |
+
+### 2. Shared MCP config ladder — read-only
+
+The extension **reads** the standard MCP files (same ladder and precedence as
+pi-mcp-adapter, later wins): `~/.config/mcp/mcp.json` → `~/.agents/mcp.json` →
+`~/.agents/mcp/mcp.json` → `<agent dir>/mcp.json` → `.mcp.json` → `.pi/mcp.json`
+(project). It **never writes them**.
+
+The recognized `mcp-combiner` entry carries connection + per-project exposure:
+
+```jsonc
 {
   "mcpServers": {
     "mcp-combiner": {
       "url": "http://127.0.0.1:9741/mcp",
       "auth": "bearer",
-      "bearerTokenEnv": "MCP_COMBINER_AUTH_TOKEN"
-    }
-  }
+      "bearerTokenEnv": "MCP_COMBINER_AUTH_TOKEN",
+      "combiner": {
+        // extension-specific, ignored by other readers
+        "servers": { "allow": ["github", "svg-mcp"] }, // or "deny": [...]
+        "exposeResources": true,
+        "prompts": true,
+        "directTools": ["combiner__status", "github_search_*"], // or "search"
+      },
+    },
+  },
 }
 ```
 
-Or let the extension write it for you — **`/mcp-combiner install-config`** merges
-exactly this entry into `~/.config/mcp/mcp.json` (or a path you pass), preserving
-any other servers and any existing `url` you set. (It only writes when you ask —
-the extension never edits the adapter's config on its own.)
+- **`servers.allow/deny`** — per-project exposure, enforced _at the combiner_ for this
+  chat's token (sees through scripting too) and mirrored client-side.
+- **`directTools`** — promote named tools (globs) to first-class Pi tools at session
+  start, or `"search"` to promote tools the first time `mcp({search})` matches them.
+  A >50-entry allowlist warns; `true` is deliberately not offered (context cost).
+- Project layers are read against the **session cwd** — worktree subagents and
+  project switches get their own `.pi/mcp.json`. Commit the `combiner` block if you
+  want worktree agents to honour it.
+- URL precedence: `MCP_COMPANION_COMBINER_URL` (host-owned) → `PI_MCP_COMBINER_URL` →
+  settings `url` → ladder entry `url` → `host:port/mcp`.
 
-`"auth": "bearer"` with `"bearerTokenEnv"` is the correct single pairing — it does
-two jobs at once:
+### 3. Environment — `PI_MCP_COMBINER_*`
 
-- **Sends the token.** `pi-mcp-adapter` only attaches `Authorization: Bearer …`
-  when `auth === "bearer"` (`server-manager.ts`); `bearerTokenEnv` names the env
-  var it reads at connect. So if you lock the combiner down with an inbound bearer
-  (`MCP_COMBINER_AUTH_TOKEN`, see the combiner README), the header is presented —
-  nothing is written to disk. **Note:** `bearerTokenEnv` alone, or with `auth:
-  false`, does **not** send the header — the adapter gates it on `auth === "bearer"`.
-- **Suppresses OAuth.** `auth: "bearer"` also makes the adapter's `supportsOAuth()`
-  false, so a wrong/missing-token 401 surfaces as an honest error instead of the
-  spurious `Failed to start OAuth … DCR rejected (HTTP 404)` probe.
+| Variable                                        | Default           | Effect                                                             |
+| ----------------------------------------------- | ----------------- | ------------------------------------------------------------------ |
+| `PI_MCP_COMBINER_ADAPTER`                       | _(settings)_      | `off` / `on` / `auto` — client-half gate.                          |
+| `PI_MCP_COMBINER_TOOL_NAME`                     | _(settings)_      | Proxy tool name override.                                          |
+| `PI_MCP_COMBINER_URL`                           | —                 | Explicit combiner URL.                                             |
+| `PI_MCP_COMBINER_PORT`                          | `9741`            | HTTP port the combiner serves on.                                  |
+| `PI_MCP_COMBINER_HOST`                          | `127.0.0.1`       | HTTP host the combiner binds.                                      |
+| `PI_MCP_COMBINER_CONFIG`                        | _(auto-probed)_   | Path to the combiner's `servers.json`.                             |
+| `PI_MCP_COMBINER_COMMAND` / `_ARGS`             | _(auto-resolved)_ | Override the combiner invocation.                                  |
+| `PI_MCP_COMBINER_CHECKOUT`                      | —                 | Checkout for `uv run --project <checkout> python -m mcp_combiner`. |
+| `PI_MCP_COMBINER_NAME`                          | `mcp-combiner`    | `sharedserver` instance name.                                      |
+| `PI_MCP_COMBINER_GRACE`                         | `30m`             | `sharedserver` grace period.                                       |
+| `PI_MCP_COMBINER_LOG` / `_PYLOG` / `_LOG_LEVEL` | _(state dir)_     | Combiner logging; `"none"` disables.                               |
+| `PI_MCP_COMBINER_MANAGE`                        | `true`            | `false` → don't launch (combiner runs elsewhere).                  |
+| `PI_MCP_COMBINER_INSTRUCTIONS`                  | `true`            | `false` → skip the system-prompt directive.                        |
+| `PI_MCP_COMBINER_NOTIFY`                        | `true`            | `false` → don't surface messages via the Pi UI.                    |
+| `SHAREDSERVER_BIN` / `SHAREDSERVER_LOCKDIR`     | _(auto)_          | `sharedserver` binary / lock dir.                                  |
 
-Harmless when the combiner is **open**: the env var is unset, so no header is sent,
-the endpoint returns 200, and OAuth still never fires. So this one entry is correct
-whether or not inbound auth is enabled.
+`servers.json` auto-probe: `$PI_MCP_COMBINER_CONFIG` →
+`~/.cache/secrets/<user>.mcpservers.json` → `~/.config/mcp-combiner/servers.json` →
+`~/.config/mcp/servers.json`.
 
-(See [`mcp.json.example`](./mcp.json.example).) To give this Pi instance its own chat
-identity toward the combiner — parking its isolated upstream sessions separately — add a
-path token: `"url": "http://127.0.0.1:9741/mcp/pi-<yourname>"`. The combiner gives URL
-tokens first priority.
+## The UX
 
-If you edit `mcp.json` while Pi is running, run `/reload` (or `mcp({ connect:
-"mcp-combiner" })`) so the adapter re-reads it.
+**The proxy tool** (`mcp`, or your `toolName`) — one tool instead of hundreds:
 
-### 2. Install this extension
-
-Any of Pi's extension-loading mechanisms — all support a **local directory**:
-
-```sh
-# a) drop-in package dir (uses "main": dist/index.js — run `npm run build` first)
-npm --prefix plugins/pi run build
-ln -s "$PWD/plugins/pi" ~/.pi/agent/extensions/mcp-combiner
-
-# b) one-off, build-free live dev — Pi loads the TS source directly
-pi -e ./plugins/pi/src/index.ts
-
-# c) settings.json — list a local path under "extensions"
-#    { "extensions": ["/abs/path/to/mcp-companion/plugins/pi/src/index.ts"] }
-
-# d) published package — list under "packages" in settings.json
-#    { "packages": ["@geohar/pi-mcp-combiner@latest"] }
+```ts
+mcp({search: "github search code"})     → ranked hits + describe-next hint
+mcp({describe: "github_search_code"})   → full schema (TS-shaped) + description
+mcp({tool: "github_search_code", args: {...}})  → the call
+mcp({})                                 → status
 ```
 
-## Configuration
+In `"directTools": "search"` mode, search matches are promoted to first-class tools
+and announced in the result.
 
-Everything is via the `PI_MCP_COMBINER_*` environment namespace, which mirrors the Claude
-plugin's `CLAUDE_MCP_COMBINER_*` and the OpenCode plugin's `OPENCODE_MCP_COMBINER_*` — so
-running several clients means one namespace per client.
+**`mcpScript`** — batch calls with trusted JavaScript:
+`{code: "const r = await tools.search('q'); emit(r); return await tools.call('t', {})"}`.
 
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `PI_MCP_COMBINER_PORT` | `9741` | HTTP port the combiner serves on. |
-| `PI_MCP_COMBINER_HOST` | `127.0.0.1` | HTTP host the combiner binds. |
-| `PI_MCP_COMBINER_CONFIG` | *(auto-probed)* | Path to the combiner's `servers.json`. |
-| `PI_MCP_COMBINER_COMMAND` / `_ARGS` | *(auto-resolved)* | Override the combiner invocation. |
-| `PI_MCP_COMBINER_CHECKOUT` | — | Checkout for `uv run --project <checkout> python -m mcp_combiner`. |
-| `PI_MCP_COMBINER_NAME` | `mcp-combiner` | `sharedserver` instance name. |
-| `PI_MCP_COMBINER_GRACE` | `30m` | `sharedserver` grace period. |
-| `PI_MCP_COMBINER_LOG` | `~/.local/state/mcp-combiner/mcp-combiner.log` | Capture the combiner's stdout/stderr; `"none"` disables. |
-| `PI_MCP_COMBINER_PYLOG` | `~/.local/state/mcp-combiner/mcp-combiner-py.log` | The combiner's own `--log-file`; `"none"` disables. |
-| `PI_MCP_COMBINER_LOG_LEVEL` | `info` | The combiner's `--log-level`. |
-| `PI_MCP_COMBINER_MANAGE` | `true` | `false` → don't launch (assume the combiner runs elsewhere); instructions only. |
-| `PI_MCP_COMBINER_INSTRUCTIONS` | `true` | `false` → don't append the directive to the system prompt. |
-| `PI_MCP_COMBINER_NOTIFY` | `true` | `false` → don't surface attach/health messages via the Pi UI. |
-| `SHAREDSERVER_BIN` | *(auto-resolved)* | Path to the `sharedserver` binary. |
-| `SHAREDSERVER_LOCKDIR` | — | `sharedserver` lock directory. |
+**`read_<resource>` tools** — one zero-parameter tool per MCP resource; interactive
+`mcp-app` resources are flagged and their `read_*` results append the combiner UI-host URL (`/ui/<token>/?resource=…`), auto-opened in the browser — the interactive widget runs combiner-side.
 
-### `servers.json` auto-probe
+**Prompt slash commands** — `mcp__<server>__<name>` (e.g. `mcp__todoist__productivity_analysis`),
+positional + `name=value` args with bash quoting.
 
-`$PI_MCP_COMBINER_CONFIG` → `~/.cache/secrets/<user>.mcpservers.json` →
-`~/.config/mcp-combiner/servers.json` → `~/.config/mcp/servers.json`.
+**Footer** — `14 servers enabled (13 ready) · 671 tools` under the `mcp` status key;
+refreshed on connect/changes and every 30s; honest degradation when unreachable.
 
-### Combiner command resolution
+**`/mcp-combiner` command**:
 
-`$PI_MCP_COMBINER_COMMAND` (+`$PI_MCP_COMBINER_ARGS`) → `mcp-combiner` on `PATH` (only
-when ≥ 0.8.0) → `uv run --project <checkout> python -m mcp_combiner` → a pinned release
-via `uvx`. If the `mcp-combiner` on PATH is older than 0.8.0, the extension warns and
-falls back to a pinned `uvx` release rather than silently using a stale binary.
+| Verb                                          | Effect                                                       |
+| --------------------------------------------- | ------------------------------------------------------------ |
+| _(none)_ / `status`                           | Connection state, per-server glyph table, session view       |
+| `panel`                                       | Interactive panel (below)                                    |
+| `enable` / `disable` / `restart-server <srv>` | Drive the combiner's meta-tools                              |
+| `system-prompt`                               | Show the injected directive                                  |
+| `install-config [path]`                       | Legacy: write the shared-`mcp.json` entry for pi-mcp-adapter |
+
+**The panel** — `/mcp-combiner panel`: connection + port + session token, exposure
+filter, fuzzy search (`/`), per-server rows with state glyphs (`● ○ ⊘ ✗ ◌`) and the
+tools/resources/prompts counts trio, expandable tool lists with token estimates,
+`[session off]` labels for project-filtered servers, the combiner's own `⬢` meta-tools
+group. Keys: `↑↓/jk` move · `enter` expand/copy · `e` enable/disable · `c` copy ·
+`/` filter · `r` refresh · `q` close.
+
+## Chat identity
+
+Each Pi session mints its own grouping token (`pi-<sessionId>`) into the combiner URL
+path, so per-chat isolation (`isolate: true` servers), parked upstream sessions, and
+restart handover all key on the chat — subagents automatically get their own tokens
+(each child session binds fresh). A resumed chat continues its identity; a fork
+deliberately starts fresh. An explicit token in the configured URL always wins.
+
+## Permissions
+
+Tool-call policy is enforced **at the combiner** (`permissions` in `servers.json`:
+deny/elicit/allow per server, with interactive elicitation bridged to Pi's UI —
+subagents decline securely by default). If you also run
+[`pi-permission-system`](https://github.com/gotgenes/pi-packages), keep `toolName:
+"mcp"` for its `mcp`-surface rules (tool-glob patterns like `github_*` match out of
+the box).
+
+## Acknowledgments
+
+The client half began as a substantial reduction of
+[**pi-mcp-adapter**](https://github.com/nicobailon/pi-mcp-adapter) (MIT, © Nico Bailon) —
+the proxy-tool calling convention, search semantics, result-guard behavior, prompt
+command format, resource naming, the schema-signature renderer, and the HTML/JS
+widget contract derive from it, and the conformance cases in `test/` are ported from
+its suite. Everything OAuth, multi-server, and transport-related is deliberately
+_not_ here — the combiner owns that. This package would be a much worse tool
+without Nico's design work; go star it.
 
 ## Host-owned mode
 
 If **`$MCP_COMPANION_COMBINER_URL`** is set, an editor/host (e.g. Neovim) already owns
-and refcounts the combiner. The extension then **only injects instructions** and never
-starts or stops the process — the same early-exit as the sibling plugins. Equivalent to
-`PI_MCP_COMBINER_MANAGE=false`.
+and refcounts the combiner — this extension never launches it (the client still
+connects). Equivalent to `PI_MCP_COMBINER_MANAGE=false` for the process half.
 
 ## Development
 
@@ -163,12 +251,13 @@ starts or stops the process — the same early-exit as the sibling plugins. Equi
 npm install
 npm run typecheck
 npm run build      # emits dist/ (not committed; built on publish)
+npm run smoke      # live suite against the running combiner on :9741
 ```
 
-The `src/sharedserver-resolve.ts` file is **vendored byte-identical** from
+Design notes: [`docs/adapter-design.md`](./docs/adapter-design.md). The
+`src/sharedserver-resolve.ts` file is **vendored byte-identical** from
 [`georgeharker/sharedserver`](https://github.com/georgeharker/sharedserver) (via
-`scripts/sync-vendored.sh`), shared with the OpenCode plugin so both answer "which
-sharedserver, and why" identically. Edit it upstream; re-sync here.
+`scripts/sync-vendored.sh`). Edit upstream; re-sync here.
 
 ## License
 

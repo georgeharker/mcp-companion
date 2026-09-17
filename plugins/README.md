@@ -7,11 +7,11 @@ process across Claude Code, OpenCode, and Neovim.
 
 The plugins live **in this repo** (previously separate repos, now retired):
 
-| plugin | dir | for |
-|---|---|---|
-| `mcp-combiner` | [`plugins/claude`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude) | Claude Code |
-| `@geohar/opencode-mcp-combiner` | [`plugins/opencode`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode) | OpenCode |
-| `@geohar/pi-mcp-combiner` | [`plugins/pi`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi) | Pi (with [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)) |
+| plugin                          | dir                                                                                            | for                                                                                       |
+| ------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `mcp-combiner`                  | [`plugins/claude`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude)     | Claude Code                                                                               |
+| `@geohar/opencode-mcp-combiner` | [`plugins/opencode`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode) | OpenCode                                                                                  |
+| `@geohar/pi-mcp-combiner`       | [`plugins/pi`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi)             | Pi (standalone — or alongside [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)) |
 
 Both attach to (or start) the combiner under the sharedserver name
 `mcp-combiner`, so every client shares one refcounted process. When the host
@@ -73,10 +73,12 @@ launch — the host owns the lifecycle at its matching version.
    `~/.cache/secrets/$USER.mcpservers.json`,
    `~/.config/mcp-combiner/servers.json`, `~/.config/mcp/servers.json`.
 
-4. **(Pi only) [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** — Pi
-   has no MCP of its own; the adapter is what speaks MCP and connects to the
-   combiner. `pi install npm:pi-mcp-adapter`. (Claude Code and OpenCode have
-   native MCP clients and need nothing extra here.)
+4. **(Pi only) [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** —
+   **optional**. The extension now speaks MCP to the combiner itself (its client
+   half — the `mcp()` proxy, script tool, resources, prompts). Install the adapter
+   only to serve _other_ MCP servers, or while evaluating side by side: the
+   extension auto-defers when the adapter is present (`adapter: "auto"`). (Claude
+   Code and OpenCode have native MCP clients and need nothing extra here.)
 
 ## Claude Code — `mcp-combiner`
 
@@ -90,7 +92,7 @@ Installed from this repo's marketplace, inside a Claude Code session:
 Then restart the session (the hooks run at session start). What it does:
 
 - A `SessionStart` hook runs `sharedserver use … -- mcp-combiner --mcp
-  --config … --port …` to attach to (or launch) the shared combiner;
+--config … --port …` to attach to (or launch) the shared combiner;
   `SessionEnd` runs `unuse`. The process survives Claude restarts within the
   grace period (default 30m) and is shared with nvim / OpenCode sessions using
   the same name.
@@ -133,10 +135,13 @@ all-defaults, or tuple form for options:
 ```json
 {
   "plugin": [
-    ["@geohar/opencode-mcp-combiner@latest", {
-      "config": "~/.config/mcp-combiner/servers.json",
-      "port": 9741
-    }]
+    [
+      "@geohar/opencode-mcp-combiner@latest",
+      {
+        "config": "~/.config/mcp-combiner/servers.json",
+        "port": 9741
+      }
+    ]
   ]
 }
 ```
@@ -163,28 +168,29 @@ for the full table.
 
 ## Pi — `@geohar/pi-mcp-combiner`
 
-Pi has no MCP of its own, so two pieces give it the combiner:
-**[`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** (the Pi package that
-speaks MCP, reading its own `mcp.json`) and **this extension** (the process +
-instructions half). Install the adapter, point it at the combiner with a one-line
-`mcp.json` entry (see [`plugins/pi/mcp.json.example`](./pi/mcp.json.example)), and load
-the extension by any of Pi's mechanisms — a symlink into `~/.pi/agent/extensions/`, a
-local path under `settings.json` `extensions`, or the published package under `packages`:
+One package gives Pi the combiner: **this extension** runs it (the process half)
+and **speaks MCP to it itself** (the client half — the `mcp()` proxy tool, the
+script tool, `read_*` resources, prompt slash commands, the footer, and the
+`/mcp-combiner` panel). It can also run **alongside
+[`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** — it auto-defers when
+the adapter is present (`adapter: "auto"`), or you can force either arrangement;
+the full modes/config/UX reference is
+[`plugins/pi/README.md`](./pi/README.md). Load it by any of Pi's mechanisms — a
+symlink into `~/.pi/agent/extensions/`, a local path under `settings.json`
+`extensions`, or the published package under `packages`:
 
 ```sh
 npm --prefix plugins/pi run build
 ln -sfn "$PWD/plugins/pi" ~/.pi/agent/extensions/mcp-combiner
-pi install npm:pi-mcp-adapter
-cp plugins/pi/mcp.json.example ~/.config/mcp/mcp.json   # if you have no mcp.json yet
 ```
 
 On `session_start` it drives sharedserver exactly like the sibling plugins (releasing on
 `session_shutdown` when `reason === "quit"`); on `before_agent_start` it appends the
 combiner's tool-discovery directive to the system prompt (analogue of the CC plugin's
-SessionStart `additionalContext`). MCP registration is the static `mcp.json` entry —
-Pi's adapter has no in-memory `config` hook like OpenCode's — carrying an optional
-`/mcp/<token>` per-instance grouping token. Env knobs use the `PI_MCP_COMBINER_*`
-namespace mirroring the others. See [`plugins/pi/README.md`](./pi/README.md).
+SessionStart `additionalContext`) — and the client half registers the whole agent
+surface (`mcp()` proxy, script, `read_*` resources, prompt commands, footer, panel).
+Env knobs use the `PI_MCP_COMBINER_*` namespace mirroring the others. See
+[`plugins/pi/README.md`](./pi/README.md).
 
 **Verify:** inside Pi, `/mcp` shows `mcp-combiner` connected with the prefixed upstream
 tools; the combiner log shows the attach.
@@ -196,12 +202,12 @@ instructions-only.
 
 All three plugins pick a combiner the same way, highest first:
 
-| # | Source | Notes |
-|---|--------|-------|
-| 1 | `$CLAUDE_MCP_COMBINER_COMMAND` / `$OPENCODE_MCP_COMBINER_COMMAND` / `$PI_MCP_COMBINER_COMMAND`, or the `command` option | explicit; never version-checked |
-| 2 | `mcp-combiner` on `PATH` | **only when `>= 0.8.0`**; older is reported and skipped |
-| 3 | `uv run -m mcp_combiner` from `$…_CHECKOUT` / the `checkout` option | the checkout must exist |
-| 4 | `uvx mcp-combiner@<plugin version>` | the zero-install path; falls back to latest if that release is missing |
+| #   | Source                                                                                                                  | Notes                                                                  |
+| --- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1   | `$CLAUDE_MCP_COMBINER_COMMAND` / `$OPENCODE_MCP_COMBINER_COMMAND` / `$PI_MCP_COMBINER_COMMAND`, or the `command` option | explicit; never version-checked                                        |
+| 2   | `mcp-combiner` on `PATH`                                                                                                | **only when `>= 0.8.0`**; older is reported and skipped                |
+| 3   | `uv run -m mcp_combiner` from `$…_CHECKOUT` / the `checkout` option                                                     | the checkout must exist                                                |
+| 4   | `uvx mcp-combiner@<plugin version>`                                                                                     | the zero-install path; falls back to latest if that release is missing |
 
 The floor at row 2 exists because the plugins depend on combiner ≥ 0.8.0 behaviour
 (`--mcp` serve mode). A too-old `PATH` install is skipped rather than used, so a stale
@@ -220,7 +226,7 @@ export MCP_COMPANION_COMBINER_URL=http://127.0.0.1:9999/mcp
 ```
 
 They answer different questions and neither can be derived from the other. The port says
-where to *serve*; the URL is what the client *dials* — and for Claude Code that URL is the
+where to _serve_; the URL is what the client _dials_ — and for Claude Code that URL is the
 only thing `.mcp.json` can be redirected by, because its `${VAR:-default}` expansion does
 not nest (a `${A:-…${B:-9741}…}` default silently mangles into a literal rather than
 erroring). Set only one and the session cannot connect, so both plugins say so.
@@ -248,7 +254,7 @@ scheme the Neovim plugin uses (there, under `stdpath("log")`), defaulted to
   default `info`; `none` disables).
 
 The `mcp-combiner start`/`restart` CLI verbs default the same paths. Whichever
-client *starts* the shared process fixes its argv — when Neovim launched the
+client _starts_ the shared process fixes its argv — when Neovim launched the
 combiner, its `stdpath("log")` paths are already in place and these have no
 effect.
 
@@ -262,7 +268,7 @@ effect.
   `SHAREDSERVER_BIN=/path/to/sharedserver`.
 - **Port 9741 already in use** — usually a previous combiner still inside its
   grace period (that's the design: reattach, don't respawn). `mcp-combiner
-  status` to inspect it, `mcp-combiner restart --force` to bounce it, or move to
+status` to inspect it, `mcp-combiner restart --force` to bounce it, or move to
   a different port (see [Choosing a port](#choosing-a-port) — it needs the URL
   set too, not just `_PORT`).
 - **Tools missing mid-session** — `combiner__status` (as a tool) or

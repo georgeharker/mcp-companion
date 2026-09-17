@@ -232,12 +232,7 @@ const PLUGIN_VERSION: string | undefined = (() => {
  *  The uvx tail is what makes a bare plugin install work with nothing installed by hand.
  *  Unlike the Claude plugin there is no legacy `mcp-bridge` branch — this package post-dates
  *  the rename, so nobody can be upgrading into it from that name. */
-function resolveCombiner(
-    opts: Options,
-    env: NodeJS.ProcessEnv,
-    log?: LogFn,
-    toast?: ToastFn,
-): Command | undefined {
+function resolveCombiner(opts: Options, env: NodeJS.ProcessEnv, log?: LogFn, toast?: ToastFn): Command | undefined {
     const extra = opts.args ?? []
     if (opts.command) return { cmd: opts.command, args: [], extra }
     if (env.OPENCODE_MCP_COMBINER_COMMAND) {
@@ -427,13 +422,7 @@ function scheduleProcessHealthCheck(
 }
 
 /** OpenCode-level: confirm OpenCode actually connected to the combiner MCP server. */
-function scheduleMcpHealthCheck(
-    client: OcClient,
-    mcpName: string,
-    log: LogFn,
-    toast: ToastFn,
-    delayMs: number,
-) {
+function scheduleMcpHealthCheck(client: OcClient, mcpName: string, log: LogFn, toast: ToastFn, delayMs: number) {
     setTimeout(() => {
         client.mcp
             .status()

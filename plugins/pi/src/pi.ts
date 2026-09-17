@@ -20,7 +20,22 @@ export type ExtensionContext = {
     mode: "tui" | "rpc" | "json" | "print"
     hasUI: boolean
     signal?: AbortSignal
-    ui?: { notify?: (message: string, level?: "info" | "warn" | "error") => void }
+    ui?: ExtensionUIContext
+    sessionManager?: {
+        getSessionId(): string | undefined
+        getSessionFile(): string | undefined
+    }
+}
+
+/** The dialog-capable UI slice Pi hands extensions (TUI and RPC modes). Used by the
+ *  elicitation bridge and the mcp() tool's interactive fallbacks. */
+export type ExtensionUIContext = {
+    notify?: (message: string, level?: "info" | "warn" | "error") => void
+    select?: (title: string, options: string[], opts?: unknown) => Promise<string | undefined>
+    confirm?: (title: string, message: string, opts?: unknown) => Promise<boolean>
+    input?: (title: string, placeholder?: string, opts?: unknown) => Promise<string | undefined>
+    /** Set footer/status-bar text; undefined clears the slot. */
+    setStatus?: (key: string, text: string | undefined) => void
 }
 
 /** Context handed to a command handler. Superset of ExtensionContext in practice; we
@@ -42,6 +57,61 @@ export type SendMessage = {
 }
 export type SendMessageOptions = { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" }
 
+/** Minimal JSON-schema-ish parameter type for registerTool. Pi uses typebox TSchema;
+ *  we hand it plain JSON Schema objects, which its loader accepts. */
+export type ToolParameters = Record<string, unknown>
+
+export type ToolCallContext = ExtensionContext & {
+    onUpdate?: (update: { level: "info" | "warn" | "error"; message: string }) => void
+}
+
+export type TextBlock = { type: "text"; text: string }
+
+/** pi's TUI Component contract: an object whose render(width) returns styled lines. */
+export type TuiComponent = { render(width: number): string[] }
+
+/** The theme slice renderers receive (pi passes its live theme). */
+export type RenderTheme = { fg: (color: string, text: string) => string; bold?: (text: string) => string }
+
+/** Rendering options pi passes to renderResult. */
+export type ToolRenderResultOptions = { expanded: boolean; isPartial: boolean }
+
+/** pi's real tool-result contract: content is an ARRAY of blocks; the error flag is
+ *  set by THROWING from execute, never by returning a property. */
+export type ToolResult = {
+    content: TextBlock[]
+    details?: unknown
+    terminate?: boolean
+}
+
+export type ToolDefinition = {
+    name: string
+    label: string
+    description: string
+    promptSnippet?: string
+    parameters: ToolParameters
+    execute: (
+        toolCallId: string,
+        params: Record<string, unknown>,
+        signal: AbortSignal | undefined,
+        onUpdate: ((update: { level: "info" | "warn" | "error"; message: string }) => void) | undefined,
+        ctx: ToolCallContext | undefined,
+    ) => ToolResult | Promise<ToolResult>
+    /** Custom rendering (pi contract): each returns a TUI Component — render(width)
+     *  yields styled lines. Provided by client/renderers.ts. */
+    renderCall?: (
+        args: Record<string, unknown>,
+        theme: RenderTheme,
+        context: { toolCallId: string; [key: string]: unknown },
+    ) => TuiComponent
+    renderResult?: (
+        result: { content?: unknown; isError?: boolean; details?: unknown },
+        options: ToolRenderResultOptions,
+        theme: RenderTheme,
+        context: { [key: string]: unknown },
+    ) => TuiComponent
+}
+
 export type CommandSpec = {
     description: string
     handler: (args: string, ctx: ExtensionCommandContext) => void | Promise<void>
@@ -49,10 +119,7 @@ export type CommandSpec = {
 }
 
 export interface ExtensionAPI {
-    on(
-        event: "session_start",
-        handler: (event: SessionStartEvent, ctx: ExtensionContext) => void | Promise<void>,
-    ): void
+    on(event: "session_start", handler: (event: SessionStartEvent, ctx: ExtensionContext) => void | Promise<void>): void
     on(
         event: "session_shutdown",
         handler: (event: SessionShutdownEvent, ctx: ExtensionContext) => void | Promise<void>,
@@ -65,6 +132,11 @@ export interface ExtensionAPI {
         ) => BeforeAgentStartResult | Promise<BeforeAgentStartResult>,
     ): void
     registerCommand(name: string, spec: CommandSpec): void
+    /** Register an LLM-callable tool. Pi also accepts richer fields (renderers,
+     *  prepareArguments); we declare only what we use. */
+    registerTool(tool: ToolDefinition): void
+    /** Send a message into the conversation as if the user typed it (prompt delivery). */
+    sendUserMessage(text: string): void
     exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>
     sendMessage(message: SendMessage, options?: SendMessageOptions): void
 }

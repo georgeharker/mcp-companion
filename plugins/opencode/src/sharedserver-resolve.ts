@@ -104,7 +104,10 @@ function installPinned(
             mkdirSync(lockdir)
             haveLock = true
         } catch {
-            log?.("warn", `${cfg.label}: another process is installing sharedserver and did not finish; remove the stale lock if this persists: ${lockdir}`)
+            log?.(
+                "warn",
+                `${cfg.label}: another process is installing sharedserver and did not finish; remove the stale lock if this persists: ${lockdir}`,
+            )
             return undefined
         }
     }
@@ -139,7 +142,10 @@ function installPinned(
         let runEnv = env
         if (spawnSync("sh", ["-c", "command -v sha256sum"], { stdio: "ignore" }).status !== 0) {
             if (spawnSync("sh", ["-c", "command -v shasum"], { stdio: "ignore" }).status !== 0) {
-                log?.("warn", `${cfg.label}: refusing to install sharedserver — no sha256sum or shasum to verify the download`)
+                log?.(
+                    "warn",
+                    `${cfg.label}: refusing to install sharedserver — no sha256sum or shasum to verify the download`,
+                )
                 return undefined
             }
             writeFileSync(join(lockdir, "sha256sum"), '#!/bin/sh\nexec shasum -a 256 "$@"\n', { mode: 0o755 })

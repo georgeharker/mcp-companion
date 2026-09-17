@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from mcp_combiner.config import CombinerConfig
     from mcp_combiner.connections import ConnectionManager
     from mcp_combiner.sharedserver import SharedServerManager
+    from mcp_combiner.ui_host import UiHost
 
 
 @dataclass
@@ -309,6 +310,13 @@ class CombinerRuntime:
     # Late-bound in create_combiner.
     config: CombinerConfig | None = None
     combiner: FastMCP | None = None
+    # The interactive resource host (attached in asgi.create_app); its relay
+    # sub-app is fetched from here by __main__'s second loopback bind.
+    ui_host: "UiHost | None" = None
+    # Resolved inbound bearer (None = open endpoint). The UI host's loopback
+    # clients must present it on every call to /mcp/<token> — the middleware
+    # treats loopback traffic exactly like any other client.
+    inbound_auth_token: str | None = None
     conn_manager: ConnectionManager | None = None
     ss_manager: SharedServerManager | None = None
 

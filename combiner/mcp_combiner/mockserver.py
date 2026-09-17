@@ -132,6 +132,11 @@ class ToolSpec:
             raise ValueError(f"tool {name!r}: responses must be a list")
 
         first_param = next(iter(schema.get("properties", {})), "message")
+        try:
+            latency = float(raw.get("latency_ms", 0))
+            error_n = int(raw.get("error_n", 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"tool {name!r}: bad latency_ms/error_n: {exc}") from exc
         return cls(
             name=name,
             description=raw.get("description", f"Mock tool {name}"),
@@ -139,9 +144,9 @@ class ToolSpec:
             output_schema=raw.get("output_schema"),
             response_template=raw.get("response_template", "{" + first_param + "}"),
             responses=list(responses),
-            latency_ms=float(raw.get("latency_ms", 0)),
+            latency_ms=latency,
             error_mode=error_mode,
-            error_n=int(raw.get("error_n", 0)),
+            error_n=error_n,
         )
 
 
@@ -328,7 +333,10 @@ def _default_specs() -> list[ToolSpec]:
 
 def parse_tool_specs(text: str) -> list[ToolSpec]:
     """Parse a --tools JSON document (a list, or {"tools": [...]})."""
-    raw = json.loads(text)
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"invalid tools JSON: {exc}") from exc
     if isinstance(raw, dict):
         raw = raw.get("tools", [])
     if not isinstance(raw, list):
@@ -473,6 +481,65 @@ class MockServer:
             return f"slept {ms}ms"
 
         @mcp_srv.tool(
+            name="mock__widget_ping",
+            description="Target for widget-initiated tool calls (mcp-app host tests).",
+        )
+        async def mock__widget_ping(ctx: Context, msg: str) -> str:
+            state.record_session(ctx)
+            state.record_call("mock__widget_ping", ctx.session_id)
+            return f"widget said: {msg}"
+
+        @mcp_srv.resource(
+            "ui://mock/widget",
+            name="widget",
+            title="Mock interactive widget",
+            description="mcp-app fixture exercising prompts, context, tool calls, completion.",
+            mime_type="text/html;profile=mcp-app",
+        )
+        def mock_widget() -> str:
+            # Manual-matrix fixture: the real widget path drives the host through
+            # app-bridge's postMessage channel; route tests bypass the browser
+            # and call /proxy/* directly with the session token. Styled after
+            # svg-mcp's preview widget so the whole mcp-app family reads alike.
+            return """<!doctype html><html><head><meta charset='utf-8'><style>
+:root { color-scheme: dark; }
+body { margin: 0; padding: 24px; font: 13px/1.4 system-ui, sans-serif;
+       background: #1a1b1e; color: #e6e6e6; }
+h1 { font-size: 14px; font-weight: 600; margin: 0 0 12px; display: flex;
+     align-items: center; gap: 8px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #f0883e;
+       box-shadow: 0 0 6px #f0883e; }
+.dot.live { background: #57ab5a; box-shadow: 0 0 6px #57ab5a; }
+p { color: #9aa0a6; margin: 0 0 14px; }
+button { background: #2f3136; color: #e6e6e6; border: 1px solid #44464c;
+         border-radius: 6px; padding: 4px 9px; font: inherit; cursor: pointer;
+         margin-right: 8px; }
+button:hover { background: #3a3d43; }
+#log { margin-top: 14px; padding: 8px; border: 1px solid #34363b;
+       border-radius: 6px; min-height: 40px; color: #9aa0a6; white-space: pre-wrap; }
+</style></head><body>
+<h1><span class='dot' id='dot'></span>mock widget</h1>
+<p>Buttons fire the mcp-app protocol through the host bridge.</p>
+<button onclick='prompt()'>prompt</button>
+<button onclick='call()'>call tool</button>
+<div id='log'>ready</div>
+<script>
+function rpc(method, params) {
+  parent.postMessage({ type: 'mcp', method, params }, '*');
+  const log = document.getElementById('log');
+  log.textContent += '\\n→ ' + method;
+}
+function prompt() {
+  rpc('ui/message', { role: 'user', content: { type: 'text', text: 'hello' } });
+}
+function call() {
+  rpc('tools/call', { name: 'mock__widget_ping', arguments: { msg: 'ping' } });
+  document.getElementById('dot').classList.add('live');
+}}
+</script>
+</body></html>"""
+
+        @mcp_srv.tool(
             name="mock__crash",
             description=(
                 "Hard-exit the mock process (os._exit) after delay_ms, simulating "
@@ -497,7 +564,10 @@ class MockServer:
         async def mock__add_tool(ctx: Context, spec: str) -> str:
             state.record_session(ctx)
             state.record_call("mock__add_tool", ctx.session_id)
-            parsed = ToolSpec.from_dict(json.loads(spec))
+            try:
+                parsed = ToolSpec.from_dict(json.loads(spec))
+            except (ValueError, TypeError) as exc:
+                raise ToolError(f"invalid tool spec: {exc}") from exc
             await self.add_tool(parsed)
             return f"added {parsed.name}"
 
@@ -523,7 +593,10 @@ class MockServer:
             state.record_call("mock__push_responses", ctx.session_id)
             if name not in self._tools:
                 raise ToolError(f"no such tool {name}")
-            entries = json.loads(responses)
+            try:
+                entries = json.loads(responses)
+            except ValueError as exc:
+                raise ToolError(f"invalid responses JSON: {exc}") from exc
             self.push_responses(name, entries)
             return f"queued {len(entries)} responses for {name}"
 
@@ -812,9 +885,13 @@ class MockOAuthProvider:
 
             body = await request.json()
             client_id = f"client-{next(self._client_counter)}"
+            try:
+                issued_at = int(time.time())
+            except (TypeError, ValueError):  # pragma: no cover — time.time() is numeric
+                issued_at = 0
             record: dict[str, Any] = {
                 "client_id": client_id,
-                "client_id_issued_at": int(time.time()),
+                "client_id_issued_at": issued_at,
                 "redirect_uris": body.get("redirect_uris", []),
                 "grant_types": body.get("grant_types", ["authorization_code", "refresh_token"]),
                 "response_types": body.get("response_types", ["code"]),

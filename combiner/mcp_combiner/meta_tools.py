@@ -1,8 +1,10 @@
-"""Meta-tools for the combiner — status, enable/disable servers."""
+"""Meta-tools for the combiner — status, enable/disable servers, UI-widget retrieval."""
 
 from __future__ import annotations
 
+import json
 import logging
+from typing import Any
 
 from fastmcp import Context, FastMCP
 
@@ -590,3 +592,65 @@ def register_meta_tools(
                 "disabled_servers": blocked,
             }
         )
+
+    @combiner.tool()
+    async def combiner__ui_sessions(ctx: Context, chat_id: str | None = None) -> str:
+        """List interactive-widget (mcp-app) sessions recorded for this chat.
+
+        Args:
+            chat_id: Optional chat identifier (grouping token) when the calling
+                     session has no token binding of its own.
+
+        Returns JSON with one entry per open widget session: the resource URI,
+        idle seconds, whether the widget signalled complete, and per-bucket
+        counts (messages / contexts / intents). Pair with combiner__ui_messages
+        to read what the user actually did inside a widget.
+        """
+        from mcp_combiner import nvim_proxy
+        from mcp_combiner.runtime import RUNTIME
+
+        token = chat_id or nvim_proxy.token_for_session(ctx.session_id)
+        host = RUNTIME.ui_host
+        if host is None or not token:
+            return json.dumps({"token": token, "open": 0, "sessions": []})
+        return json.dumps({"token": token, **host.registry.summary(token)})
+
+    @combiner.tool()
+    async def combiner__ui_messages(
+        ctx: Context, chat_id: str | None = None, resource: str | None = None
+    ) -> str:
+        """Read what the user did inside interactive widgets (mcp-app resources).
+
+        Returns the facts widgets recorded for this chat, oldest first:
+          - messages: widget prompts (questions asked) and notifications
+          - contexts: update-model-context payloads the widget pushed
+          - intents:  tool calls the widget made, with their results
+
+        Args:
+            chat_id: Optional chat identifier (grouping token) when the calling
+                     session has no token binding of its own.
+            resource: Optional resource URI filter — only sessions for that
+                      widget (e.g. "ui://mock/widget").
+        """
+        from mcp_combiner import nvim_proxy
+        from mcp_combiner.runtime import RUNTIME
+
+        token = chat_id or nvim_proxy.token_for_session(ctx.session_id)
+        host = RUNTIME.ui_host
+        empty: dict[str, Any] = {"token": token, "messages": [], "contexts": [], "intents": []}
+        if host is None or not token:
+            return json.dumps(empty)
+        sessions = host.registry.for_token(token)
+        if resource is not None:
+            sessions = [s for s in sessions if s.resource_uri == resource]
+        out: dict[str, Any] = {"token": token, "messages": [], "contexts": [], "intents": []}
+        for s in sessions:
+            buckets = (
+                ("messages", s.messages),
+                ("contexts", s.contexts),
+                ("intents", s.intents),
+            )
+            for bucket, entries in buckets:
+                for entry in entries:
+                    out[bucket].append({"resource": s.resource_uri, **entry})
+        return json.dumps(out)
