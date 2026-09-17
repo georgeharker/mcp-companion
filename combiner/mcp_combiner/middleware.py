@@ -452,12 +452,27 @@ class ToolProcessingMiddleware(Middleware):
             # Meta-tools and nvim tools never reference widgets — skip them.
             if (
                 RUNTIME.ui_host is not None
+                and RUNTIME.combiner is not None
                 and context.fastmcp_context is not None
                 and not str(tool_name).startswith("combiner__")
             ):
-                from mcp_combiner.ui_host.holder import hold_for_widget
+                from mcp_combiner.ui_host.holder import extract_ui_uri, hold_for_widget
 
                 token = nvim_proxy.token_for_session(context.fastmcp_context.session_id)
                 if token:
-                    result = await hold_for_widget(context, result, str(tool_name), token)
+                    # Widget association: the result's own meta first, then the
+                    # TOOL-DEFINITION binding (meta.ui.resourceUri on the tool —
+                    # the mcp-app contract: every result of a widget-bound tool
+                    # renders into its widget).
+                    uri = extract_ui_uri(result)
+                    if not uri:
+                        try:
+                            tool = await RUNTIME.combiner.get_tool(str(tool_name))
+                            tmeta = getattr(tool, "meta", None) or {}
+                            tui = tmeta.get("ui") if isinstance(tmeta, dict) else None
+                            if isinstance(tui, dict) and isinstance(tui.get("resourceUri"), str):
+                                uri = tui["resourceUri"]
+                        except Exception:  # noqa: BLE001 — lookup failures never fail the call
+                            pass
+                    result = await hold_for_widget(context, result, str(tool_name), token, uri)
             return result

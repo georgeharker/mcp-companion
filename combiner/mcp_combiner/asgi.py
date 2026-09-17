@@ -35,6 +35,7 @@ def _env_hold_timeout() -> float:
         logger.warning("invalid MCP_COMBINER_UI_HOLD_TIMEOUT=%r — using 50s", raw)
         return 50.0
 
+
 logger = logging.getLogger(__name__)
 
 _mcp_log = logging.getLogger("mcp-combiner.requests")

@@ -41,7 +41,7 @@ import type {
 } from "./pi.js"
 import { resolveSharedserver } from "./sharedserver-resolve.js"
 import { CombinerConnection } from "./client/connection.js"
-import { createMcpTool } from "./client/proxy-tool.js"
+import { createMcpTool, openInBrowser } from "./client/proxy-tool.js"
 import { agentDir, loadSettings, settingsPath } from "./client/settings.js"
 import { resolveSessionConfig, type SessionConfig } from "./client/config-ladder.js"
 import { metaToolCall, statusText as controlStatusText } from "./client/control.js"
@@ -453,6 +453,10 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                 refreshFooter()
             },
             onStateChange: () => refreshFooter(),
+            // Stage 2: the widget hold announces its UI URL mid-call — open it.
+            onWidgetUrl: (url) => {
+                if (settings.uiAutoOpen !== false) openInBrowser(url)
+            },
         })
 
         pi.on("session_start", (event, ctx) => {

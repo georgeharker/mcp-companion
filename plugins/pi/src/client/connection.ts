@@ -50,6 +50,9 @@ export type ConnectionHooks = {
     onToolsChanged?: () => void
     /** connection state transitioned — refresh footer/status surfaces. */
     onStateChange?: (state: ConnectionState) => void
+    /** Stage 2: the combiner announced a widget UI URL while an agent tool call
+     *  is held in flight — the client should open it (gated by uiAutoOpen). */
+    onWidgetUrl?: (url: string) => void
 }
 
 const CLIENT_INFO = { name: "pi-mcp-combiner", version: "0.1.0" }
@@ -208,6 +211,21 @@ export class CombinerConnection {
                     this.hooks.onToolsChanged?.()
                 } catch {
                     // hook errors must never break the notification path
+                }
+            })
+            // Stage 2: the widget hold announces its UI URL via a log
+            // notification ("Interactive UI ready: <url>") while the agent's
+            // call is in flight — open it so the user sees the widget at once.
+            client.setNotificationHandler("notifications/message", (n) => {
+                const data = (n.params as { data?: unknown } | undefined)?.data
+                if (typeof data !== "string") return
+                const m = data.match(/Interactive UI ready: (\S+)/)
+                if (m) {
+                    try {
+                        this.hooks.onWidgetUrl?.(m[1])
+                    } catch {
+                        // hook errors must never break the notification path
+                    }
                 }
             })
             client.onclose = () => {

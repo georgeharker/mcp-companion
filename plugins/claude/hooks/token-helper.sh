@@ -103,12 +103,12 @@ emit() {
 # dead header on every request.
 url="${CLAUDE_CODE_MCP_SERVER_URL:-}"
 case "$url" in
-  */mcp/?*)
-    # Abstain on the SESSION token (the URL already carries one), but still
-    # present the bearer if the combiner requires it.
-    emit ""
-    exit 0
-    ;;
+*/mcp/?*)
+  # Abstain on the SESSION token (the URL already carries one), but still
+  # present the bearer if the combiner requires it.
+  emit ""
+  exit 0
+  ;;
 esac
 
 # --- Explicit override ---------------------------------------------------------

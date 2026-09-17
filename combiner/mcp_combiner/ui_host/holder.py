@@ -72,16 +72,19 @@ def _fold_text(result: object, text: str) -> object:
 
 
 async def hold_for_widget(
-    context: Any, result: object, tool_name: str, token: str | None
+    context: Any, result: object, tool_name: str, token: str | None, uri: str | None
 ) -> object:
-    """Run the Stage 2 hold flow for a result referencing an interactive resource.
-    Returns the (possibly folded) result; never raises."""
+    """Run the Stage 2 hold flow for a result whose TOOL (or the result itself)
+    references an interactive resource. Returns the (possibly folded) result;
+    never raises. The caller resolves the uri: the result's own meta first,
+    falling back to the tool-definition binding (meta.ui.resourceUri on the
+    tool — the mcp-app/OpenAI outputTemplate contract)."""
     from mcp_combiner.runtime import RUNTIME
 
     host = RUNTIME.ui_host
     if host is None or token is None:
         return result
-    uri = extract_ui_uri(result)
+    uri = uri or extract_ui_uri(result)
     if not uri:
         return result
 

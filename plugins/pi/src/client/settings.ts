@@ -41,6 +41,9 @@ export type CombinerSettings = {
     mcpFooterKey: string
     /** Register the trusted batching tool (<toolName>Script). Default true. */
     scriptMode: boolean
+    /** Auto-open interactive widget URLs (Stage 2 holds + resource reads).
+     *  Default true. */
+    uiAutoOpen: boolean
     /** Explicit combiner base URL (e.g. "http://127.0.0.1:9741/mcp"). Env wins. */
     url?: string
     /** Notify (vs stderr-only) for connection lifecycle messages. */
@@ -56,6 +59,7 @@ export const DEFAULT_SETTINGS: CombinerSettings = {
     mcpFooterStatus: "full",
     mcpFooterKey: "mcp",
     scriptMode: true,
+    uiAutoOpen: true,
     notify: true,
 }
 
@@ -97,6 +101,7 @@ export function loadSettings(path = settingsPath()): CombinerSettings {
         out.mcpFooterStatus = d.mcpFooterStatus
     }
     if (typeof d.mcpFooterKey === "string" && d.mcpFooterKey.trim()) out.mcpFooterKey = d.mcpFooterKey.trim()
+    if (typeof d.uiAutoOpen === "boolean") out.uiAutoOpen = d.uiAutoOpen
     if (typeof d.scriptMode === "boolean") out.scriptMode = d.scriptMode
     if (typeof d.url === "string" && d.url.trim()) out.url = d.url.trim()
     if (typeof d.notify === "boolean") out.notify = d.notify
