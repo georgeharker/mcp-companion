@@ -9,6 +9,7 @@ powers the [mcp-companion](https://github.com/georgeharker/mcp-companion) Neovim
 > PyPI package · command · import package: **`mcp-combiner`** / `mcp-combiner` / `mcp_combiner`.
 
 > ⚠️ **Renamed from `mcp-bridge`.** If you ran an earlier build:
+>
 > - command/import are now `mcp-combiner` / `mcp_combiner`; reinstall:
 >   `uv tool uninstall mcp-bridge` then `uv tool install …` (see Install below).
 > - config env vars `MCP_BRIDGE_*` → `MCP_COMBINER_*` (and `MCP_COMPANION_COMBINER_URL` →
@@ -34,6 +35,35 @@ Or install it: `uv pip install mcp-combiner` (PyPI), or from the repo subdir
 ```bash
 mcp-combiner --config /path/to/servers.json --port 9741
 ```
+
+## Interactive resource host (mcp-app widgets)
+
+The combiner serves interactive widget resources itself: open
+`/ui/<token>/?resource=<uri>` and it renders a sandboxed host page (provider
+HTML on a second loopback origin — port+1 — never same-origin with the
+capability-holding page), streams tool data to the widget over SSE, and gates
+widget-initiated tool calls through the same permission pipeline as agent
+calls.
+
+A tool result whose **tool definition** binds a widget resource
+(`meta.ui.resourceUri`, e.g. todoist's `find-tasks-by-date`) holds the agent's
+call in flight while you interact: the found data streams into the widget,
+your actions run as tool calls through the combiner, and **Done** resolves the
+call with a summary of the interaction. The hold budget is 50s by default
+(`MCP_COMBINER_UI_HOLD_TIMEOUT`).
+
+Retrieve what happened inside any widget with the meta-tools:
+
+- `combiner__ui_sessions` — open/recent widget sessions per chat
+- `combiner__ui_messages` — the prompts, contexts, and tool calls the widget made
+
+Security: `/ui/*` is bearer-free (the path token is the capability) while
+`/mcp` and the control routes keep the bearer gate; the sandbox denies
+`connect-src` unless the widget's resource metadata declares domains. For
+testing, the mockserver serves a spec-speaking widget at
+`ui://mock/mock/widget` (run it with `--transport http` and point a
+`mock` server entry at it). Design details:
+[`docs/designs/interactive-resource-host.md`](../docs/designs/interactive-resource-host.md).
 
 ## Inbound authentication
 
@@ -82,11 +112,11 @@ The middleware lives in `mcp_combiner/inbound_auth.py` and is **self-contained**
 env var — set them to the same value for one shared secret, or distinct values for
 per-service isolation:
 
-| server | env var |
-|---|---|
+| server       | env var                   |
+| ------------ | ------------------------- |
 | mcp-combiner | `MCP_COMBINER_AUTH_TOKEN` |
-| cribsheet | `CRIBSHEET_AUTH_TOKEN` |
-| svg-mcp | `SVG_MCP_AUTH_TOKEN` |
+| cribsheet    | `CRIBSHEET_AUTH_TOKEN`    |
+| svg-mcp      | `SVG_MCP_AUTH_TOKEN`      |
 
 ```python
 from inbound_auth import BearerAuthMiddleware, resolve_auth_token

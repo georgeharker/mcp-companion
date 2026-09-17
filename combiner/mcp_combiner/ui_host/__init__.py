@@ -11,8 +11,11 @@ token filters) applies to widget-initiated calls exactly like agent-initiated
 ones.
 
 Lifted from pi-mcp-adapter's ui-server/ui-session/templates (MIT,
-© 2026 Nico Bailon); Stage 1 scope: no in-flight tool holding, no streaming
-envelopes, no consent persistence, no cross-restart recovery.
+© 2026 Nico Bailon). Stage 1 + Stage 2: in-flight tool-call holding
+(`holder.py` — a widget-bound tool result holds the agent's call while the
+user interacts) and per-session SSE event queues are implemented. Still
+future: streaming result-patch envelopes, consent persistence, prompt→
+elicitation relay, cross-restart recovery.
 """
 
 from __future__ import annotations

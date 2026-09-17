@@ -5,6 +5,13 @@ Status: design (post-discussion 2026-09-15); **Stage 1 implemented + route-teste
 [`plugins/pi/docs/adapter-design.md`](../../plugins/pi/docs/adapter-design.md) (the Pi
 client half — its "later: ext-apps interactive UIs" row is _this_ design).
 
+**Status update (2026-09-17): Stage 1 and Stage 2 are implemented and tested.**
+The tool-triggered hold, per-session SSE event queues, and the extension's
+auto-open notification path all shipped; the delivery race (tool result pushed
+before the widget finished its handshake) is fixed by the host page's
+init-gated payload queue. Outstanding: prompt→elicitation relay (Risks #0b),
+progressToken reporting, streaming result-patch envelopes.
+
 ## The problem
 
 MCP servers increasingly expose **interactive resources** — widgets with

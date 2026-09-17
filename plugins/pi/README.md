@@ -100,6 +100,7 @@ Pi-side knobs (see [`settings.example.json`](./settings.example.json)):
 | `exposeResources` | `true`   | Register `read_<resource>` tools.                                                                         |
 | `prompts`         | `true`   | Register prompt slash commands.                                                                           |
 | `scriptMode`      | `true`   | Register the `<toolName>Script` batching tool.                                                            |
+| `uiAutoOpen`      | `true`   | Auto-open interactive widget URLs in the browser (Stage 2 holds + resource reads).                        |
 | `mcpFooterStatus` | `"full"` | Footer text: `"full"` = `N servers enabled (M ready) · T tools`, `"compact"` = `MCP M/N`, `"off"` = none. |
 | `mcpFooterKey`    | `"mcp"`  | The `ctx.ui.setStatus` key the footer publishes under (the slot oh-my-posh-style footers aggregate).      |
 | `url`             | —        | Explicit combiner URL. Env wins.                                                                          |
@@ -187,6 +188,17 @@ and announced in the result.
 
 **`read_<resource>` tools** — one zero-parameter tool per MCP resource; interactive
 `mcp-app` resources are flagged and their `read_*` results append the combiner UI-host URL (`/ui/<token>/?resource=…`), auto-opened in the browser — the interactive widget runs combiner-side.
+
+**Interactive widgets (mcp-app)** — when a widget-bound tool result arrives (e.g.
+`todoist_find-tasks-by-date`), the combiner **holds the call in flight**: the
+extension auto-opens the widget in your browser, the tool's data streams to it
+over SSE, and you interact while the call waits. Hit **Done** in the widget and
+the call resolves with a summary of what you did. Every widget action runs
+through the combiner's permission pipeline, and the full interaction stays
+retrievable: ask for `combiner__ui_messages` afterwards (the hold budget is 50s
+by default — `MCP_COMBINER_UI_HOLD_TIMEOUT` combiner-side; the widget URL stays
+valid after a timeout, you just lose the fold-into-result for that call).
+Widgets that self-fetch (svg-mcp's preview) work the same way.
 
 **Prompt slash commands** — `mcp__<server>__<name>` (e.g. `mcp__todoist__productivity_analysis`),
 positional + `name=value` args with bash quoting.

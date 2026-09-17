@@ -8,10 +8,11 @@ Stage 1:
 - /proxy/tools/call, /proxy/ui/*, /proxy/ui/complete, /proxy/ui/heartbeat — the
   widget→combiner action path, attributed to the chat's grouping token by talking
   to the combiner's own /mcp/<token> endpoint as a real MCP client
-- /events — minimal SSE: heartbeats + session-complete only (Stage 2 adds stream
-  envelopes and result patches)
+- /events — SSE: ready frame, per-session widget events (tool-input /
+  tool-result / tool-cancelled / session-complete)
 
-Stage 2 (not here): in-flight tool-call holding, result-patch envelopes,
+Stage 2 status: in-flight tool-call holding lives in `holder.py` (invoked from
+the tool-call middleware). Still future: result-patch stream envelopes,
 consent-manager persistence, cross-restart session recovery.
 """
 
