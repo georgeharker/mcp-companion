@@ -45,7 +45,7 @@ jobs:
         uses: astral-sh/setup-uv@v6
       - name: Build sdist + wheel
         run: uv build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: combiner/dist/ # path is relative to the repo root, not working-directory
@@ -57,7 +57,7 @@ jobs:
     permissions:
       id-token: write # required for Trusted Publishing (OIDC)
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
