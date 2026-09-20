@@ -9,7 +9,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://cdn.jsdelivr.net/npm/@geohar/pi-mcp-combiner/assets/preview.png"
+    "image": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/plugins/pi/assets/preview.png"
   },
   "files": [
     "src",
