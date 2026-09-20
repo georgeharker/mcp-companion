@@ -8,7 +8,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://cdn.jsdelivr.net/npm/@geohar/pi-mcp-combiner/assets/preview.png"
   },
   "files": [
     "src",
@@ -16,7 +17,8 @@
     "instructions.txt",
     "mcp.json.example",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "assets"
   ],
   "scripts": {
     "build": "tsc",
