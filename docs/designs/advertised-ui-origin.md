@@ -103,6 +103,49 @@ Rules:
 - `/proxy/*` actions ride the widget's session scope exactly as on loopback;
   no auth model changes here, only reachability.
 
+## Binding — the other half of the feature
+
+`advertise` is URL construction only; reachability needs the combiner to
+**bind** an interface the tailnet routes to. The bind lives in the
+sharedserver-registered command (`--host`), not in servers.json.
+
+### Changing the bind (the sanctioned path)
+
+The registered command survives `mcp-combiner restart` (it reuses the def), so
+a bind change is a re-registration, then the ordinary restart:
+
+```sh
+# 1. Overwrite the server def with --host 0.0.0.0 (same args as the current
+#    registration — `sharedserver info mcp-combiner` prints them — plus the flag)
+sharedserver config register --scope <scope> mcp-combiner \
+    -- mcp-combiner --mcp --config <servers.json> --host 0.0.0.0 --port 9741 \
+       --log-file <pylog> --log-level info --restore <handover.json>
+
+# 2. Bounce via the sanctioned path — handover carries state, clients reconnect
+mcp-combiner restart --force
+
+# 3. Verify BOTH healths: loopback (the extension's own client) and the tailnet
+curl http://127.0.0.1:9741/health -H "authorization: Bearer $MCP_COMBINER_AUTH_TOKEN"
+curl http://<tailnet-ip>:9741/health -H "authorization: Bearer $MCP_COMBINER_AUTH_TOKEN"
+```
+
+Never kill the combiner process directly — the ctl restart (armed handover) is
+the sanctioned path; a raw kill boots the successor state-less by design
+("a combiner too wedged to answer restarts restore-less — fresh boot, its
+state is suspect anyway").
+
+### The exposure trade
+
+| bind | serves | verdict |
+|---|---|---|
+| `127.0.0.1` | desktop only | the pre-feature default; remote widget legs dead |
+| `0.0.0.0` | loopback + tailnet + LAN | **recommended** — the extension's own client is loopback, so the tailnet-IP-only bind would break it; `/mcp` keeps its bearer gate, the UI host is token-scoped, `/health` is open but read-only |
+| `<tailnet-ip>` | tailnet only | tightest, but loopback clients (the pi extension itself) cannot reach it — not viable while the extension connects via loopback |
+
+`0.0.0.0` on a home LAN is a conscious choice: the sensitive routes stay
+authenticated, but the UI host's widget sessions were designed for private
+networks (the design's security posture), not hostile ones.
+
 ## Open questions
 
 - **The un-bien app's renderer**: webview vs external browser — determines
