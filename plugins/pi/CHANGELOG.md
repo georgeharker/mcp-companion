@@ -32,6 +32,11 @@ tagged `vX.Y.Z`.
   firing `session_shutdown`, so the old instance's stream stayed alive and
   competed for elicit routing. A process-global registry survives re-imports;
   the fresh factory closes prior connections.
+- The native connection's stale-session retry covers **every** request method,
+  not just `callTool` — `listTools`/`listPrompts`/`getPrompt`/`listResources`/
+  `readResource` were bare, so the router's listTools-first lookup surfaced raw
+  `McpSessionExpiredError` after a combiner bounce and never reset the client,
+  wedging the connection until reload.
 - Stale-ctx crash on `/reload` (pi 1.0's hard assertion): the teardown's
   reset-reason log rode the orphaned instance's captured `ctx.ui` — an
   uncaught throw in the fire-and-forget microtask killed pi. `clientLog`
