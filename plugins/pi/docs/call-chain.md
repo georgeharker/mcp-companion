@@ -11,7 +11,7 @@ displaced-free: it owns `/mcp` and never connects the combiner).
 | layer | owner | naming it produces |
 |---|---|---|
 | model tool-call | the model | bare `<server>_<tool>` (`mock_echo`), the router `mcp({tool, args})`, or `read_<server>_<name>` |
-| our extension's surface | `plugins/pi` (`direct-tools`, `proxy-tool`, `resources`) | the *registered* pi tools: bare names, `mcp`, `mcpScript`, `read_*` |
+| our extension's surface | `plugins/pi` (`client/proxy-tool`, `native/tool-surface`, `native/resources`) | the *registered* pi tools: bare names, `mcp`, `read_*` |
 | our connection | `client/connection.ts` (`CombinerConnection`) | URL `/mcp/<token>` (chat token in the path) |
 | pi-builtin MCP | pi-core (`builtin:mcp`) | `mcp__mcp-combiner__<tool>` — unused: we never register `/mcp`, and the shared-ladder entry is ours (the builtin may still connect it if a user enables it; see the pi-native contrast below) |
 | combiner ASGI | `combiner/mcp_combiner/asgi.py` | strips `/mcp/<token>` → `/mcp`; maps token ↦ wire session |

@@ -1,20 +1,38 @@
 # @geohar/pi-mcp-combiner
 
-A [Pi](https://pi.dev) extension that gives Pi the **`mcp-combiner`** MCP aggregator —
-end to end. It starts the combiner (supervised by
-[`sharedserver`](https://github.com/georgeharker/sharedserver)), **speaks MCP to it
-directly** (a built-in client half — no second package required), and surfaces every
-server, tool, resource, and prompt as first-class Pi UX.
+A [Pi](https://pi.dev) extension + one shared **MCP aggregator**: a single refcounted
+combiner process fronts *all* your MCP servers, and every client you use talks to
+that one process.
 
-Use it **standalone** (recommended) or **alongside
-[`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)** — see
-[Two ways to run it](#two-ways-to-run-it).
+**It reuses Pi's MCP stack rather than replacing it.** The transport is
+`@earendil-works/pi-mcp` — Pi's own MCP client library (peer dependency, `^1.0.2`) —
+and Pi's built-in MCP support keeps its role (`/mcp`, codemode, `tool_search`). The
+extension is *additive*; it adds the pieces Pi's built-in can't do:
+
+- **Elicitation** — upstream servers can ask *you*: consent ladders, deploy
+  confirmations, structured forms. Pi's built-in MCP can't forward those; this
+  extension bridges them to Pi's dialogs — and to your paired app over
+  [un-bien](https://github.com/georgeharker/un-bien).
+- **Interactive resources (mcp-app widgets)** — Pi's `read_mcp_resource` skips
+  `ui://` resources entirely; we register `read_*` tools, host the widget, hold the
+  call while you interact, and fold your actions back into the result.
+- **A discovery router** — `mcp({search})` / `({describe})` / `({tool, args})`:
+  ranked discovery over the whole aggregated surface, under the tool name `mcp`
+  that tool_call gates already recognize.
+
+**The sharing is the point.** One combiner process, supervised by
+[`sharedserver`](https://github.com/georgeharker/sharedserver), is shared across Pi,
+Claude Code, OpenCode, and Neovim — upstream connections, sessions, and OAuth live
+once, not once per client. One `servers.json` permission policy (deny / elicit /
+allow, per server) is enforced *at the combiner* for every client alike, keyed by
+per-chat tokens that survive restarts: consent grants, parked sessions, and filters
+carry across combiner restarts by handover, and `combiner__status` reports what a
+boot restored.
 
 It is the Pi counterpart of the
 [Claude Code](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude)
 and [OpenCode](https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode)
-plugins, and shares the same combiner and the same `sharedserver` instance — so Pi,
-Claude Code, OpenCode, and Neovim can all talk to **one** refcounted combiner process.
+plugins, and shares the same combiner and the same `sharedserver` instance.
 
 ## How it fits together
 
@@ -32,12 +50,13 @@ Three halves, all in this one package:
    `session_shutdown` only when `reason === "quit"` — reload/resume/fork keep the same
    Pi process and a fresh `session_start` re-attaches.
 
-2. **Client** — a thin, combiner-specific MCP client (streamable HTTP, per-Pi-session
-   identity, an elicitation bridge) that registers the agent-facing surface: the
-   `mcp()` proxy tool, a scripting tool, `read_*` resource tools, prompt slash
-   commands, a status footer, and an interactive panel. Everything the hundreds of
-   tool definitions would cost in context is replaced by two or three tool
-   definitions and on-demand discovery.
+2. **Client** — the pi-mcp transport on an owned connection (per-Pi-session custody
+   token, elicitation capability advertised and bridged to Pi's UI) that registers
+   the agent-facing surface: every combiner tool first-class under its bare name
+   (`github_search_code`) with pi-1.0 exposure/namespace/annotations, the `mcp()`
+   discovery router on the same connection, `read_*` resource tools (interactive
+   `ui://` widgets included), prompt slash commands, a status footer, and an
+   interactive panel.
 3. **Instructions** — on `before_agent_start` it appends the combiner's
    `<server>_`-prefix / "discover before assuming" directive to the system prompt.
 
@@ -45,9 +64,7 @@ Three halves, all in this one package:
 the cargo-dist installer), and the combiner is resolved from PATH / a checkout /
 a pinned PyPI release — same resolvers as the sibling plugins.
 
-## Two ways to run it
-
-### A. Standalone (recommended)
+## Running it
 
 Install only this extension. Nothing else needed — the client half connects to the
 combiner and registers everything:
@@ -57,26 +74,18 @@ pi install /path/to/mcp-companion/plugins/pi     # local checkout
 # or the published package under settings.json "packages"
 ```
 
-On startup you get: the `mcp` tool (search → describe → call), `mcpScript`,
-`read_<resource>` tools, `/<server>__<prompt>` slash commands, a footer line
+On startup you get: every combiner tool first-class under its bare name (your
+`directTools` matches declared `direct`, the rest on codemode), the `mcp` discovery
+router, `read_<resource>` tools, `/<server>__<prompt>` slash commands, a footer line
 (`14 servers enabled (13 ready) · 671 tools`), and `/mcp-combiner panel`.
 
-### B. Alongside pi-mcp-adapter
-
-Already running pi-mcp-adapter (for other servers, or while evaluating)? The client
-half is gated by a **tri-state**:
-
-| Setting                         | Behaviour                                                                                                                                                                                                |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `"adapter": "auto"` _(default)_ | client **off** when pi-mcp-adapter is detected installed, **on** otherwise — existing adapter setups upgrade with zero behaviour change                                                                  |
-| `"adapter": true`               | client on, adapter stays for other servers. Rename ours (`"toolName": "combiner"`) so both tools coexist, and remove the combiner entry from the shared `mcp.json` so the adapter doesn't double-connect |
-| `"adapter": false`              | legacy mode — process + instructions only; the adapter owns all MCP                                                                                                                                      |
-
-Env override: `PI_MCP_COMBINER_ADAPTER=off|on|auto`. `/mcp-combiner status` reports
-which mode is active and why.
-
-The legacy **`/mcp-combiner install-config`** verb (writes the combiner entry into the
-shared `mcp.json` for the adapter to read) still exists for mode B.
+> **\*Via another mechanism — pi-mcp-adapter.** The target is Pi's native MCP support
+> (Pi ≥ 1.0). If you already run
+> [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter) for other servers, this
+> extension can stand down its client half: `"adapter": false` (or the default
+> `"auto"`, which detects the adapter and yields automatically) leaves the process
+> half + instructions to us and MCP to the adapter. `/mcp-combiner install-config`
+> still writes the shared-`mcp.json` entry for the adapter to read.
 
 ## Requirements
 
@@ -85,8 +94,8 @@ shared `mcp.json` for the adapter to read) still exists for mode B.
   combiner ≥ 0.8.0 (version-gated automatically).
 - A combiner **`servers.json`** (auto-probe locations below).
 - pi-mcp-adapter **not** required.
-- **Pi ≥ 1.0** with its bundled `@earendil-works/pi-mcp` (peer dependency, `^1.0.2`) —
-  native mode is built on the pi-mcp transport; legacy mode needs no extra install.
+- **Pi ≥ 1.0** with its bundled `@earendil-works/pi-mcp` (peer dependency,
+  `^1.0.2`) — the transport is Pi's own MCP client library.
 
 ## Configuration — three layers
 
@@ -138,11 +147,11 @@ The recognized `mcp-combiner` entry carries connection + per-project exposure:
 
 - **`servers.allow/deny`** — per-project exposure, enforced _at the combiner_ for this
   chat's token (sees through scripting too) and mirrored client-side.
-- **`directTools`** — promote named tools (globs) to first-class Pi tools at session
-  start, or `"search"` to promote tools the first time `mcp({search})` matches them.
-  In native mode the same list maps to pi-1.0 `direct` exposure (everything else rides
-  `codemode`, discoverable via pi's `tool_search`); `"search"` degrades to all-codemode.
-  A >50-entry allowlist warns; `true` is deliberately not offered (context cost).
+- **`directTools`** — an allowlist (globs) of tools to declare `direct` (verbatim,
+  in every request) instead of `codemode` (reachable from scripts and pi's
+  `tool_search`). `"search"` degrades to all-codemode — pi's own discovery replaces
+  the old search-promote. A >50-entry allowlist warns; `true` is deliberately not
+  offered (context cost: every direct schema rides in every request).
 - Project layers are read against the **session cwd** — worktree subagents and
   project switches get their own `.pi/mcp.json`. Commit the `combiner` block if you
   want worktree agents to honour it.
@@ -183,9 +192,6 @@ mcp({describe: "github_search_code"})   → full schema (TS-shaped) + descriptio
 mcp({tool: "github_search_code", args: {...}})  → the call
 mcp({})                                 → status
 ```
-
-In `"directTools": "search"` mode, search matches are promoted to first-class tools
-and announced in the result.
 
 **Per-tool registration** — the combiner's tools are also declared first-class under
 their own bare names (`github_search_code`): `directTools` matches verbatim, the rest
