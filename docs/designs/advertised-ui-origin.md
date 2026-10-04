@@ -57,11 +57,15 @@ address:
   "ui_host": {
     // URL construction only — NEVER affects binding.
     "advertise": "auto"
-    // "auto" (default): at URL-construction time, enumerate interfaces and prefer
-    //   an address in 100.64.0.0/10 (Tailscale's reserved CGNAT range — a
-    //   deterministic, portable fingerprint) → http://<tailnet-ip>:<port>;
-    //   no tailnet interface → the bind host (loopback today).
-    //   Re-resolved per construction (cheap) so tailnet IP changes self-heal.
+    // "auto" (default), two-tier at URL-construction time (re-resolved, cheap,
+    //   so tailnet IP changes self-heal):
+    //   1. probe tailscale's own daemon (tailscale ip -4 / the local socket API)
+    //      — the authoritative answer when tailscaled runs;
+    //   2. fall back to interface enumeration preferring 100.64.0.0/10 —
+    //      Tailscale's reserved CGNAT range, with the caveat that some ISPs
+    //      assign CGNAT addresses too (tethered/cellular), so this tier can
+    //      false-positive; the daemon probe (tier 1) exists to avoid trusting it.
+    //   Neither finds a tailnet → the bind host (loopback today).
     // "loopback": force local-only URLs (today's behavior).
     // "http://combiner.tailnet.ts.net:9741": explicit override — the only
     //   machine-specific form, for the tailscale-serve (TLS/MagicDNS) case.
