@@ -21,20 +21,12 @@ export type CombinerSettings = {
     toolName: string
     /** "lazy" (default): connect on first mcp() call. "eager": connect at session_start. */
     lazy: "lazy" | "eager"
-    /** Client-half gate. `true`: we are the MCP tool. `false`: legacy mode — the
-     *  process + instructions halves only, pi-mcp-adapter (if installed) owns MCP.
+    /** Client-half gate. `true`: we are the MCP tool. `false`: the process +
+     *  instructions halves only, pi-mcp-adapter (if installed) owns MCP.
      *  `"auto"` (default): OFF when pi-mcp-adapter is detected installed, ON otherwise —
      *  so existing adapter users upgrade with zero behaviour change, while fresh
      *  installs get the one-package experience. Env PI_MCP_COMBINER_ADAPTER wins. */
     adapter: AdapterMode
-    /** Client-half integration mode. "legacy" (default): the hand-rolled
-     *  SDK-based CombinerConnection + mcp router/script/direct surfaces (subject
-     *  to `adapter`). "native": the pi-mcp peer-dep connection (transport
-     *  implementation = pi's own library; same custody token + elicitation
-     *  bridging) with per-tool pi-1.0 registration (exposure/namespace/
-     *  annotations) — the mcp router still registers alongside (tool_call-gate
-     *  compat); no mcpScript. Env PI_MCP_COMBINER_MODE overrides. */
-    mode?: "legacy" | "native"
     /** Expose combiner resources as read_* tools. */
     exposeResources: boolean
     /** Register combiner prompts as slash commands (adapter naming:
@@ -47,14 +39,11 @@ export type CombinerSettings = {
      *  slot pi-mcp-adapter wrote and footers (oh-my-posh's PI_STATUS aggregate)
      *  already surface; rename only if something else claims it. */
     mcpFooterKey: string
-    /** Register the trusted batching tool (<toolName>Script). Default true. */
-    scriptMode: boolean
     /** Auto-open interactive widget URLs (Stage 2 holds + resource reads).
      *  Default true. */
     uiAutoOpen: boolean
     /** Warn when the direct-exposure set grows large (default threshold: 50 tools —
-     *  every schema rides in every request). Only meaningful in native mode
-     *  (client mode's directTools warning is its own). Default true. */
+     *  every schema rides in every request). Default true. */
     warnLargeDirectExposure: boolean
     /** Explicit combiner base URL (e.g. "http://127.0.0.1:9741/mcp"). Env wins. */
     url?: string
@@ -70,7 +59,6 @@ export const DEFAULT_SETTINGS: CombinerSettings = {
     prompts: true,
     mcpFooterStatus: "full",
     mcpFooterKey: "mcp",
-    scriptMode: true,
     uiAutoOpen: true,
     warnLargeDirectExposure: true,
     notify: true,
@@ -116,7 +104,6 @@ export function loadSettings(path = settingsPath()): CombinerSettings {
     if (typeof d.mcpFooterKey === "string" && d.mcpFooterKey.trim()) out.mcpFooterKey = d.mcpFooterKey.trim()
     if (typeof d.uiAutoOpen === "boolean") out.uiAutoOpen = d.uiAutoOpen
     if (typeof d.warnLargeDirectExposure === "boolean") out.warnLargeDirectExposure = d.warnLargeDirectExposure
-    if (typeof d.scriptMode === "boolean") out.scriptMode = d.scriptMode
     if (typeof d.url === "string" && d.url.trim()) out.url = d.url.trim()
     if (typeof d.notify === "boolean") out.notify = d.notify
     return out

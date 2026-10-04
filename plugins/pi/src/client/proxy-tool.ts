@@ -12,7 +12,7 @@
 
 import { spawn } from "node:child_process"
 import type { ToolCallContext, ToolDefinition } from "../pi.js"
-import type { CombinerConnection, ToolSummary } from "../client/connection.js"
+import type { CombinerConnection, ToolSummary } from "./types.js"
 import { compileSafeRegex, rankTools, regexMatches, type SearchableTool } from "./ranking.js"
 import { renderDescribe, renderSearchHit, renderToolResult, textResult, toolUiResourceUri } from "./render.js"
 import { proxyRenderers } from "./renderers.js"

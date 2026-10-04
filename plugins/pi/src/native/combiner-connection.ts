@@ -27,6 +27,7 @@
 import { McpClient, McpSessionExpiredError, StreamableHttpTransport } from "@earendil-works/pi-mcp"
 import type { CallToolResult } from "@earendil-works/pi-mcp"
 import { handleElicitation, type ElicitResponse, type ElicitUi } from "../client/elicitation.js"
+import type { CombinerConnection } from "../client/types.js"
 import type { ServerFilter } from "../client/config-ladder.js"
 
 // ── shared contracts (kept aligned with client/connection.ts by the callers) ────────
@@ -100,7 +101,7 @@ export function tokenedUrl(baseUrl: string, token: string): string {
     }
 }
 
-export class NativeCombinerConnection {
+export class NativeCombinerConnection implements CombinerConnection {
     private conn: ResolvedConnection
     private readonly log: LogFn
     private elicitUi: ElicitUi = { hasUI: false }

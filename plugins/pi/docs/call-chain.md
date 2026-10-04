@@ -1,9 +1,10 @@
 # Call chain: how one MCP call moves through the combiner stack
 
 The succession of layers, the naming at each layer, and who supplies every
-token — verified against `connection.ts`, `index.ts`, and the combiner's
-`asgi.py`. Phase: **legacy client, pi-builtin MCP disabled**
-(the combiner entry in `~/.config/mcp/mcp.json` carries `"enabled": false`).
+token — verified against `native/combiner-connection.ts`, `index.ts`, and the
+combiner's `asgi.py`. Phase: **native mode** — the pi-mcp transport on our owned
+connection (the retired SDK-based legacy client is gone; pi's built-in MCP stays
+displaced-free: it owns `/mcp` and never connects the combiner).
 
 ## The cast (outside-in)
 
@@ -12,7 +13,7 @@ token — verified against `connection.ts`, `index.ts`, and the combiner's
 | model tool-call | the model | bare `<server>_<tool>` (`mock_echo`), the router `mcp({tool, args})`, or `read_<server>_<name>` |
 | our extension's surface | `plugins/pi` (`direct-tools`, `proxy-tool`, `resources`) | the *registered* pi tools: bare names, `mcp`, `mcpScript`, `read_*` |
 | our connection | `client/connection.ts` (`CombinerConnection`) | URL `/mcp/<token>` (chat token in the path) |
-| pi-builtin MCP | pi-core (`builtin:mcp`) | `mcp__mcp-combiner__<tool>` — **inert this phase** (entry `enabled:false`: listed, never connects) |
+| pi-builtin MCP | pi-core (`builtin:mcp`) | `mcp__mcp-combiner__<tool>` — unused: we never register `/mcp`, and the shared-ladder entry is ours (the builtin may still connect it if a user enables it; see the pi-native contrast below) |
 | combiner ASGI | `combiner/mcp_combiner/asgi.py` | strips `/mcp/<token>` → `/mcp`; maps token ↦ wire session |
 | combiner gate/middleware | `middleware.py`, `permissions.py`, `toolcache.py` | keeps names `<server>_<tool>`; adds consent/meta surfaces (`combiner__*`, `open_widget`) |
 | mounts / connection manager | `connections.py`, isolated registry | upstream tools keep their own names; per-chat upstream sessions for `isolate` servers |
@@ -77,11 +78,8 @@ combiner's memory. The handover carries state *about* those identities
 
 ## Phase notes
 
-- **legacy-disabled (this phase):** the mcp.json entry carries
-  `"enabled": false` — pi's builtin lists the server but never connects, so
-  the only calls, identity, filter enforcement and consent routing are ours.
-  Our ladder-reader deliberately ignores `enabled` (it reads the url to find
-  the combiner).
+- **native-only (current state):** the SDK-based legacy client is deleted; the
+  pi-mcp transport on our owned connection is the only client half.
 - **native v1:** entry re-enabled with `"exposure": "hidden"` — pi = the
   transport/OAuth/resource layer; its identity exists but makes no tool
   calls, so the identity-fork is inert; ours owns the tool surface +

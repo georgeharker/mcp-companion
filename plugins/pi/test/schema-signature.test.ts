@@ -2,7 +2,7 @@
 // Nico Bailon) — the core renderer is a verbatim lift of theirs, so the cases run
 // against our module unchanged.
 import { describe, expect, it } from "vitest"
-import { renderSchemaSignature } from "../../src/legacy-client/schema-signature.js"
+import { renderSchemaSignature } from "../src/client/schema-signature.js"
 
 describe("renderSchemaSignature (ported cases)", () => {
     it("renders required and optional object properties", () => {

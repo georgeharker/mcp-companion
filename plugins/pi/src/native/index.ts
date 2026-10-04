@@ -27,6 +27,9 @@ export type NativeActivationOptions = {
     connection: NativeCombinerConnection
     directSpec?: string[] | "search"
     serverFilter?: ServerFilter
+    /** Register the interactive read_<resource> tools (index.ts's exposeResources
+     *  setting); default true. */
+    exposeResources?: boolean
     /** Auto-open widget URLs (index.ts's uiAutoOpen setting); default true. */
     uiAutoOpen?: boolean
     /** Warn when the direct-exposure set grows large; settings kill-switch
@@ -61,9 +64,11 @@ export function activateNativeMode(
         }).catch((e) =>
             opts.log("warn", `native tool surface failed: ${e instanceof Error ? e.message : String(e)}`),
         )
-        void activateNativeResources(pi, resourceOpts, resourceRegistered).catch((e) =>
-            opts.log("warn", `native resource surface failed: ${e instanceof Error ? e.message : String(e)}`),
-        )
+        if (opts.exposeResources !== false) {
+            void activateNativeResources(pi, resourceOpts, resourceRegistered).catch((e) =>
+                opts.log("warn", `native resource surface failed: ${e instanceof Error ? e.message : String(e)}`),
+            )
+        }
     }
     run()
     opts.connection.setHooks({

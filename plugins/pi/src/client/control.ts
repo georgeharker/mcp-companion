@@ -4,7 +4,7 @@
 // filter routes); the write side drives the combiner__* meta-tools through our own
 // MCP client — one auth path, no second protocol.
 
-import type { CombinerConnection } from "./connection.js"
+import type { CombinerConnection } from "./types.js"
 
 export type HealthServer = { name?: string; status?: string; state?: string; transport?: string }
 

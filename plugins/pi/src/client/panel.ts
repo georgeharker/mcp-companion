@@ -9,7 +9,7 @@
 
 import { spawn } from "node:child_process"
 import { Container, Text, matchesKey, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui"
-import type { CombinerConnection, PromptSummary, ResourceSummary, ToolSummary } from "./connection.js"
+import type { CombinerConnection, PromptSummary, ResourceSummary, ToolSummary } from "./types.js"
 import { metaToolCall } from "./control.js"
 import { resourceServer } from "./resource-naming.js"
 

@@ -14,7 +14,7 @@
 // passthrough) are ported from pi-mcp-adapter's prompts.ts (MIT, © 2026 Nico Bailon).
 
 import type { ExtensionAPI } from "../pi.js"
-import type { CombinerConnection, PromptSummary } from "./connection.js"
+import type { CombinerConnection, PromptSummary } from "./types.js"
 
 // ── naming ──
 

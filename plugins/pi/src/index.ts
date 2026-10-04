@@ -41,31 +41,21 @@ import type {
     CommandSpec,
 } from "./pi.js"
 import { resolveSharedserver } from "./sharedserver-resolve.js"
-import { CombinerConnection } from "./client/connection.js"
+import type { CombinerConnection } from "./client/types.js"
 import { NativeCombinerConnection, activateNativeMode } from "./native/index.js"
-// ── LEGACY CLIENT HALF (the client-mode surface) ─────────────────────────────────
-// Everything below except the companion modules (connection/settings/config-ladder/
-// control/panel/prompts/footer) is the_DEPRECATED tool surface: the mcp() proxy,
-// mcpScript, directTools promotion, and read_<resource> tools. It lives in
-// src/legacy-client/ (see its README) and is deleted wholesale when the native mode
-// lands as the default — the imports below are the ONLY wiring holding it in.
-import { createMcpTool } from "./legacy-client/proxy-tool.js"
+// ── TOOL SURFACE ───────────────────────────────────────────────────────────────
+// The mcp router (search/describe/call on the owned connection) + the native
+// per-tool registration (pi-1.0 exposure/namespace/annotations) + interactive
+// read_<resource> tools. Shared surface modules live in src/client/; the transport
+// is src/native/combiner-connection.ts (pi-mcp, peer dep).
+import { createMcpTool } from "./client/proxy-tool.js"
 import { openInBrowser } from "./client/widget-support.js"
 import { agentDir, loadSettings, settingsPath } from "./client/settings.js"
 import { resolveSessionConfig, type SessionConfig } from "./client/config-ladder.js"
 import { metaToolCall, statusText as controlStatusText } from "./client/control.js"
 import { openCombinerPanel } from "./client/panel.js"
 import { syncPromptCommands } from "./client/prompts.js"
-import { syncResourceTools } from "./legacy-client/resources.js"
-import {
-    activateFromSearch,
-    applyServerFilter,
-    RESERVED_TOOL_NAMES,
-    syncAllowlistTools,
-    type DirectToolDeps,
-} from "./legacy-client/direct-tools.js"
 import { updateFooter } from "./client/footer.js"
-import { createScriptTool } from "./legacy-client/script.js"
 
 const DEFAULT_PORT = 9741
 const DEFAULT_NAME = "mcp-combiner"
@@ -355,7 +345,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         }
     }
 
-    let connection: CombinerConnection | undefined
+    let connection: NativeCombinerConnection | undefined
     // Session-config HOLDER: everything the ladder shapes, resolved against a SESSION
     // cwd (worktree subagents / project switches get their own project layers).
     // Factory-time resolution with process.cwd() is the pre-session default; every
@@ -367,71 +357,37 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         bearerTokenEnv: cfg.bearerTokenEnv ?? "MCP_COMBINER_AUTH_TOKEN",
         urlToken: cfg.urlToken,
     })
-    const registeredDirect = new Set<string>()
-    const directReserved = new Set<string>(RESERVED_TOOL_NAMES)
-    directReserved.add(toolName)
-    directReserved.add(`${toolName}Script`)
-    const directDepsFor = (conn: CombinerConnection): DirectToolDeps => ({
-        connection: conn,
-        registered: registeredDirect,
-        reserved: directReserved,
-        register: (tool) => pi.registerTool(tool),
-        log: clientLog,
-    })
-    // Mode: "legacy" (the hand-rolled connection) vs "native" (the pi-mcp peer-dep
-    // connection + per-tool registration). Env PI_MCP_COMBINER_MODE > settings.mode.
-    const mode = (env("PI_MCP_COMBINER_MODE") ?? settings.mode ?? "legacy").toLowerCase()
-    const native = mode === "native"
-    if (adapterEnabled || native) {
+    if (adapterEnabled) {
         sessionCfg = resolveSessionConfig({
             cwd: process.cwd(),
             envUrl,
             settingsUrl: settings.url,
             defaultUrl: defaultCombinerUrl(),
         })
-        // SAFETY: the two connection classes are duck-compatible by design (same
-        // public surface: sessionToken/setToken/rebind/reset/ensureConnected/
-        // listTools/listPrompts/getPrompt/listResources/readResource/callTool/
-        // controlOrigin/uiUrlFor/applyFilter/health/setHooks/bindUi); only private
-        // internals differ (legacy's withStaleRetry vs native's typed
-        // McpSessionExpiredError retry). Module-scoped consumers use the
-        // CombinerConnection type; the invariant is the parity itself.
-        connection = (native
-            ? new NativeCombinerConnection(connInputsFor(sessionCfg), clientLog)
-            : new CombinerConnection(connInputsFor(sessionCfg), clientLog)) as unknown as CombinerConnection
-        // The mcp router registers in BOTH modes (the same owned connection — not a
-        // second proxy): tool_call gates such as pi-permission-system and
-        // pi-subagents recognize MCP calls by the tool name "mcp", and the router
-        // keeps a discovery/search surface alongside the per-tool declarations.
-        const activeConn = connection
+        connection = new NativeCombinerConnection(connInputsFor(sessionCfg), clientLog)
+        // The mcp router registers alongside the per-tool native surface (the same
+        // owned connection — not a second proxy): tool_call gates such as
+        // pi-permission-system and pi-subagents recognize MCP calls by the tool
+        // name "mcp", and the router keeps a discovery/search surface.
         pi.registerTool(
             createMcpTool({
-                connection: activeConn,
+                connection,
                 toolName,
                 getServerFilter: () => sessionCfg?.serverFilter,
-                onSearchMatches: (tools) =>
-                    sessionCfg?.directSpec === "search" ? activateFromSearch(tools, directDepsFor(activeConn)) : [],
             }),
         )
-        if (!native && settings.scriptMode) {
-            pi.registerTool(createScriptTool({ connection, name: `${toolName}Script` }))
-        }
-        if (native) {
-            // SAFETY: guarded by `native` above, so the runtime instance is
-            // NativeCombinerConnection — the static type can't express the
-            // mode-dispatch (see the duck-parity note at the assignment).
-            // Per-tool surface + interactive read_* + the list_changed re-sync.
-            // The connection instance is ours (NativeCombinerConnection) — narrowed
-            // by the mode check above.
-            activateNativeMode(pi, {
-                connection: connection as unknown as NativeCombinerConnection,
-                directSpec: sessionCfg?.directSpec ?? [],
-                serverFilter: sessionCfg?.serverFilter,
-                uiAutoOpen: settings.uiAutoOpen !== false,
-                warnLargeDirectExposure: settings.warnLargeDirectExposure,
-                log: clientLog,
-            })
-        }
+        // Per-tool surface + interactive read_* + the list_changed re-sync. The
+        // native surface self-syncs its registrations via the connection's
+        // onToolsChanged hook (set inside activateNativeMode).
+        activateNativeMode(pi, {
+            connection,
+            directSpec: sessionCfg?.directSpec ?? [],
+            serverFilter: sessionCfg?.serverFilter,
+            exposeResources: settings.exposeResources !== false,
+            uiAutoOpen: settings.uiAutoOpen !== false,
+            warnLargeDirectExposure: settings.warnLargeDirectExposure,
+            log: clientLog,
+        })
         if (sessionCfg.otherServers.length && !adapterPackageInstalled()) {
             clientLog(
                 "info",
@@ -452,7 +408,6 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
     if (connection) {
         const conn = connection // captured non-optional for the handlers below
         const registeredPrompts = new Set<string>()
-        const registeredResources = new Map<string, string>()
         let footerTimer: NodeJS.Timeout | undefined
         let uiCtx: ExtensionContext["ui"] | undefined
 
@@ -466,35 +421,14 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                 () => undefined,
             )
         }
-        const syncResources = () => {
-            if (!settings.exposeResources) return
-            void syncResourceTools(
-                (tool) => pi.registerTool(tool),
-                conn,
-                registeredResources,
-                sessionCfg?.serverFilter,
-                (m, l) => clientLog(l, m),
-            ).catch(() => undefined)
-        }
-        const syncDirect = () => {
-            // Allowlist mode only — "search" registers nothing upfront.
-            const spec = sessionCfg?.directSpec
-            if (!Array.isArray(spec) || spec.length === 0) return
-            void conn
-                .listTools()
-                .then((tools) => {
-                    syncAllowlistTools(applyServerFilter(tools, sessionCfg?.serverFilter), spec, directDepsFor(conn))
-                })
-                .catch(() => undefined)
-        }
         const resyncAll = () => {
-            // Every surface re-syncs on: list_changed notifications, reconnect
-            // catch-up (fired by the connection itself), AND session_start —
-            // a reload/re-enter with an UNCHANGED token skips any reconnect, so
+            // Prompts + footer re-sync on: list_changed notifications, reconnect
+            // catch-up (fired by the connection itself), AND session_start — a
+            // reload/re-enter with an UNCHANGED token skips any reconnect, so
             // without this the surfaces would only ever update on notifications.
+            // (The native tool/resource surfaces self-sync via their own
+            // onToolsChanged hook, set inside activateNativeMode.)
             syncPrompts()
-            syncResources()
-            syncDirect()
             refreshFooter()
         }
         conn.setHooks({
@@ -551,8 +485,6 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                         .then(() => {
                             refreshFooter()
                             syncPrompts()
-                            syncResources()
-                            syncDirect()
                         })
                         .catch(() => undefined)
                 }

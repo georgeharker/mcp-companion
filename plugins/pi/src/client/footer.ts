@@ -4,7 +4,7 @@
 // `mcp` (default, overridable via the mcpFooterKey setting) — the slot
 // pi-mcp-adapter wrote and oh-my-posh-style footers aggregate into PI_STATUS.
 
-import type { CombinerConnection } from "./connection.js"
+import type { CombinerConnection } from "./types.js"
 import type { ExtensionUIContext } from "../pi.js"
 import type { FooterStatus } from "./settings.js"
 

@@ -5,8 +5,8 @@
 // are deliberately excluded (we cap at 16 KB inline text).
 
 import { describe, expect, it } from "vitest"
-import { renderResourceResult, renderToolResult, toolUiResourceUri } from "../../src/legacy-client/render.js"
-import { resourceNameToToolName } from "../../src/legacy-client/resources.js"
+import { renderResourceResult, renderToolResult, toolUiResourceUri } from "../src/client/render.js"
+import { resourceNameToToolName } from "../src/client/resource-naming.js"
 
 describe("tool result guard (ported semantics, scoped)", () => {
     it("passes short text through verbatim", () => {

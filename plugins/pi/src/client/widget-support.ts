@@ -9,7 +9,7 @@
 // imports them from here in the meantime.
 
 import { spawn } from "node:child_process"
-import type { ResourceSummary } from "./connection.js"
+import type { ResourceSummary } from "./types.js"
 
 export const MAX_RESULT_CHARS = 16 * 1024
 

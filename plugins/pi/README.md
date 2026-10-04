@@ -98,11 +98,9 @@ Pi-side knobs (see [`settings.example.json`](./settings.example.json)):
 | ----------------- | -------- | --------------------------------------------------------------------------------------------------------- |
 | `toolName`        | `"mcp"`  | Name of the proxy tool. Rename (e.g. `"combiner"`) to coexist with pi-mcp-adapter's own `mcp`.            |
 | `adapter`         | `"auto"` | Client-half gate — see above.                                                                             |
-| `mode`            | `"legacy"` | `"native"` switches to the pi-mcp transport: per-tool pi-1.0 registration (exposure/namespace/annotations) via our owned connection, `mcp` router still registered, no `mcpScript`. Env `PI_MCP_COMBINER_MODE` wins. |
 | `lazy`            | `"lazy"` | `"eager"` connects at session start; `"lazy"` on first use. Prompts/resources/directTools imply eager.    |
 | `exposeResources` | `true`   | Register `read_<resource>` tools.                                                                         |
 | `prompts`         | `true`   | Register prompt slash commands.                                                                           |
-| `scriptMode`      | `true`   | Register the `<toolName>Script` batching tool (legacy mode only — native mode has no script tool).         |
 | `uiAutoOpen`      | `true`   | Auto-open interactive widget URLs in the browser (Stage 2 holds + resource reads).                        |
 | `warnLargeDirectExposure` | `true` | Warn when >50 tools end up `direct`-exposed (every schema rides in every request); set `false` to silence. Native mode. |
 | `mcpFooterStatus` | `"full"` | Footer text: `"full"` = `N servers enabled (M ready) · T tools`, `"compact"` = `MCP M/N`, `"off"` = none. |
@@ -189,15 +187,12 @@ mcp({})                                 → status
 In `"directTools": "search"` mode, search matches are promoted to first-class tools
 and announced in the result.
 
-**In native mode** (`"mode": "native"`) the combiner's tools are also declared
-first-class under their own bare names (`github_search_code`) — `directTools` matches
-verbatim, the rest reachable from codemode scripts and pi's `tool_search` — while the
-`mcp` router above keeps registering on the same connection (tool_call gates that match
-the `mcp` tool name keep working). See [`docs/call-chain.md`](./docs/call-chain.md)
-for the full layer map of a call in both modes.
-
-**`mcpScript`** — batch calls with trusted JavaScript (legacy mode):
-`{code: "const r = await tools.search('q'); emit(r); return await tools.call('t', {})"}`.
+**Per-tool registration** — the combiner's tools are also declared first-class under
+their own bare names (`github_search_code`): `directTools` matches verbatim, the rest
+reachable from codemode scripts and pi's `tool_search` — while the `mcp` router above
+keeps registering on the same connection (tool_call gates that match the `mcp` tool
+name keep working). See [`docs/call-chain.md`](./docs/call-chain.md) for the full
+layer map of a call.
 
 **`read_<resource>` tools** — one zero-parameter tool per MCP resource; interactive
 `mcp-app` resources are flagged and their `read_*` results append the combiner UI-host URL (`/ui/<token>/?resource=…`), auto-opened in the browser — the interactive widget runs combiner-side.

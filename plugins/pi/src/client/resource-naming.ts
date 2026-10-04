@@ -6,7 +6,7 @@
 // from pi-mcp-adapter, MIT © Nico Bailon); native widget resource support reuses the
 // attribution logic, so panel counts and native read_* tools agree on server keys.
 
-import type { ResourceSummary } from "./connection.js"
+import type { ResourceSummary } from "./types.js"
 
 /** Ported verbatim from pi-mcp-adapter's resource-tools.ts (MIT, © 2026 Nico Bailon). */
 export function resourceNameToToolName(name: string): string {

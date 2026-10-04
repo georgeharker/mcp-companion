@@ -5,7 +5,7 @@
 // toolFilter; per-server keyword tuning was out of scope).
 
 import { describe, expect, it } from "vitest"
-import { rankTools, type SearchableTool } from "../../src/legacy-client/ranking.js"
+import { rankTools, type SearchableTool } from "../src/client/ranking.js"
 
 const tool = (name: string, description: string): SearchableTool => ({ name, description })
 const names = (tools: SearchableTool[], query: string, limit = 10, offset = 0) =>
