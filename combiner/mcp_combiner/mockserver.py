@@ -67,8 +67,7 @@ import mcp.types
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools import Tool
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import Tool, ToolResult
 from pydantic import PrivateAttr
 
 if TYPE_CHECKING:
@@ -94,6 +93,11 @@ class ToolSpec:
     latency_ms: float = 0.0
     error_mode: str = "none"
     error_n: int = 0
+    # When present, the tool fires a form-mode elicitation BEFORE responding:
+    # {"message": str, "requested_schema": {...raw JSON schema...}}. The elicit
+    # outcome replaces the response (its action + content returned as JSON), so
+    # tests can assert what round-tripped through every client/bridge layer.
+    elicit: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> ToolSpec:
@@ -131,6 +135,23 @@ class ToolSpec:
         if not isinstance(responses, list):
             raise ValueError(f"tool {name!r}: responses must be a list")
 
+        elicit: dict[str, Any] | None = None
+        if raw.get("elicit") is not None:
+            e = raw["elicit"]
+            if not isinstance(e, dict):
+                raise ValueError(f"tool {name!r}: elicit must be an object")
+            if not isinstance(e.get("message"), str) or not e["message"]:
+                raise ValueError(f"tool {name!r}: elicit.message must be a non-empty string")
+            schema = e.get("requested_schema")
+            if not isinstance(schema, dict):
+                raise ValueError(f"tool {name!r}: elicit.requested_schema must be a JSON object")
+            properties = schema.get("properties")
+            if not isinstance(properties, dict) or not properties:
+                raise ValueError(
+                    f"tool {name!r}: elicit.requested_schema.properties must be a non-empty object"
+                )
+            elicit = {"message": e["message"], "requested_schema": schema}
+
         first_param = next(iter(schema.get("properties", {})), "message")
         try:
             latency = float(raw.get("latency_ms", 0))
@@ -147,6 +168,7 @@ class ToolSpec:
             latency_ms=latency,
             error_mode=error_mode,
             error_n=error_n,
+            elicit=elicit,
         )
 
 
@@ -268,6 +290,7 @@ class MockTool(Tool):
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
         spec = self._spec
         session_id: str | None = None
+        ctx: Context | None = None
         with contextlib.suppress(Exception):
             from fastmcp.server.dependencies import get_context
 
@@ -286,6 +309,27 @@ class MockTool(Tool):
         )
         if fail:
             raise ToolError(f"{spec.name}: injected error (mode={spec.error_mode}, call={call_no})")
+
+        # Form-mode elicitation (spec-driven): fires BEFORE the response; the elicit
+        # outcome REPLACES the scripted response so tests can assert exactly what
+        # round-tripped through the combiner and every client bridge layer.
+        if spec.elicit and ctx is not None:
+            try:
+                result = await ctx.session.elicit(
+                    message=spec.elicit["message"],
+                    requestedSchema=spec.elicit["requested_schema"],
+                    related_request_id=ctx.request_id,
+                )
+                payload: dict[str, Any] = {"action": result.action, "tool": spec.name}
+                if getattr(result, "content", None) is not None:
+                    payload["content"] = result.content
+                return ToolResult(
+                    content=[
+                        mcp.types.TextContent(type="text", text="elicit: " + json.dumps(payload))
+                    ]
+                )
+            except Exception as exc:  # noqa: BLE001 — surface client-side refusal shapes
+                raise ToolError(f"{spec.name}: elicitation failed: {exc}") from exc
 
         if spec.responses:
             scripted = spec.responses.pop(0)
@@ -480,6 +524,56 @@ class MockServer:
             await asyncio.sleep(ms / 1000.0)
             return f"slept {ms}ms"
 
+        _ELICIT_FORM_SCHEMA: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "environment": {
+                    "type": "string",
+                    "enum": ["dev", "staging", "prod"],
+                    "description": "Deploy target",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "I confirm the deploy",
+                },
+                "ticket": {
+                    "type": "string",
+                    "description": "Ticket reference (optional)",
+                },
+                "replicas": {
+                    "type": "integer",
+                    "description": "Replica count",
+                },
+            },
+            "required": ["environment", "confirm"],
+        }
+
+        @mcp_srv.tool(
+            name="mock__elicit_form",
+            description=(
+                "Fire a 4-property form-mode elicitation (enum + boolean + string + "
+                "integer) through every client layer and ECHO BACK what arrived: "
+                "the end-to-end elicitation bridge proof. Accepts/declines via the "
+                "human client's dialogs."
+            ),
+        )
+        async def mock__elicit_form(ctx: Context) -> str:
+            state.record_session(ctx)
+            state.record_call("mock__elicit_form", ctx.session_id)
+            try:
+                result = await ctx.session.elicit(
+                    message="Deploy confirmation — answer each field",
+                    requestedSchema=_ELICIT_FORM_SCHEMA,
+                    related_request_id=ctx.request_id,
+                )
+                payload: dict[str, Any] = {
+                    "action": result.action,
+                    "content": getattr(result, "content", None),
+                }
+                return "elicit: " + json.dumps(payload)
+            except Exception:
+                raise
+
         @mcp_srv.tool(
             name="mock__widget_ping",
             description="Target for widget-initiated tool calls (mcp-app host tests).",
@@ -578,6 +672,7 @@ window.addEventListener('message', (e) => {
 });
 // mcp-app handshake: initialize, then notifications/initialized
 call('ui/initialize', {
+  protocolVersion: '2025-11-21',
   appInfo: { name: 'mock-widget', version: '1.0.0' },
   appCapabilities: { tools: { listChanged: false }, logging: {} },
 }).then((r) => {
@@ -587,6 +682,32 @@ call('ui/initialize', {
 }).catch((e) => log('handshake FAILED: ' + JSON.stringify(e)));
 </script>
 </body></html>"""
+
+        @mcp_srv.resource(
+            "data://mock/readme",
+            name="readme",
+            title="Mock readme resource",
+            description=(
+                "Plain-text resource: exercises the non-interactive resource path "
+                "(builtin read_mcp_resource / text read_* parity)."
+            ),
+            mime_type="text/plain",
+        )
+        def mock_readme() -> str:
+            try:
+                from fastmcp.server.dependencies import get_context
+
+                state.record_session(get_context())
+            except Exception:  # noqa: BLE001 — resource read never blocks on stats
+                pass
+            return (
+                "mockserver resource readme\n"
+                "===========================\n"
+                f"server: {state.server_name}  pid: {os.getpid()}\n"
+                "tools: mock_echo, mock_add, mock__elicit_form, mock__widget_open, ...\n"
+                "This text resource exists to exercise resource READ paths "
+                "(combiner + clients), separate from the ui:// widget."
+            )
 
         @mcp_srv.tool(
             name="mock__crash",

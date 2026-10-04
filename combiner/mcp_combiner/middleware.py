@@ -13,18 +13,17 @@ import asyncio
 import logging
 import time
 from collections.abc import Sequence
-from typing import Any, ClassVar, TypeGuard
+from typing import Any, ClassVar, TypeGuard, cast
 
 import mcp.types as mt
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools import Tool
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import Tool, ToolResult
 
 from mcp_combiner import nvim_proxy, permissions
 from mcp_combiner.auth import clear_oauth_cache, is_stale_client_error
 from mcp_combiner.connections import AuthenticationError
-from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME
 from mcp_combiner.schemafix import _finalize_schemas, _sanitize_tools
 from mcp_combiner.toolcache import (
     _filter_tools,
@@ -143,6 +142,16 @@ class ToolProcessingMiddleware(Middleware):
                 sid = context.fastmcp_context.session_id
                 is_new = RUNTIME.sessions.track(session)
 
+                # Publish the in-flight request for the elicitation forwarder:
+                # fastmcp runs proxy client factories outside its own server-request
+                # ctxvar, so notifications._capture_downstream_request reads OUR var.
+                try:
+                    rid = context.fastmcp_context.request_id
+                    DOWNSTREAM_REQUEST.set((session, rid))
+                    logger.info("downstream request ctxvar SET (sid=%s rid=%s)", sid, rid)
+                except (RuntimeError, AttributeError) as e:
+                    logger.info("downstream request ctxvar SET FAILED: %s", e)
+
                 # Build the session_id -> token reverse map used to route
                 # neovim_* calls back to the editor that owns this chat.
                 nvim_proxy.record_session_token(sid)
@@ -164,7 +173,10 @@ class ToolProcessingMiddleware(Middleware):
 
             except (RuntimeError, AttributeError):
                 pass  # Session not yet established
-        return await call_next(context)
+        try:
+            return await call_next(context)
+        finally:
+            DOWNSTREAM_REQUEST.set(None)
 
     async def on_list_tools(
         self,
@@ -488,5 +500,20 @@ class ToolProcessingMiddleware(Middleware):
                         from mcp_combiner.toolcache import namespace_uri
 
                         uri = namespace_uri(uri, call_server)
-                    result = await hold_for_widget(context, result, str(tool_name), token, uri)
+                    # Per-call hold budget: the LLM may override the host default via a
+                    # ``hold_timeout_s`` arg (open_widget's contract; honored for ANY
+                    # held call). Must fit the client's own request timeout.
+                    hold_override: float | None = None
+                    try:
+                        raw = (getattr(context.message, "arguments", None) or {}).get(
+                            "hold_timeout_s"
+                        )
+                        hold_override = float(raw) if raw is not None else None
+                    except (TypeError, ValueError):
+                        hold_override = None
+                    held = await hold_for_widget(
+                        context, result, str(tool_name), token, uri, hold_timeout_s=hold_override
+                    )
+                    # hold_for_widget folds (and returns) a ToolResult — same type in/out.
+                    result = cast(ToolResult, held)
             return result

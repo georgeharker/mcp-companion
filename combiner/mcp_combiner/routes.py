@@ -54,6 +54,7 @@ def register_routes(
         # boot_id changes only when this combiner *process* (re)starts. Clients use
         # it to detect a restart and re-register Neovim instances + token binds.
         payload["boot_id"] = RUNTIME.boot_id
+        payload["handover_recovery"] = RUNTIME.handover_recovery
         return JSONResponse(payload)
 
     # The general session map: every correlation the combiner holds around a

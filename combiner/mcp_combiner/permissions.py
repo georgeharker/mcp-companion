@@ -51,17 +51,26 @@ async def enforce(ctx: Any, server: str, local_name: str, policy: ResolvedPolicy
     if action is PermissionAction.DENY:
         raise ToolError(f"Tool '{tool_name}' is denied by the combiner permission policy.")
 
-    # ELICIT — ask the user (once per session unless already granted).
+    # ELICIT — ask the user (once per session unless already granted). Grants are
+    # keyed by the CHAT TOKEN when the session carries one (the handover carries
+    # them across combiner restarts: "allow for session" means my CHAT, not the
+    # transport lifetime); tokenless sessions key by sid (dies with the session,
+    # which is correct: there is no durable identity to inherit).
     sid = ctx.session_id
     key = f"{server}/{local_name}"
-    if sid and RUNTIME.sessions.is_granted(sid, key):
+    from mcp_combiner import nvim_proxy
+
+    ident = (nvim_proxy.token_for_session(sid) if sid else None) or sid
+    if ident and RUNTIME.sessions.is_granted(ident, key):
+        logger.info("consent: grant hit ident=%s key=%s (no ask)", ident, key)
         return
 
     decision = await _elicit(ctx, server, local_name, policy)
     if decision == "deny":
         raise ToolError(f"Tool '{tool_name}' was denied by the user.")
-    if decision == "session" and sid:
-        RUNTIME.sessions.grant(sid, key)
+    if decision == "session" and ident:
+        RUNTIME.sessions.grant(ident, key)
+        logger.info("consent: grant RECORDED ident=%s key=%s", ident, key)
     # "once" → allow just this call, without caching.
 
 

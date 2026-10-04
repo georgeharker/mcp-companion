@@ -75,6 +75,7 @@ async def write_handover(path: str) -> None:
         },
         "token_instances": token_instances,
         "instances": instances,
+        "grants": RUNTIME.sessions.grants_snapshot(),
         "parked": [
             {
                 "server": server,
@@ -92,12 +93,14 @@ async def write_handover(path: str) -> None:
     with os.fdopen(fd, "w") as f:
         json.dump(payload, f)
     logger.info(
-        "handover: wrote %s (%d filter(s), %d bind(s), %d instance(s), %d parked session(s))",
+        "handover: wrote %s (%d filter(s), %d bind(s), %d instance(s),"
+        " %d parked session(s), %d grant(s))",
         path,
         len(payload["token_filters"]),
         len(payload["token_instances"]),
         len(payload["instances"]),
         len(payload["parked"]),
+        len(payload["grants"]),
     )
 
 
@@ -122,8 +125,10 @@ def load_handover(path: str) -> bool:
         with _suppress_oserror():
             os.unlink(path)
         return False
-    with _suppress_oserror():
+    try:
         os.unlink(path)
+    except OSError:
+        pass
 
     if payload.get("version") != HANDOVER_VERSION:
         logger.warning(
@@ -131,14 +136,19 @@ def load_handover(path: str) -> bool:
             payload.get("version"),
             HANDOVER_VERSION,
         )
+        RUNTIME.handover_recovery = {"refused": "version mismatch", "at": time.time()}
         return False
     age = time.time() - float(payload.get("created_at", 0))
     if not 0 <= age <= MAX_AGE_SECONDS:
         logger.warning("handover: snapshot is %.0fs old — booting fresh", age)
+        RUNTIME.handover_recovery = {"refused": f"snapshot {age:.0f}s old", "at": time.time()}
         return False
 
     for token, servers in dict(payload.get("token_filters", {})).items():
         RUNTIME.sessions.set_pending(str(token), {str(s) for s in servers})
+
+    restored_grants = RUNTIME.sessions.restore_grants(payload.get("grants", {}))
+    logger.info("handover: restored %d consent grant(s)", restored_grants)
 
     nvim_proxy.restore_routing(
         dict(payload.get("token_instances", {})),
@@ -173,6 +183,14 @@ def load_handover(path: str) -> bool:
         len(parked_entries),
         payload.get("boot_id", "?")[:8],
     )
+    RUNTIME.handover_recovery = {
+        "from_boot": payload.get("boot_id", "?")[:8],
+        "restored_at": time.time(),
+        "grants": restored_grants,
+        "parked": len(parked_entries),
+        "filters": len(payload.get("token_filters", {})),
+        "binds": len(payload.get("token_instances", {})),
+    }
     return True
 
 

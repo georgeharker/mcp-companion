@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 import weakref
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -116,6 +117,21 @@ class SessionRegistry:
     def clear_granted(self, session_id: str) -> None:
         """Drop a session's elicitation grants (e.g. on disconnect)."""
         self.granted.pop(session_id, None)
+
+    # -- grant carry-over (the sanctioned-restart handover) ------------------
+
+    def grants_snapshot(self) -> dict[str, list[str]]:
+        """Snapshot all grants (token-or-sid keyed → tool keys) for the handover."""
+        return {k: sorted(v) for k, v in self.granted.items()}
+
+    def restore_grants(self, snapshot: dict[str, list[str]]) -> int:
+        """Restore grants from a handover payload; returns the count restored."""
+        n = 0
+        for ident, keys in dict(snapshot or {}).items():
+            for key in keys:
+                self.granted.setdefault(str(ident), set()).add(str(key))
+                n += 1
+        return n
 
     # -- read-through enforcement (the Q1 fix) -------------------------------
 
@@ -326,6 +342,9 @@ class CombinerRuntime:
     # Unique per-process id surfaced via /health; a change signals a combiner
     # restart so clients re-register instances and token bindings.
     boot_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # What the last boot's handover restored (or why it was refused) — the LLM's
+    # post-restart re-orientation receipt, surfaced by /health and combiner__status.
+    handover_recovery: dict[str, Any] | None = None
 
     # Sanctioned-handover flag: set by POST /handover/prepare (ctl restart);
     # the lifespan shutdown writes the handover payload here iff non-None.
@@ -340,6 +359,17 @@ class CombinerRuntime:
 # The process-wide runtime. server.py and the modules extracted from it share
 # this instance; tests may reset() it for isolation.
 RUNTIME = CombinerRuntime()
+
+# The downstream (client-facing) request in flight for THIS task, as (session,
+# request_id). Set by ToolProcessingMiddleware.on_request when the fastmcp request
+# context is active; read by notifications._capture_downstream_request() because
+# fastmcp runs proxy client factories OUTSIDE its own server-request ctxvar — the
+# elicitation forwarder otherwise has no way to learn which chat's call it serves.
+# Task-scoped by construction: asyncio/anyio tasks inherit a copy at creation, so
+# the value set in the request task is visible everywhere the tool call runs.
+DOWNSTREAM_REQUEST: ContextVar[tuple[Any, str | None] | None] = ContextVar(
+    "combiner_downstream_request", default=None
+)
 
 
 def reset() -> None:
@@ -364,6 +394,7 @@ def reset() -> None:
     r.tools.stale_grace = 30.0
     r.tools.failed_servers.clear()
     r.handover_path = None
+    r.handover_recovery = None
     r.prime_tasks.clear()
     r.notification_tasks.clear()
     # Token-keyed isolated-session registry (module-level, nvim_proxy pattern).

@@ -4,16 +4,68 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 
+import mcp.types
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.tools import ToolResult
 
-from mcp_combiner.config import CombinerConfig, ServerConfig, ServerStatusInfo
+from mcp_combiner.config import CombinerConfig, ServerConfig
 from mcp_combiner.connections import ConnectionManager
 from mcp_combiner.mounts import drop_server_providers, mount_server_provider
+from mcp_combiner.runtime import RUNTIME
 from mcp_combiner.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-combiner")
+
+
+def _uri_text(resource_result: Any) -> str:
+    """Summarize a ResourceResult for the model. Layered for the shape zoo:
+    - fastmcp-internal ResourceContent: content in ``.content`` (str | bytes),
+      ``.mime_type`` alongside; bytes decode when the mime is text/*
+    - mcp wire shapes: ``.text`` / ``.blob`` on Text/BlobResourceContents
+    - anything else: a size/mime note."""
+    import base64
+
+    parts: list[str] = []
+    for item in getattr(resource_result, "contents", None) or []:
+        mime = str(getattr(item, "mime_type", None) or getattr(item, "mimeType", None) or "unknown")
+        content = getattr(item, "content", None)
+        if isinstance(content, str):
+            parts.append(content)
+            continue
+        if isinstance(content, bytes):
+            if mime.startswith("text/"):
+                try:
+                    parts.append(content.decode("utf-8"))
+                    continue
+                except UnicodeDecodeError:
+                    pass
+            parts.append(f"[binary {mime}, {len(content)} bytes]")
+            continue
+        text = getattr(item, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+            continue
+        blob = getattr(item, "blob", None)
+        if isinstance(blob, str) and mime.startswith("text/"):
+            try:
+                parts.append(base64.b64decode(blob).decode("utf-8"))
+                continue
+            except Exception:  # noqa: BLE001 — fall through to the size note
+                pass
+        if isinstance(blob, str):
+            parts.append(f"[binary {mime}, ~{len(blob) * 3 // 4} bytes]")
+            continue
+        parts.append(f"[{mime} content]")
+    return "\n\n".join(parts) or "(empty resource)"
+
+
+def _unnamespace_failed(exc: Any) -> bool:
+    """True when read failed in a way that namespacing might fix (not-found-ish)."""
+    low = str(exc).lower()
+    return "not found" in low or "no such" in low or "unknown" in low or "does not exist" in low
 
 
 def register_meta_tools(
@@ -25,8 +77,105 @@ def register_meta_tools(
     """Register combiner management tools on the FastMCP server."""
 
     @combiner.tool()
-    def combiner__status() -> dict[str, ServerStatusInfo]:
-        """Get status of all configured MCP servers.
+    async def open_widget(
+        ctx: Context,
+        uri: str,
+        hold: bool = True,
+        hold_timeout_s: float | None = None,
+    ) -> ToolResult:
+        """Open an interactive widget (an mcp-app ``ui://`` resource) hosted by the
+        combiner's UI host. Reads the widget markup, opens it in the browser for
+        the user, and -- with the default ``hold=True`` -- keeps THIS call in
+        flight while the user interacts, folding their recorded widget actions
+        into this result (combiner__ui_messages retrieves the detail).
+
+        Args:
+            uri: the widget resource URI, either the namespaced form from
+                ``resources/list`` (e.g. ``ui://mock/mock/widget``) or the
+                upstream-local form (e.g. ``ui://svg-mcp/widget`` -- the server
+                namespace is resolved automatically when the plain form fails).
+            hold: keep the call in flight for interaction folding (default
+                true). Pass ``false`` to just fetch markup + return the widget
+                URL for the model without waiting for the user.
+            hold_timeout_s: optional per-call hold budget override in seconds
+                (the host default is 50s; must fit the client's request timeout).
+        """
+        import urllib.parse
+
+        from mcp_combiner import nvim_proxy
+        from mcp_combiner.ui_host.holder import hold_for_widget
+
+        def _url_for(namespaced: str) -> str:
+            host = RUNTIME.ui_host
+            if host is None:
+                return ""
+            token = nvim_proxy.token_for_session(ctx.session_id)
+            if not token:
+                return ""
+            return f"{host.config.base_origin}/ui/{token}/?resource=" + urllib.parse.quote(
+                namespaced, safe=""
+            )
+
+        target = uri
+        try:
+            read = await ctx.read_resource(target)
+        except Exception as first_exc:
+            # Insert the URI's own first path segment as the namespace (the
+            # upstream-local form: ui://svg-mcp/widget -> ui://svg-mcp/svg-mcp/widget).
+            rest = str(uri).split("://", 1)
+            inserted: str | None = None
+            if len(rest) == 2 and "/" in rest[1]:
+                scheme, tail = rest
+                head, _, inner = tail.partition("/")
+                inserted = f"{scheme}://{head}/{head}/{inner}"
+            if inserted and _unnamespace_failed(first_exc):
+                try:
+                    read = await ctx.read_resource(inserted)
+                    target = inserted
+                except Exception as retry_exc:
+                    raise ToolError(
+                        f"open_widget: cannot read '{uri}' ({retry_exc}; tried {inserted})"
+                    ) from retry_exc
+            else:
+                raise ToolError(f"open_widget: cannot read '{uri}' ({first_exc})") from first_exc
+
+        text = _uri_text(read)
+        namespaced = str(target)
+        if not hold:
+            url = _url_for(namespaced)
+            suffix = f"\n\ninteractive: {url}" if url else ""
+            return ToolResult(content=[mcp.types.TextContent(type="text", text=text + suffix)])
+
+        # Hold path: stamping the result with the widget binding hands the call to
+        # the middleware's Stage 2 machinery (browser announce + fold-in) — with
+        # the LLM-supplied per-call budget override.
+        hold_override: float | None = None
+        try:
+            hold_override = float(hold_timeout_s) if hold_timeout_s is not None else None
+        except (TypeError, ValueError):
+            hold_override = None
+        token = nvim_proxy.token_for_session(ctx.session_id)
+        if token:
+            from mcp.types import TextContent
+
+            held = await hold_for_widget(
+                ctx,
+                ToolResult(content=[TextContent(type="text", text=text)]),
+                "open_widget",
+                token,
+                namespaced,
+                hold_timeout_s=hold_override,
+            )
+            # _fold_text preserves the ToolResult shape (same type in, folded out).
+            return cast(ToolResult, held)
+        # No token (tokenless chat): return markup + URL without the hold.
+        url = _url_for(namespaced)
+        suffix = f"\n\ninteractive: {url}" if url else ""
+        return ToolResult(content=[mcp.types.TextContent(type="text", text=text + suffix)])
+
+    @combiner.tool()
+    def combiner__status() -> dict[str, Any]:
+        """Get status of all configured MCP servers, plus the handover receipt.
 
         Returns a dict of server names to their configuration and runtime
         ``state`` (ready / connected / starting / disconnected / unreachable /
@@ -34,10 +183,23 @@ def register_meta_tools(
         panel shows, via the shared status builder. ``starting`` means wait
         (spawn/probe/connect still in flight); ``unreachable`` means the backing
         process did not come up within its health timeout.
+
+        The extra ``_handover`` key carries this boot's restart receipt (what a
+        prior boot's sanctioned-restart handover restored — grants / parked
+        sessions / filters / binds — or why one was refused; it reads
+        ``{"note": "no handover this boot"}`` on a truly fresh boot). Read it
+        to re-orient after a restart without re-asking humans.
         """
         from mcp_combiner.status import build_server_status
 
-        return {name: build_server_status(config, conn_manager, name) for name in config.servers}
+        result: dict[str, Any] = {
+            name: build_server_status(config, conn_manager, name) for name in config.servers
+        }
+        # Post-restart receipt for agent self-reporting: what this boot restored
+        # (or why a handover existed but was refused). "_"-prefixed so it can never
+        # collide with a server name.
+        result["_handover"] = RUNTIME.handover_recovery or {"note": "no handover this boot"}
+        return result
 
     @combiner.tool()
     async def combiner__enable_server(server_name: str) -> str:

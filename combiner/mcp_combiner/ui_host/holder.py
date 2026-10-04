@@ -55,7 +55,7 @@ def _fold_text(result: object, text: str) -> object:
     """Return a copy of the result with one extra text block appended (the
     widget summary + UI URL)."""
     import mcp.types as mt
-    from fastmcp.tools.tool import ToolResult
+    from fastmcp.tools import ToolResult
 
     block = mt.TextContent(type="text", text=text)
     content = _result_content_list(result) + [block]
@@ -72,13 +72,22 @@ def _fold_text(result: object, text: str) -> object:
 
 
 async def hold_for_widget(
-    context: Any, result: object, tool_name: str, token: str | None, uri: str | None
+    context: Any,
+    result: object,
+    tool_name: str,
+    token: str | None,
+    uri: str | None,
+    hold_timeout_s: float | None = None,
 ) -> object:
     """Run the Stage 2 hold flow for a result whose TOOL (or the result itself)
     references an interactive resource. Returns the (possibly folded) result;
     never raises. The caller resolves the uri: the result's own meta first,
     falling back to the tool-definition binding (meta.ui.resourceUri on the
-    tool — the mcp-app/OpenAI outputTemplate contract)."""
+    tool — the mcp-app/OpenAI outputTemplate contract).
+
+    ``hold_timeout_s`` — LLM-supplied per-call override (open_widget's arg of the
+    same name): when positive it replaces ``host.hold_timeout`` for THIS hold.
+    The caller is responsible for it fitting the client's request budget."""
     from mcp_combiner.runtime import RUNTIME
 
     host = RUNTIME.ui_host
@@ -109,9 +118,18 @@ async def hold_for_widget(
         except Exception:  # noqa: BLE001 — notification failures never fail the call
             logger.debug("ui hold: client notification failed", exc_info=True)
 
-    logger.info("ui hold: %s/%s held for widget %s", token, tool_name, uri)
+    logger.info(
+        "ui hold: %s/%s held for widget %s (budget %ss)",
+        token,
+        tool_name,
+        uri,
+        hold_timeout_s if hold_timeout_s and hold_timeout_s > 0 else host.hold_timeout,
+    )
     try:
-        await asyncio.wait_for(session.done.wait(), timeout=host.hold_timeout)
+        await asyncio.wait_for(
+            session.done.wait(),
+            timeout=hold_timeout_s if hold_timeout_s and hold_timeout_s > 0 else host.hold_timeout,
+        )
     except asyncio.TimeoutError:
         session.mark_completed("timeout")
 

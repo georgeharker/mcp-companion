@@ -27,8 +27,7 @@ import mcp.types as mt
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import MiddlewareContext
-from fastmcp.tools import Tool
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import Tool, ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
