@@ -86,13 +86,15 @@ export function activateNativeMode(
     }
 }
 
-// NOTE on codemode activation: pi auto-activates the codemode tool when an MCP server
-// with codemode exposure connects. Extension-registered codemode tools may not trigger
-// that activation (verify against pi 1.0.0); the documented fallback is
-//   settings.json → "defaultTools": ["+codemode"]
-// which keeps the story one-line even in the non-auto case.
-// Verified live (pi 1.0.x): registerTool accepts exposure/namespace/annotations;
-// the peer-dep import resolves from the host's installed package tree. Still
-// unverified: codemode auto-activation for extension-registered tools — the
-// documented fallback is settings.json → "defaultTools": ["+codemode"].
+// NOTE on codemode activation (verified live, pi 1.0.x): pi does NOT
+// auto-activate the codemode tool for extension-registered codeme tools (only
+// for connected MCP servers) — enable it with settings.json →
+//   "defaultTools": ["+codemode"]
+// (defaultTools applies at a FRESH session's creation; resumed sessions keep
+// their recorded tool set). With codemode on, our registered tools are
+// first-class script members under their bare names (`tools.mock_echo(...)`),
+// searchTools() discovers them (embedding their TS declarations), and
+// pi's codemode globals are text()/image()/console.log/return (no emit).
+// Also verified: registerTool accepts exposure/namespace/annotations, and
+// the peer-dep import resolves from the host's installed package tree.
 export type { ExtensionContext }
