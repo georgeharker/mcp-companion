@@ -46,15 +46,28 @@ Two consequences fall out of the inventory:
 
 ## The config shape
 
+Machine-specific hostnames in shared config are an anti-pattern (the config is
+synced across machines; a tailnet IP strands the remote leg when it changes).
+So the default is **discovery**, and the config holds a *preference*, not an
+address:
+
 ```jsonc
 // servers.json
 {
   "ui_host": {
-    // URL construction only — NEVER affects binding. Omit = derive from bind.
-    "advertised_origin": "http://100.x.y.z:9741",       // tailnet IP, or
-    // "advertised_origin": "https://combiner.tailnet.ts.net:9741",  // via tailscale serve
-    "advertised_provider_origin": "http://100.x.y.z:9742"
-    // binding stays --host/--port (the ctl flags); serving a tailnet = bind 0.0.0.0
+    // URL construction only — NEVER affects binding.
+    "advertise": "auto"
+    // "auto" (default): at URL-construction time, enumerate interfaces and prefer
+    //   an address in 100.64.0.0/10 (Tailscale's reserved CGNAT range — a
+    //   deterministic, portable fingerprint) → http://<tailnet-ip>:<port>;
+    //   no tailnet interface → the bind host (loopback today).
+    //   Re-resolved per construction (cheap) so tailnet IP changes self-heal.
+    // "loopback": force local-only URLs (today's behavior).
+    // "http://combiner.tailnet.ts.net:9741": explicit override — the only
+    //   machine-specific form, for the tailscale-serve (TLS/MagicDNS) case.
+    // Both origins (host + provider) derive from the SAME interface/resolution,
+    // so the pair cannot drift.
+    // Binding stays --host/--port (the ctl flags); serving a tailnet = bind 0.0.0.0.
   }
 }
 ```
@@ -92,8 +105,11 @@ Rules:
   whether the app needs anything besides a reachable URL (CORS for the SSE
   stream is already permissive for same-origin host pages; a webview
   behaves like a browser and needs nothing new).
-- **tailscale serve vs raw tailnet IP**: TLS + stable names vs zero config.
-  Both fit the knob; the sketch does not choose.
+- **tailscale serve vs raw tailnet IP**: `advertise: "auto"` covers the raw-IP
+  case with zero config; the tailscale-serve variant (TLS + MagicDNS names)
+  is what the explicit override exists for. Whether `auto` should also probe
+  `tailscale status` for a MagicDNS name (nicer URLs, soft dependency on the
+  tailscale binary) is open.
 - **Provider-origin discovery**: today the host page learns the provider
   origin from the resource read; confirm that flow carries the *advertised*
   provider origin (it must — this is the second knob's whole job).
