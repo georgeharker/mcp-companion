@@ -41,7 +41,6 @@ import type {
     CommandSpec,
 } from "./pi.js"
 import { resolveSharedserver } from "./sharedserver-resolve.js"
-import type { CombinerConnection } from "./client/types.js"
 import { NativeCombinerConnection, activateNativeMode } from "./native/index.js"
 // ── TOOL SURFACE ───────────────────────────────────────────────────────────────
 // The mcp router (search/describe/call on the owned connection) + the native
@@ -346,6 +345,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
     }
 
     let connection: NativeCombinerConnection | undefined
+    let nativeSurface: ReturnType<typeof activateNativeMode> | undefined
     // Session-config HOLDER: everything the ladder shapes, resolved against a SESSION
     // cwd (worktree subagents / project switches get their own project layers).
     // Factory-time resolution with process.cwd() is the pre-session default; every
@@ -376,10 +376,10 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                 getServerFilter: () => sessionCfg?.serverFilter,
             }),
         )
-        // Per-tool surface + interactive read_* + the list_changed re-sync. The
-        // native surface self-syncs its registrations via the connection's
-        // onToolsChanged hook (set inside activateNativeMode).
-        activateNativeMode(pi, {
+        // Per-tool surface + interactive read_*. The FIRST registration runs at
+        // session_start (post-setToken — the connection refuses to connect
+        // without a grouping token); list_changed re-syncs ride resyncAll below.
+        nativeSurface = activateNativeMode(pi, {
             connection,
             directSpec: sessionCfg?.directSpec ?? [],
             serverFilter: sessionCfg?.serverFilter,
@@ -426,8 +426,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
             // catch-up (fired by the connection itself), AND session_start — a
             // reload/re-enter with an UNCHANGED token skips any reconnect, so
             // without this the surfaces would only ever update on notifications.
-            // (The native tool/resource surfaces self-sync via their own
-            // onToolsChanged hook, set inside activateNativeMode.)
+            nativeSurface?.run()
             syncPrompts()
             refreshFooter()
         }
@@ -455,6 +454,11 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                 })
                 conn.rebind(connInputsFor(sessionCfg))
                 conn.setToken(sessionToken(event, ctx))
+                // The native per-tool/resource registration runs HERE — post-setToken,
+                // the first moment the grouping token exists (a factory-time run
+                // would fail with "no grouping token set"). Subsequent re-syncs ride
+                // resyncAll via onToolsChanged.
+                nativeSurface?.run()
                 // Per-project exposure: pending filters apply server-side before first connect.
                 const filter = sessionCfg.serverFilter
                 if (filter) {

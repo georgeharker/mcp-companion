@@ -44,7 +44,7 @@ export type NativeActivationOptions = {
 export function activateNativeMode(
     pi: ExtensionAPI,
     opts: NativeActivationOptions,
-): { dispose(): void } {
+): { run(): void; dispose(): void } {
     const resourceRegistered = new Set<string>()
     let active = true
     const resourceOpts = {
@@ -70,11 +70,16 @@ export function activateNativeMode(
             )
         }
     }
-    run()
-    opts.connection.setHooks({
-        onToolsChanged: run,
-    })
+    // The FIRST run is the caller's to schedule: the grouping token only exists
+    // after session_start (the connection refuses to connect without it), so a
+    // factory-time run() would fail with "no grouping token set" — the startup
+    // warnings this signature used to emit. index.ts calls run() at
+    // session_start (post-setToken) and from its own onToolsChanged hook; we
+    // deliberately do NOT setHooks here — a second setHooks call from the
+    // wiring would replace ours wholesale (last-wins), so the re-sync lives in
+    // ONE hook set, index.ts's.
     return {
+        run,
         dispose() {
             active = false
         },
