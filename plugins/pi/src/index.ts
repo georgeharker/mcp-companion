@@ -38,25 +38,34 @@ import type {
     ExtensionContext,
     SessionShutdownEvent,
     SessionStartEvent,
+    CommandSpec,
 } from "./pi.js"
 import { resolveSharedserver } from "./sharedserver-resolve.js"
 import { CombinerConnection } from "./client/connection.js"
-import { createMcpTool, openInBrowser } from "./client/proxy-tool.js"
+import { NativeCombinerConnection, activateNativeMode } from "./native/index.js"
+// ── LEGACY CLIENT HALF (the client-mode surface) ─────────────────────────────────
+// Everything below except the companion modules (connection/settings/config-ladder/
+// control/panel/prompts/footer) is the_DEPRECATED tool surface: the mcp() proxy,
+// mcpScript, directTools promotion, and read_<resource> tools. It lives in
+// src/legacy-client/ (see its README) and is deleted wholesale when the native mode
+// lands as the default — the imports below are the ONLY wiring holding it in.
+import { createMcpTool } from "./legacy-client/proxy-tool.js"
+import { openInBrowser } from "./client/widget-support.js"
 import { agentDir, loadSettings, settingsPath } from "./client/settings.js"
 import { resolveSessionConfig, type SessionConfig } from "./client/config-ladder.js"
 import { metaToolCall, statusText as controlStatusText } from "./client/control.js"
 import { openCombinerPanel } from "./client/panel.js"
 import { syncPromptCommands } from "./client/prompts.js"
-import { syncResourceTools } from "./client/resources.js"
+import { syncResourceTools } from "./legacy-client/resources.js"
 import {
     activateFromSearch,
     applyServerFilter,
     RESERVED_TOOL_NAMES,
     syncAllowlistTools,
     type DirectToolDeps,
-} from "./client/direct-tools.js"
+} from "./legacy-client/direct-tools.js"
 import { updateFooter } from "./client/footer.js"
-import { createScriptTool } from "./client/script.js"
+import { createScriptTool } from "./legacy-client/script.js"
 
 const DEFAULT_PORT = 9741
 const DEFAULT_NAME = "mcp-combiner"
@@ -369,26 +378,59 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         register: (tool) => pi.registerTool(tool),
         log: clientLog,
     })
-    if (adapterEnabled) {
+    // Mode: "legacy" (the hand-rolled connection) vs "native" (the pi-mcp peer-dep
+    // connection + per-tool registration). Env PI_MCP_COMBINER_MODE > settings.mode.
+    const mode = (env("PI_MCP_COMBINER_MODE") ?? settings.mode ?? "legacy").toLowerCase()
+    const native = mode === "native"
+    if (adapterEnabled || native) {
         sessionCfg = resolveSessionConfig({
             cwd: process.cwd(),
             envUrl,
             settingsUrl: settings.url,
             defaultUrl: defaultCombinerUrl(),
         })
-        connection = new CombinerConnection(connInputsFor(sessionCfg), clientLog)
-        const activeConn = connection // narrowed for the activation closure below
+        // SAFETY: the two connection classes are duck-compatible by design (same
+        // public surface: sessionToken/setToken/rebind/reset/ensureConnected/
+        // listTools/listPrompts/getPrompt/listResources/readResource/callTool/
+        // controlOrigin/uiUrlFor/applyFilter/health/setHooks/bindUi); only private
+        // internals differ (legacy's withStaleRetry vs native's typed
+        // McpSessionExpiredError retry). Module-scoped consumers use the
+        // CombinerConnection type; the invariant is the parity itself.
+        connection = (native
+            ? new NativeCombinerConnection(connInputsFor(sessionCfg), clientLog)
+            : new CombinerConnection(connInputsFor(sessionCfg), clientLog)) as unknown as CombinerConnection
+        // The mcp router registers in BOTH modes (the same owned connection — not a
+        // second proxy): tool_call gates such as pi-permission-system and
+        // pi-subagents recognize MCP calls by the tool name "mcp", and the router
+        // keeps a discovery/search surface alongside the per-tool declarations.
+        const activeConn = connection
         pi.registerTool(
             createMcpTool({
-                connection,
+                connection: activeConn,
                 toolName,
                 getServerFilter: () => sessionCfg?.serverFilter,
                 onSearchMatches: (tools) =>
                     sessionCfg?.directSpec === "search" ? activateFromSearch(tools, directDepsFor(activeConn)) : [],
             }),
         )
-        if (settings.scriptMode) {
+        if (!native && settings.scriptMode) {
             pi.registerTool(createScriptTool({ connection, name: `${toolName}Script` }))
+        }
+        if (native) {
+            // SAFETY: guarded by `native` above, so the runtime instance is
+            // NativeCombinerConnection — the static type can't express the
+            // mode-dispatch (see the duck-parity note at the assignment).
+            // Per-tool surface + interactive read_* + the list_changed re-sync.
+            // The connection instance is ours (NativeCombinerConnection) — narrowed
+            // by the mode check above.
+            activateNativeMode(pi, {
+                connection: connection as unknown as NativeCombinerConnection,
+                directSpec: sessionCfg?.directSpec ?? [],
+                serverFilter: sessionCfg?.serverFilter,
+                uiAutoOpen: settings.uiAutoOpen !== false,
+                warnLargeDirectExposure: settings.warnLargeDirectExposure,
+                log: clientLog,
+            })
         }
         if (sessionCfg.otherServers.length && !adapterPackageInstalled()) {
             clientLog(
@@ -410,7 +452,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
     if (connection) {
         const conn = connection // captured non-optional for the handlers below
         const registeredPrompts = new Set<string>()
-        const registeredResources = new Set<string>()
+        const registeredResources = new Map<string, string>()
         let footerTimer: NodeJS.Timeout | undefined
         let uiCtx: ExtensionContext["ui"] | undefined
 
@@ -445,13 +487,18 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                 })
                 .catch(() => undefined)
         }
+        const resyncAll = () => {
+            // Every surface re-syncs on: list_changed notifications, reconnect
+            // catch-up (fired by the connection itself), AND session_start —
+            // a reload/re-enter with an UNCHANGED token skips any reconnect, so
+            // without this the surfaces would only ever update on notifications.
+            syncPrompts()
+            syncResources()
+            syncDirect()
+            refreshFooter()
+        }
         conn.setHooks({
-            onToolsChanged: () => {
-                syncPrompts()
-                syncResources()
-                syncDirect()
-                refreshFooter()
-            },
+            onToolsChanged: resyncAll,
             onStateChange: () => refreshFooter(),
             // Stage 2: the widget hold announces its UI URL mid-call — open it.
             onWidgetUrl: (url) => {
@@ -549,7 +596,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
     // restart-server <srv> (combiner meta-tools through our client), system-prompt
     // (show the injected directive), install-config [path] (write the shared mcp.json
     // combiner entry — legacy pairing with pi-mcp-adapter, now also read by our ladder).
-    pi.registerCommand("mcp-combiner", {
+    const combinerCommandSpec: CommandSpec = {
         description:
             "mcp-combiner — verbs: status, enable <srv>, disable <srv>, restart-server <srv>, system-prompt, install-config [path]",
         getArgumentCompletions: (prefix) => completeVerbs(prefix),
@@ -624,7 +671,16 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
             }
             ctx.ui?.notify?.(`mcp-combiner: unknown verb "${v}". Try: ${COMMAND_VERBS.join(", ")}`, "warn")
         },
-    })
+    }
+    pi.registerCommand("mcp-combiner", combinerCommandSpec)
+
+    // NOTE: we deliberately do NOT register "/mcp" — pi's built-in MCP extension
+    // owns that command and stays the native-mode transport; our surfaces ("mcp"
+    // router tool, direct <server>_<tool>, read_*) don't collide with the builtin's
+    // (codemode / tool-search / read_mcp_resource). Registering "/mcp" would
+    // displace the builtin at load (pi's loader drops replaceable built-ins on
+    // command-name collision) and with it the native support we're migrating
+    // toward.
 
     if (hostOwned || !manage) {
         // Registration is static (mcp.json) and the combiner is someone else's to run:

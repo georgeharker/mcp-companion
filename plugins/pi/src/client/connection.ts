@@ -14,6 +14,7 @@
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client"
 import type { ElicitResult } from "@modelcontextprotocol/client"
+
 import { handleElicitation, type ElicitUi } from "./elicitation.js"
 import type { ServerFilter } from "./config-ladder.js"
 
@@ -243,6 +244,16 @@ export class CombinerConnection {
             this.client = client
             this.state = "connected"
             this.lastError = undefined
+            // Catch-up after (re)connect: notifications are lossy for disconnected
+            // clients by design (MCP has no replay), so a fresh connection's caches
+            // may be stale from missed list_changed events while we were gone — the
+            // hook re-syncs every surface (tools/resources/prompts/footer); all the
+            // syncs are idempotent via their registered-sets.
+            try {
+                this.hooks.onToolsChanged?.()
+            } catch {
+                // hook errors must never break the connect path
+            }
             this.hooks.onStateChange?.(this.state)
             return client
         })()
@@ -254,7 +265,7 @@ export class CombinerConnection {
             this.lastError = e instanceof Error ? e.message : String(e)
             this.log("warn", `combiner connect failed (${this.lastError})`)
             this.hooks.onStateChange?.(this.state)
-            throw new Error(`cannot reach the combiner at ${this.conn.baseUrl}: ${this.lastError}`)
+            throw new Error(`cannot reach the combiner at ${this.conn.baseUrl}: ${this.lastError} — the combiner may have restarted; this call did not run and is safe to retry (carried state: grants, filters, parked sessions survives restarts)`)
         } finally {
             this.connecting = undefined
         }
@@ -263,8 +274,7 @@ export class CombinerConnection {
     /** tools/list, cached until invalidated (list_changed / reset / reconnect). */
     async listTools(force = false): Promise<ToolSummary[]> {
         if (!force && this.tools && Date.now() - this.toolsFetchedAt < 5_000) return this.tools
-        const client = await this.ensureConnected()
-        const res = await client.listTools()
+        const res = await this.withStaleRetry("listTools", (client) => client.listTools())
         this.tools = (res.tools ?? []) as ToolSummary[]
         this.toolsFetchedAt = Date.now()
         return this.tools
@@ -273,8 +283,7 @@ export class CombinerConnection {
     /** prompts/list, cached alongside tools (combiner namespaces `<server>_<name>`). */
     async listPrompts(force = false): Promise<PromptSummary[]> {
         if (!force && this.prompts && Date.now() - this.promptsFetchedAt < 5_000) return this.prompts
-        const client = await this.ensureConnected()
-        const res = await client.listPrompts()
+        const res = await this.withStaleRetry("listPrompts", (client) => client.listPrompts())
         this.prompts = (res.prompts ?? []) as PromptSummary[]
         this.promptsFetchedAt = Date.now()
         return this.prompts
@@ -282,15 +291,13 @@ export class CombinerConnection {
 
     /** prompts/get through the combiner. */
     async getPrompt(name: string, args: Record<string, string>): Promise<unknown> {
-        const client = await this.ensureConnected()
-        return client.getPrompt({ name, arguments: args })
+        return this.withStaleRetry(`getPrompt ${name}`, (client) => client.getPrompt({ name, arguments: args }))
     }
 
     /** resources/list, cached alongside tools/prompts. */
     async listResources(force = false): Promise<ResourceSummary[]> {
         if (!force && this.resources && Date.now() - this.resourcesFetchedAt < 5_000) return this.resources
-        const client = await this.ensureConnected()
-        const res = await client.listResources()
+        const res = await this.withStaleRetry("listResources", (client) => client.listResources())
         this.resources = (res.resources ?? []) as ResourceSummary[]
         this.resourcesFetchedAt = Date.now()
         return this.resources
@@ -298,27 +305,40 @@ export class CombinerConnection {
 
     /** resources/read through the combiner. */
     async readResource(uri: string): Promise<unknown> {
-        const client = await this.ensureConnected()
-        return client.readResource({ uri })
+        return this.withStaleRetry(`readResource ${uri}`, (client) => client.readResource({ uri }))
     }
 
-    /** callTool with a single stale-session retry: on transport/stale errors we reset
-     *  and reconnect once (the combiner may have bounced; handover keeps our token). */
-    async callTool(name: string, args: Record<string, unknown> | undefined): Promise<unknown> {
-        const attempt = async (): Promise<unknown> => {
-            const client = await this.ensureConnected()
-            return client.callTool({ name, arguments: args ?? {} })
-        }
+    /** One-shot stale-session retry shared by EVERY upstream call (callTool, list*,
+     *  read/get): a combiner restart invalidates the transport session mid-flight and
+     *  the first operation to notice can be any of them — e.g. the router's
+     *  tool-cache refresh, which runs BEFORE any callTool and used to surface
+     *  "Session not found" raw. Classify like callTool did: prefer the SDK error's
+     *  runtime `.status` (StreamableHTTPError is not exported — no instanceof) over
+     *  message text; the regex stays as a belt for close races / transport errors. */
+    private async withStaleRetry<T>(label: string, op: (client: Client) => Promise<T>): Promise<T> {
+        const client = await this.ensureConnected()
         try {
-            return await attempt()
+            return await op(client)
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
-            const stale = /404|stale|session|not found|closed|fetch failed/i.test(msg)
+            // Prefer the SDK error's runtime `.status` over message text: the SDK's
+            // StreamableHTTPError class is NOT exported (no instanceof available),
+            // but the 404 it throws for an unknown/expired session carries `.status`
+            // at runtime. The regex stays as a belt (transport errors, close races).
+            const stale404 = (e as { status?: number } | null)?.status === 404
+            const stale = stale404 || /404|stale|session|not found|closed|fetch failed/i.test(msg)
             if (!stale) throw e
-            this.log("info", `call "${name}" went stale (${msg}); reconnecting once`)
+            this.log("info", `${label} went stale (${msg}); reconnecting once`)
             await this.reset("stale session")
-            return await attempt()
+            return await op(await this.ensureConnected())
         }
+    }
+
+    /** callTool with the one-shot stale-session retry (see withStaleRetry) — the
+     *  combiner may have bounced; handover keeps our token, so a single reconnect
+     *  is enough. */
+    async callTool(name: string, args: Record<string, unknown> | undefined): Promise<unknown> {
+        return this.withStaleRetry(`callTool ${name}`, (client) => client.callTool({ name, arguments: args ?? {} }))
     }
 
     /** Control-plane origin for the combiner's REST routes (/health, /sessions/*). */

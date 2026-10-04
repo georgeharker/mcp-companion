@@ -9,48 +9,20 @@
 // are flagged in the tool description — read_* returns their markup as text; the
 // interactive browser experience is the ext-apps host (later, see adapter-design.md).
 
+import { appendFileSync } from "node:fs"
 import type { ToolDefinition } from "../pi.js"
-import type { CombinerConnection, ResourceSummary } from "./connection.js"
-import type { ServerFilter } from "./config-ladder.js"
-import { renderResourceResult, textResult, toolUiResourceUri } from "./render.js"
-import { openInBrowser } from "./proxy-tool.js"
+import type { CombinerConnection, ResourceSummary } from "../client/connection.js"
+import type { ServerFilter } from "../client/config-ladder.js"
+// Canonical copies of the naming/interactive-resource helpers live in client/
+// (survive the legacy deletion); re-exported here so the legacy tests keep working.
+import { isInteractiveResource, openInBrowser, renderResourceResult } from "../client/widget-support.js"
+import { resourceNameToToolName, resourceServer } from "../client/resource-naming.js"
+import { textResult } from "./render.js"
 import { callRenderer, resultRenderer } from "./renderers.js"
 
-/** Ported verbatim from pi-mcp-adapter's resource-tools.ts (MIT, © 2026 Nico Bailon). */
-export function resourceNameToToolName(name: string): string {
-    let result = name
-        .replace(/[^a-zA-Z0-9]/g, "_")
-        .replace(/_+/g, "_")
-        .replace(/^_+/, "") // Remove leading underscores
-        .replace(/_+$/, "") // Remove trailing underscores
-        .toLowerCase()
-
-    // Ensure we have a valid name
-    if (!result || /^\d/.test(result)) {
-        result = "resource" + (result ? "_" + result : "")
-    }
-
-    return result
-}
-
-export const MCP_APP_MIME = "text/html;profile=mcp-app"
-
-/** True for interactive ext-apps resources: read_* returns their markup AND
- *  surfaces the combiner UI-host URL (which serves the live widget). */
-export function isInteractiveResource(r: ResourceSummary): boolean {
-    return r.mimeType === MCP_APP_MIME || r.uri.startsWith("ui://")
-}
-
-/** Attribute a resource to an upstream server for filtering: ui:// URIs carry the
- *  server as the host component (ui://todoist/…); otherwise fall back to the name's
- *  leading word before a dash/underscore. */
-export function resourceServer(r: ResourceSummary): string | undefined {
-    const m = r.uri.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i)
-    if (m?.[1]) return m[1].split(".")[0]?.toLowerCase()
-    const name = r.name ?? r.uri
-    const head = name.split(/[-_]/, 1)[0]
-    return head ? head.toLowerCase() : undefined
-}
+export { isInteractiveResource } from "../client/widget-support.js"
+export { renderResourceResult, toolUiResourceUri } from "../client/widget-support.js"
+export { resourceNameToToolName, resourceServer } from "../client/resource-naming.js"
 
 /** Apply the project server filter to a resource list (mirrors tool filtering;
  *  attribution by uri host, with `_`/`-` name-prefix fallback for underscore-named
@@ -68,26 +40,53 @@ export function filterResources(resources: ResourceSummary[], filter: ServerFilt
     return resources
 }
 
-/** Discover resources and register one read_* tool each. Idempotent; returns count. */
+/** Discover resources and register one read_* tool each. Idempotent; returns count.
+ *
+ *  `registered` is the toolName → resourceUri OWNERSHIP map (persisted by the caller
+ *  across syncs). Collision rule: first registration keeps the plain name; a later
+ *  resource whose derived name is taken by a DIFFERENT uri gets a server-qualified
+ *  name (read_<server>_<name>) + a notice — most servers already self-qualify their
+ *  resource names (todoist_task_list), so only bare names (e.g. a mock's "widget"
+ *  shadowing svg-mcp's) reach this path. Same-uri re-syncs are no-ops. */
 export async function syncResourceTools(
     register: (tool: ToolDefinition) => void,
     connection: CombinerConnection,
-    registered: Set<string>,
+    registered: Map<string, string>,
     filter: ServerFilter | undefined,
     notify: (message: string, level: "info" | "warn" | "error") => void,
 ): Promise<number> {
     let resources: ResourceSummary[] = []
+    const dbg = (s: string) => {
+    }
     try {
         resources = filterResources(await connection.listResources(), filter)
+        dbg(
+            `syncResourceTools: ${resources.length} resource(s) after filter: ` +
+                resources.map((r) => r.uri).slice(0, 12).join(", "),
+        )
     } catch (e) {
         notify(`resource discovery failed (${e instanceof Error ? e.message : String(e)})`, "warn")
         return 0
     }
     for (const resource of resources) {
         const label = resource.name ?? resource.uri
-        const toolName = `read_${resourceNameToToolName(label)}`
-        if (registered.has(toolName)) continue
-        registered.add(toolName)
+        let toolName = `read_${resourceNameToToolName(label)}`
+        const existingOwner = registered.get(toolName)
+        if (existingOwner === resource.uri) continue // ours, already registered
+        if (existingOwner !== undefined) {
+            // Name collision across resources: first registration keeps the plain
+            // name; this resource gets a server-qualified one (see docstring).
+            const server = resourceServer(resource) ?? "mcp"
+            toolName = `read_${resourceNameToToolName(`${server}_${label}`)}`
+            if (registered.get(toolName) === resource.uri) continue
+            dbg(`syncResourceTools: collision on "${label}" → disambiguated as ${toolName}`)
+            notify(
+                `resource "${label}" (${server}) collided with another resource's read tool; ` +
+                    `registered as ${toolName} instead`,
+                "info",
+            )
+        }
+        registered.set(toolName, resource.uri)
         const interactive = isInteractiveResource(resource)
         const description = [
             resource.description ?? `Read MCP resource ${resource.uri}`,

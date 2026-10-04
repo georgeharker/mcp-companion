@@ -10,7 +10,7 @@
 // is identical. Default timeout 30s, matching the adapter.
 
 import type { ToolDefinition } from "../pi.js"
-import type { CombinerConnection, ToolSummary } from "./connection.js"
+import type { CombinerConnection, ToolSummary } from "../client/connection.js"
 import { rankTools, regexMatches, compileSafeRegex } from "./ranking.js"
 import { renderDescribe, renderSearchHit, renderToolResult, textResult } from "./render.js"
 import { callRenderer, resultRenderer } from "./renderers.js"

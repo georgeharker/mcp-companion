@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { agentDir } from "./settings.js"
-import type { DirectToolsSpec } from "./direct-tools.js"
+import type { DirectToolsSpec } from "./tool-matching.js"
 
 export type ServerFilter = { allow?: string[]; deny?: string[] }
 

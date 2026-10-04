@@ -85,6 +85,8 @@ shared `mcp.json` for the adapter to read) still exists for mode B.
   combiner ≥ 0.8.0 (version-gated automatically).
 - A combiner **`servers.json`** (auto-probe locations below).
 - pi-mcp-adapter **not** required.
+- **Pi ≥ 1.0** with its bundled `@earendil-works/pi-mcp` (peer dependency, `^1.0.2`) —
+  native mode is built on the pi-mcp transport; legacy mode needs no extra install.
 
 ## Configuration — three layers
 
@@ -96,11 +98,13 @@ Pi-side knobs (see [`settings.example.json`](./settings.example.json)):
 | ----------------- | -------- | --------------------------------------------------------------------------------------------------------- |
 | `toolName`        | `"mcp"`  | Name of the proxy tool. Rename (e.g. `"combiner"`) to coexist with pi-mcp-adapter's own `mcp`.            |
 | `adapter`         | `"auto"` | Client-half gate — see above.                                                                             |
+| `mode`            | `"legacy"` | `"native"` switches to the pi-mcp transport: per-tool pi-1.0 registration (exposure/namespace/annotations) via our owned connection, `mcp` router still registered, no `mcpScript`. Env `PI_MCP_COMBINER_MODE` wins. |
 | `lazy`            | `"lazy"` | `"eager"` connects at session start; `"lazy"` on first use. Prompts/resources/directTools imply eager.    |
 | `exposeResources` | `true`   | Register `read_<resource>` tools.                                                                         |
 | `prompts`         | `true`   | Register prompt slash commands.                                                                           |
-| `scriptMode`      | `true`   | Register the `<toolName>Script` batching tool.                                                            |
+| `scriptMode`      | `true`   | Register the `<toolName>Script` batching tool (legacy mode only — native mode has no script tool).         |
 | `uiAutoOpen`      | `true`   | Auto-open interactive widget URLs in the browser (Stage 2 holds + resource reads).                        |
+| `warnLargeDirectExposure` | `true` | Warn when >50 tools end up `direct`-exposed (every schema rides in every request); set `false` to silence. Native mode. |
 | `mcpFooterStatus` | `"full"` | Footer text: `"full"` = `N servers enabled (M ready) · T tools`, `"compact"` = `MCP M/N`, `"off"` = none. |
 | `mcpFooterKey`    | `"mcp"`  | The `ctx.ui.setStatus` key the footer publishes under (the slot oh-my-posh-style footers aggregate).      |
 | `url`             | —        | Explicit combiner URL. Env wins.                                                                          |
@@ -138,6 +142,8 @@ The recognized `mcp-combiner` entry carries connection + per-project exposure:
   chat's token (sees through scripting too) and mirrored client-side.
 - **`directTools`** — promote named tools (globs) to first-class Pi tools at session
   start, or `"search"` to promote tools the first time `mcp({search})` matches them.
+  In native mode the same list maps to pi-1.0 `direct` exposure (everything else rides
+  `codemode`, discoverable via pi's `tool_search`); `"search"` degrades to all-codemode.
   A >50-entry allowlist warns; `true` is deliberately not offered (context cost).
 - Project layers are read against the **session cwd** — worktree subagents and
   project switches get their own `.pi/mcp.json`. Commit the `combiner` block if you
@@ -183,7 +189,14 @@ mcp({})                                 → status
 In `"directTools": "search"` mode, search matches are promoted to first-class tools
 and announced in the result.
 
-**`mcpScript`** — batch calls with trusted JavaScript:
+**In native mode** (`"mode": "native"`) the combiner's tools are also declared
+first-class under their own bare names (`github_search_code`) — `directTools` matches
+verbatim, the rest reachable from codemode scripts and pi's `tool_search` — while the
+`mcp` router above keeps registering on the same connection (tool_call gates that match
+the `mcp` tool name keep working). See [`docs/call-chain.md`](./docs/call-chain.md)
+for the full layer map of a call in both modes.
+
+**`mcpScript`** — batch calls with trusted JavaScript (legacy mode):
 `{code: "const r = await tools.search('q'); emit(r); return await tools.call('t', {})"}`.
 
 **`read_<resource>` tools** — one zero-parameter tool per MCP resource; interactive
@@ -231,11 +244,20 @@ restart handover all key on the chat — subagents automatically get their own t
 (each child session binds fresh). A resumed chat continues its identity; a fork
 deliberately starts fresh. An explicit token in the configured URL always wins.
 
+Because identity lives at the client, a combiner restart degrades gracefully: the
+sanctioned-restart handover carries consent grants, per-token filters and parked
+sessions to the successor boot, every connection method retries a stale session once
+(`withStaleRetry`), and `combiner__status` / `/health` report what this boot restored
+(`_handover`) — the post-restart re-orientation receipt.
+
 ## Permissions
 
 Tool-call policy is enforced **at the combiner** (`permissions` in `servers.json`:
 deny/elicit/allow per server, with interactive elicitation bridged to Pi's UI —
-subagents decline securely by default). If you also run
+subagents decline securely by default). "Allow for session" grants are keyed by the
+chat token and carried across sanctioned combiner restarts. In native mode the
+combiner's tool annotations (readOnly/destructive hints) ride pi's registration for
+classification-aware gates. If you also run
 [`pi-permission-system`](https://github.com/gotgenes/pi-packages), keep `toolName:
 "mcp"` for its `mcp`-surface rules (tool-glob patterns like `github_*` match out of
 the box).

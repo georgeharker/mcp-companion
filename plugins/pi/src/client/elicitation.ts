@@ -84,8 +84,15 @@ async function askProperty(
 }
 
 /** Handle an elicitation request against Pi's UI. Never throws — a UI that can't
- *  answer declines, and the combiner applies its elicitUnavailable policy. */
-export async function handleElicitation(req: ElicitRequest, elicitUi: ElicitUi): Promise<ElicitResponse> {
+ *  answer declines, and the combiner applies its elicitUnavailable policy.
+ *  `abort` (wired from the connection's elicitation handler signal) cancels between
+ *  dialogs: a cancelled pending request must not keep prompting the user. */
+export async function handleElicitation(
+    req: ElicitRequest,
+    elicitUi: ElicitUi,
+    abort?: AbortSignal,
+): Promise<ElicitResponse> {
+    if (abort?.aborted) return { action: "cancel" }
     if (!elicitUi.hasUI || !elicitUi.ui?.select || !elicitUi.ui.input) return REFUSE
 
     const schema = isRecord(req.requestedSchema) ? req.requestedSchema : undefined
@@ -106,6 +113,7 @@ export async function handleElicitation(req: ElicitRequest, elicitUi: ElicitUi):
     const entries = Object.entries(props).filter(([, v]) => isRecord(v))
     const content: Record<string, ElicitValue> = {}
     for (const [name, raw] of entries) {
+        if (abort?.aborted) return { action: "cancel" }
         const label = entries.length === 1 ? header : `${header}: ${name}`
         const value = await askProperty(elicitUi.ui, label, raw as Record<string, unknown>)
         if (value === undefined) return REFUSE

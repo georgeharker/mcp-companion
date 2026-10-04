@@ -118,6 +118,22 @@ export type ToolDefinition = {
         theme: RenderTheme,
         context: { [key: string]: unknown },
     ) => TuiComponent
+    /** NATIVE-exposure fields (pi ≥ 1.0 host contract; optional so 0.99.x hosts ignore
+     *  them instead of erroring — unknown fields are dropped by the 0.99 loader):
+     *    exposure    — "direct" | "model-only" | "codemode" | "deferred" | "hidden":
+     *                  how the tool is declared to the model (codemode: callable from
+     *                  codemode scripts, listed as a namespace in the codemode tool's
+     *                  description — near-zero token cost as of pi 1.0)
+     *    namespace   — groups the tool in codemode's listing, like an MCP server
+     *    annotations — MCP tool hints; reach pi.getAllTools() for permission gates */
+    exposure?: "direct" | "model-only" | "codemode" | "deferred" | "hidden"
+    namespace?: { name: string; description: string }
+    annotations?: {
+        readOnlyHint?: boolean
+        destructiveHint?: boolean
+        idempotentHint?: boolean
+        openWorldHint?: boolean
+    }
 }
 
 export type CommandSpec = {

@@ -14,51 +14,16 @@
 // user's call.
 
 import type { ToolDefinition } from "../pi.js"
-import type { CombinerConnection, ToolSummary } from "./connection.js"
+import type { CombinerConnection } from "../client/connection.js"
+// Shared helpers (matching/attribution) moved to client/tool-matching.ts during the
+// Factoring — re-exported here so index.ts's wiring and tests keep their
+// import paths while this module waits for deletion.
+import { globToRegExp, type ToolSummary } from "../client/tool-matching.js"
 import { renderToolResult, textResult } from "./render.js"
 import { directToolRenderers } from "./renderers.js"
 
-export type DirectToolsSpec = string[] | "search"
-
-/** Names that must never be shadowed by a promoted tool (pi builtins). Callers add
- *  their own tool names on top. */
-export const RESERVED_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "mcp", "glob"] as const
-
-/** Apply a server allow/deny filter to a combined tool list. Server names may
- *  contain underscores (gws_georgeharker), so matching is by PREFIX — a tool
- *  belongs to entry E iff its name starts `E_` (subsumes first-segment equality). */
-export function toolServerMatches(toolName: string, serverEntry: string): boolean {
-    return toolName.startsWith(`${serverEntry}_`)
-}
-
-/** Apply a server allow/deny filter to a combined tool list (`<server>_` prefix,
- *  underscore-safe via toolServerMatches). */
-export function applyServerFilter(
-    tools: ToolSummary[],
-    filter: { allow?: string[]; deny?: string[] } | undefined,
-): ToolSummary[] {
-    if (!filter) return tools
-    if (filter.allow?.length) {
-        return tools.filter((t) => filter.allow!.some((e) => toolServerMatches(t.name, e)))
-    }
-    if (filter.deny?.length) {
-        return tools.filter((t) => !filter.deny!.some((e) => toolServerMatches(t.name, e)))
-    }
-    return tools
-}
-
-/** fnmatch-lite: `*` → any run, `?` → one char, everything else literal. */
-export function globToRegExp(pattern: string): RegExp {
-    const escaped = pattern
-        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*/g, ".*")
-        .replace(/\?/g, ".")
-    return new RegExp(`^${escaped}$`, "i")
-}
-
-export function matchesGlob(name: string, pattern: string): boolean {
-    return globToRegExp(pattern).test(name)
-}
+export { RESERVED_TOOL_NAMES, applyServerFilter, matchesGlob, toolServerMatches } from "../client/tool-matching.js"
+export type { DirectToolsSpec } from "../client/tool-matching.js"
 
 /** Resolve the allowlist spec against the combined tool list (server filter applied
  *  by the caller). Returns matching tools in list order. */
@@ -94,8 +59,8 @@ export function buildDirectTool(tool: ToolSummary, deps: DirectToolDeps): ToolDe
         description: tool.description ?? `Combiner tool ${tool.name}`,
         parameters: normalizeInputSchema(tool.inputSchema),
         ...directToolRenderers(tool.name),
-        execute: async () => {
-            const result = await deps.connection.callTool(tool.name, undefined)
+        execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+            const result = await deps.connection.callTool(tool.name, params)
             const text = renderToolResult(result)
             if ((result as { isError?: boolean })?.isError) throw new Error(text)
             return textResult(text)
