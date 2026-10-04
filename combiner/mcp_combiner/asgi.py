@@ -233,7 +233,10 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
         if token is None:
             return await self._dispatch_tokenless(request, call_next)
 
-        already_mapped = RUNTIME.sessions.session_for_token(token) is not None
+        # The CURRENTLY mapped downstream session id for this token (None = unmapped).
+        # Held as the sid itself, not a boolean — the last-wins remap below compares
+        # the response's mcp-session-id against it.
+        already_mapped: str | None = RUNTIME.sessions.session_for_token(token)
         if not already_mapped:
             logger.info(
                 "Token not yet mapped: token=%s  source=%s  method=%s",
@@ -276,12 +279,11 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
                 "url" if url_token else "header",
                 " (remapped — superseded session)" if already_mapped else "",
             )
-                # NOTE: no pending-filter copy here anymore. The token-keyed
-                # filter store is canonical and enforcement READS THROUGH to it
-                # (ctx.session_id → token → store) at request time — a filter
-                # stored before the client connected is simply in effect from
-                # its first request, with no namespace join to get wrong.
-
+            # NOTE: no pending-filter copy here anymore. The token-keyed
+            # filter store is canonical and enforcement READS THROUGH to it
+            # (ctx.session_id → token → store) at request time — a filter
+            # stored before the client connected is simply in effect from
+            # its first request, with no namespace join to get wrong.
 
         return response
 
