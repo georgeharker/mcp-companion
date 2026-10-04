@@ -4,6 +4,28 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [0.16.0] — 2026-10-04
+
+### Added
+
+- **Token-keyed consent grants** — "allow for session" is keyed by the chat
+  token (the custody principle), not the transport session, and carried
+  across sanctioned-restart handovers (snapshot/restore, grant counts in
+  the handover log lines).
+- **Restart receipt** — `combiner__status` and `/health` carry `_handover`:
+  what this boot restored (grants / parked / filters / binds) or why a
+  handover was refused — the post-restart re-orientation record.
+- `restart_server` meta-tool — teardown + respawn for dead upstream children
+  (per-chat isolated sessions reset, honestly reported).
+- mockserver: `mock__elicit_form` (the 4-property elicitation proof),
+  `mock__remember`/`mock__recall` (token identity tests), widget tooling.
+
+### Fixed
+
+- Last-wins token→session mapping: a reloaded/reconnected client mints a new
+  downstream session for the same chat token; the map now follows the live
+  session instead of first-wins routing elicit forwards to dead streams.
+
 ## [0.14.0] — 2026-09-17
 
 ### Added
