@@ -573,7 +573,10 @@ class MockServer:
                 return "elicit: " + json.dumps(payload)
             except Exception as exc:
                 with open("/tmp/mock-elicit-dbg.log", "a") as f:
-                    f.write(f"{time.strftime('%H:%M:%S')} elicit EXCEPTION: {type(exc).__name__}: {exc!r}\n")
+                    f.write(
+                        f"{time.strftime('%H:%M:%S')} elicit EXCEPTION: "
+                        f"{type(exc).__name__}: {exc!r}\n"
+                    )
                 raise
 
         @mcp_srv.tool(
