@@ -364,7 +364,18 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
             settingsUrl: settings.url,
             defaultUrl: defaultCombinerUrl(),
         })
+        // Zombie teardown: pi re-imports the extension module on /reload WITHOUT
+        // firing session_shutdown (the session persists, no unload hook exists), so
+        // the previous instance's McpClient + SSE stream would live on and compete
+        // for the token's elicit routing. A process-global registry survives module
+        // re-imports: the fresh factory closes every prior live connection first.
+        const g = globalThis as { __piMcpCombinerConns?: NativeCombinerConnection[] }
+        for (const stale of g.__piMcpCombinerConns ?? []) {
+            void stale.reset("superseded by a newer extension instance (reload)")
+        }
+        g.__piMcpCombinerConns = []
         connection = new NativeCombinerConnection(connInputsFor(sessionCfg), clientLog)
+        g.__piMcpCombinerConns.push(connection)
         // The mcp router registers alongside the per-tool native surface (the same
         // owned connection — not a second proxy): tool_call gates such as
         // pi-permission-system and pi-subagents recognize MCP calls by the tool

@@ -261,28 +261,27 @@ class TokenRewriteMiddleware(BaseHTTPMiddleware):
 
             _isolated_registry.expedite_park(token)
 
-        if not already_mapped:
-            sid = response.headers.get("mcp-session-id")
-            if sid:
-                RUNTIME.sessions.map_token(token, sid)
-                logger.info(
-                    "Token mapped: token=%s  session=%s  source=%s",
-                    token,
-                    sid,
-                    "url" if url_token else "header",
-                )
+        # Last-wins mapping: a reloaded/reconnected client mints a NEW downstream
+        # session for the SAME chat token; the map must follow the LIVE session or
+        # elicit forwards keep routing to the dead one (the pi extension reloads
+        # its module without firing session_shutdown, so the old stream can linger
+        # briefly — the newest session is always the authoritative one).
+        sid = response.headers.get("mcp-session-id")
+        if sid and sid != already_mapped:
+            RUNTIME.sessions.map_token(token, sid)
+            logger.info(
+                "Token mapped: token=%s  session=%s  source=%s%s",
+                token,
+                sid,
+                "url" if url_token else "header",
+                " (remapped — superseded session)" if already_mapped else "",
+            )
                 # NOTE: no pending-filter copy here anymore. The token-keyed
                 # filter store is canonical and enforcement READS THROUGH to it
                 # (ctx.session_id → token → store) at request time — a filter
                 # stored before the client connected is simply in effect from
                 # its first request, with no namespace join to get wrong.
-            else:
-                logger.debug(
-                    "Token seen but no mcp-session-id in response: token=%s  status=%d  source=%s",
-                    token,
-                    response.status_code,
-                    "url" if url_token else "header",
-                )
+
 
         return response
 
