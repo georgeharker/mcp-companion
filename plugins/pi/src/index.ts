@@ -338,7 +338,17 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
             let uiLevel: "info" | "warn" | "error" = "info"
             if (level === "warn") uiLevel = "warn"
             else if (level === "error") uiLevel = "error"
-            uiNotify(line, uiLevel)
+            try {
+                uiNotify(line, uiLevel)
+            } catch {
+                // The captured ctx went stale (reload/session replacement kills
+                // extension ctxs — pi 1.0 asserts on use). Degrade to stderr and
+                // drop the capture so later logs skip the dead path entirely:
+                // an async log line (e.g. a superseded connection's reset) must
+                // NEVER crash the process.
+                uiNotify = undefined
+                process.stderr.write(`${line}\n`)
+            }
         } else if (level !== "info") {
             process.stderr.write(`${line}\n`)
         }
@@ -369,13 +379,20 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         // the previous instance's McpClient + SSE stream would live on and compete
         // for the token's elicit routing. A process-global registry survives module
         // re-imports: the fresh factory closes every prior live connection first.
-        const g = globalThis as { __piMcpCombinerConns?: NativeCombinerConnection[] }
-        for (const stale of g.__piMcpCombinerConns ?? []) {
-            void stale.reset("superseded by a newer extension instance (reload)")
+        const g = globalThis as { __piMcpCombinerDispose?: Array<() => void> }
+        // The teardown closures below (from prior factory runs, orphaned by pi's
+        // reload-without-session_shutdown) know how to fully retire their instance:
+        // clear the footer timer, drop the captured UI ctx (stale-ctx reads on it
+        // are a hard pi-1.0 assertion), and close the connection.
+        for (const dispose of g.__piMcpCombinerDispose ?? []) {
+            try {
+                dispose()
+            } catch {
+                // teardown must never break the fresh instance's load
+            }
         }
-        g.__piMcpCombinerConns = []
+        g.__piMcpCombinerDispose = []
         connection = new NativeCombinerConnection(connInputsFor(sessionCfg), clientLog)
-        g.__piMcpCombinerConns.push(connection)
         // The mcp router registers alongside the per-tool native surface (the same
         // owned connection — not a second proxy): tool_call gates such as
         // pi-permission-system and pi-subagents recognize MCP calls by the tool
@@ -421,6 +438,20 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         const registeredPrompts = new Set<string>()
         let footerTimer: NodeJS.Timeout | undefined
         let uiCtx: ExtensionContext["ui"] | undefined
+
+        // Full instance teardown, callable from a LATER factory run (pi re-imports
+        // the module on /reload without firing session_shutdown): clears this
+        // instance's footer timer, drops its captured UI ctx (stale-ctx reads are
+        // a hard pi-1.0 assertion), and closes its connection. The registry lives
+        // on globalThis — the one thing that survives a module re-import.
+        const teardownGlobal = globalThis as { __piMcpCombinerDispose?: Array<() => void> }
+        ;(teardownGlobal.__piMcpCombinerDispose ??= []).push(() => {
+            if (footerTimer) clearInterval(footerTimer)
+            footerTimer = undefined
+            uiCtx = undefined
+            uiNotify = undefined
+            void conn.reset("superseded by a newer extension instance (reload)")
+        })
 
         const refreshFooter = () => {
             if (uiCtx)
