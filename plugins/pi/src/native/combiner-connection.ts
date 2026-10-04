@@ -24,6 +24,7 @@
 // design (per-server config + handler-availability negotiation) remains the ecosystem
 // endgame; this class is what the extension ships until and after that lands.
 
+import { appendFileSync } from "node:fs"
 import { McpClient, McpSessionExpiredError, StreamableHttpTransport } from "@earendil-works/pi-mcp"
 import type { CallToolResult } from "@earendil-works/pi-mcp"
 import { handleElicitation, type ElicitResponse, type ElicitUi } from "../client/elicitation.js"
@@ -80,6 +81,15 @@ export type ConnectionHooks = {
 // accept/decline/cancel with an optional content record. Tracked as a tiny upstream
 // export PR candidate.
 export type ElicitResult = ElicitResponse
+
+
+function ncDbg(s: string): void {
+    try {
+        appendFileSync("/tmp/pi-combiner-dbg.log", `${new Date().toISOString()} ${s}\n`)
+    } catch {
+        // debug only
+    }
+}
 
 const CLIENT_INFO = { name: "pi-mcp-combiner", version: "0.14.3" }
 const CONNECT_TIMEOUT_MS = 8_000
@@ -273,6 +283,7 @@ export class NativeCombinerConnection implements CombinerConnection {
             ])
 
             this.client = client
+            ncDbg(`ensureConnected: CONNECTED session=${(client as unknown as { sessionId?: string }).sessionId ?? "?"} state=${(client as unknown as { transport?: { sessionId?: string } }).transport?.sessionId ?? "?"}`)
             this.state = "connected"
             this.lastError = undefined
             // Catch-up after (re)connect — same rationale as client/connection.ts:
@@ -300,12 +311,36 @@ export class NativeCombinerConnection implements CombinerConnection {
         }
     }
 
+    /** One-shot stale-session retry shared by EVERY request method — a combiner
+     *  bounce invalidates the transport session, and the first operation to notice
+     *  can be any of them (the router's listTools lookup runs BEFORE callTool;
+     *  without this it surfaced raw McpSessionExpiredError and never reset the
+     *  client, wedging the connection until reload). Same classification as
+     *  callTool: the typed McpSessionExpiredError first, the message regex as belt. */
+    private async withStaleRetry<T>(label: string, op: (client: McpClient) => Promise<T>): Promise<T> {
+        const client = await this.ensureConnected()
+        try {
+            return await op(client)
+        } catch (e) {
+            const typedStale = e instanceof McpSessionExpiredError
+            const msg = e instanceof Error ? e.message : String(e)
+            ncDbg(`${label} THROW typed=${typedStale} ${msg.slice(0, 140)}`)
+            const stale =
+                typedStale || /404|stale|session|not found|closed|fetch failed|illegal/i.test(msg)
+            if (!stale) throw e
+            ncDbg(`${label} stale-retry FIRED`)
+            this.log("info", `${label} went stale (${msg}); reconnecting once`)
+            await this.reset("stale session")
+            return await op(await this.ensureConnected())
+        }
+    }
+
     /** tools/list, cached until invalidated (list_changed / reset / reconnect).
      *  pi-mcp returns the tools array directly (pagination already resolved). */
     async listTools(force = false): Promise<ToolSummary[]> {
         if (!force && this.tools && Date.now() - this.toolsFetchedAt < LIST_CACHE_MS) return this.tools
         const client = await this.ensureConnected()
-        const tools: ToolSummary[] = (await client.listTools()).map((t) => ({
+        const tools: ToolSummary[] = (await this.withStaleRetry("listTools", (c) => c.listTools())).map((t) => ({
             name: t.name,
             description: t.description,
             inputSchema: t.inputSchema,
@@ -321,8 +356,9 @@ export class NativeCombinerConnection implements CombinerConnection {
      *  client doesn't model. */
     async listPrompts(force = false): Promise<PromptSummary[]> {
         if (!force && this.prompts && Date.now() - this.promptsFetchedAt < LIST_CACHE_MS) return this.prompts
-        const client = await this.ensureConnected()
-        const res = await client.request<{ prompts: PromptSummary[] }>("prompts/list")
+        const res = await this.withStaleRetry("listPrompts", (c) =>
+            c.request<{ prompts: PromptSummary[] }>("prompts/list"),
+        )
         this.prompts = res.prompts ?? []
         this.promptsFetchedAt = Date.now()
         return this.prompts
@@ -330,8 +366,9 @@ export class NativeCombinerConnection implements CombinerConnection {
 
     /** prompts/get through the combiner. */
     async getPrompt(name: string, args: Record<string, string>): Promise<unknown> {
-        const client = await this.ensureConnected()
-        return client.request("prompts/get", { name, arguments: args })
+        return this.withStaleRetry(`getPrompt ${name}`, (c) =>
+            c.request("prompts/get", { name, arguments: args }),
+        )
     }
 
     /** resources/list, cached alongside tools/prompts.
@@ -340,8 +377,9 @@ export class NativeCombinerConnection implements CombinerConnection {
      *  (uri/name/description/mimeType), so the cast narrows only metadata typing. */
     async listResources(force = false): Promise<ResourceSummary[]> {
         if (!force && this.resources && Date.now() - this.resourcesFetchedAt < LIST_CACHE_MS) return this.resources
-        const client = await this.ensureConnected()
-        const resources: ResourceSummary[] = ((await client.listResources()) as unknown) as ResourceSummary[]
+        const resources: ResourceSummary[] = ((await this.withStaleRetry("listResources", (c) =>
+            c.listResources(),
+        )) as unknown) as ResourceSummary[]
         this.resources = resources
         this.resourcesFetchedAt = Date.now()
         return resources
@@ -349,8 +387,7 @@ export class NativeCombinerConnection implements CombinerConnection {
 
     /** resources/read through the combiner. */
     async readResource(uri: string): Promise<unknown> {
-        const client = await this.ensureConnected()
-        return client.readResource(uri)
+        return this.withStaleRetry(`readResource ${uri}`, (c) => c.readResource(uri))
     }
 
     /** callTool with one stale-session retry (combiner bounce; handover keeps token).
@@ -380,14 +417,24 @@ export class NativeCombinerConnection implements CombinerConnection {
             // the transport doesn't classify.
             const typedStale = e instanceof McpSessionExpiredError
             const msg = e instanceof Error ? e.message : String(e)
+            ncDbg(`callTool ${name} THROW typed=${typedStale} status=${(e as { status?: number } | null)?.status} ${msg.slice(0, 140)}`)
             const stale = typedStale || /404|stale|session|not found|closed|fetch failed|illegal/i.test(msg)
             if (!stale) throw e
+            ncDbg(`callTool ${name} stale-retry FIRED`)
             this.log(
                 "info",
                 `call "${name}" went stale (${typedStale ? "session expired (typed)" : msg}); reconnecting once`,
             )
             await this.reset("stale session")
-            return await attempt()
+            ncDbg(`callTool ${name} reset done; retrying`)
+            try {
+                const result = await attempt()
+                ncDbg(`callTool ${name} RETRY SUCCEEDED`)
+                return result
+            } catch (e2) {
+                ncDbg(`callTool ${name} RETRY FAILED: ${e2 instanceof Error ? e2.message : String(e2)}`)
+                throw e2
+            }
         }
     }
 
