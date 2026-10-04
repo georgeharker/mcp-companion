@@ -32,6 +32,11 @@ tagged `vX.Y.Z`.
   firing `session_shutdown`, so the old instance's stream stayed alive and
   competed for elicit routing. A process-global registry survives re-imports;
   the fresh factory closes prior connections.
+- Stale-ctx crash on `/reload` (pi 1.0's hard assertion): the teardown's
+  reset-reason log rode the orphaned instance's captured `ctx.ui` — an
+  uncaught throw in the fire-and-forget microtask killed pi. `clientLog`
+  now degrades a stale UI capture to stderr instead of throwing, and the
+  teardown retires the whole instance (footer timer, UI captures, connection).
 
 ## [0.15.0] — 2026-10-03
 
