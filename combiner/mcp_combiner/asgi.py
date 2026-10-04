@@ -350,11 +350,15 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
     # Interactive resource host (mcp-app widgets): /ui/<token>/... on this app.
     # The sandbox relay binds a SECOND loopback origin (host+1) in __main__ —
     # provider HTML must never be same-origin with this capability-holding page.
+    # Widget URLs NAME the advertised origin (ui_host/advertise.py): loopback
+    # for desktop sessions, the tailnet address for remote renderers (un-bien) —
+    # URL construction only; binding stays --host/--port.
     from mcp_combiner.ui_host import attach_ui_host
+    from mcp_combiner.ui_host.advertise import advertised_origin
 
     attach_ui_host(
         combiner,
-        base_origin=f"http://{options.host}:{options.port}",
+        base_origin=advertised_origin(options.host, options.port),
         sandbox_relay_port=options.port + 1,
         hold_timeout=_env_hold_timeout(),
     )
