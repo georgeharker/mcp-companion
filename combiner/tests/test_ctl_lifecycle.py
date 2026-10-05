@@ -260,11 +260,15 @@ async def test_restart_sole_client_needs_no_force(capsys: pytest.CaptureFixture[
 async def test_restart_combiner_pid_defaults_to_parent_shell(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # When --pid is omitted the reference attaches to the calling shell
-    # (os.getppid()), never to this short-lived CLI process (os.getpid()).
+    # When --pid is omitted the reference attaches to the resolved owner —
+    # the pi ancestor when invoked from an agent tool call, else the calling
+    # shell (os.getppid()); never this short-lived CLI process (os.getpid()).
+    # _owner_pid is patched so the test is independent of the RUNNER's own
+    # ancestry (running pytest from an agent shell would resolve to pi!).
     with (
         patch("mcp_combiner.sharedserver._require_binary", return_value="/bin/sharedserver"),
         patch.object(ctl, "_sharedserver_refcount", AsyncMock(return_value=1)),
+        patch.object(ctl, "_owner_pid", return_value=os.getppid()),
         patch("os.path.isfile", return_value=True),
     ):
         rc = await ctl.cmd_restart_combiner(_restart_args(pid=None))
@@ -272,3 +276,52 @@ async def test_restart_combiner_pid_defaults_to_parent_shell(
     use_line = next(line for line in capsys.readouterr().out.splitlines() if " use " in line)
     tokens = use_line.split()
     assert tokens[tokens.index("--pid") + 1] == str(os.getppid())
+
+
+# ── _owner_pid: the pi-ancestor walk ────────────────────────────────────────────
+
+
+def _ps_parents(rows: dict[int, tuple[int, str]]) -> "object":
+    """A fake subprocess.run: rows map pid -> (ppid, command); unknown pids are gone."""
+
+    class _FakeCompleted:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def _run(cmd: list[str], **_: object) -> "_FakeCompleted":
+        target = int(cmd[-1])
+        if target not in rows:
+            return _FakeCompleted("")
+        ppid, command = rows[target]
+        return _FakeCompleted(f"{ppid} {command}\n")
+
+    return _run
+
+
+def test_owner_pid_walks_to_pi_ancestor(monkeypatch: pytest.MonkeyPatch) -> None:
+    # pi(102) <- bash(101, tool shell) <- bash(100) <- mcp-combiner: the
+    # ephemeral shells are walked past and the durable pi process owns it.
+    import subprocess
+
+    rows = {
+        100: (101, "bash"),
+        101: (102, "bash -c mcp-combiner restart"),
+        102: (999, "pi"),
+    }
+    monkeypatch.setattr(ctl.os, "getppid", lambda: 100)
+    monkeypatch.setattr(subprocess, "run", _ps_parents(rows))
+    assert ctl._owner_pid() == 102  # the pid whose command IS pi
+
+
+def test_owner_pid_falls_back_to_calling_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    # bash(200) <- Terminal(201, non-shell non-pi): interactive semantics —
+    # the calling shell keeps the reference.
+    import subprocess
+
+    rows = {
+        200: (201, "bash"),
+        201: (1, "/Applications/Ghostty.app/Contents/MacOS/ghostty"),
+    }
+    monkeypatch.setattr(ctl.os, "getppid", lambda: 200)
+    monkeypatch.setattr(subprocess, "run", _ps_parents(rows))
+    assert ctl._owner_pid() == 200

@@ -474,7 +474,15 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         }
         conn.setHooks({
             onToolsChanged: resyncAll,
-            onStateChange: () => refreshFooter(),
+            onStateChange: (state) => {
+                // Re-attach on (re)connect: a combiner bounce kills the instance our
+                // sharedserver reference was attached to, and nothing else re-takes
+                // ownership until the next session_start — an orphaned combiner then
+                // grace-stops 30m later (sharedserver `use` is idempotent per pid, so
+                // re-attaching on every connect is safe and cheap).
+                if (state === "connected") attachCombiner(clientLog)
+                refreshFooter()
+            },
             // Stage 2: the widget hold announces its UI URL mid-call — open it.
             onWidgetUrl: (url) => {
                 if (settings.uiAutoOpen !== false) openInBrowser(url)
@@ -670,10 +678,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
     // Pi forbids starting background resources from the factory, so all of this is
     // deferred to session_start. session_start fires again on reload/new/resume/fork
     // within the same process; the `attachment` guard makes re-entry a no-op attach.
-    pi.on("session_start", (_event, ctx) => {
-        if (attachment) return // already attached in this process
-
-        const log = makeLog(ctx, notify)
+    const attachCombiner = (log: LogFn): void => {
         const binary = resolveSharedserver(
             {
                 label: "mcp-combiner",
@@ -762,6 +767,11 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
 
         attachment = { binary, name }
         log("info", `combiner "${name}" attached on port ${port} (${combiner.cmd} ${wrappedArgs.join(" ")})`)
+    }
+
+    pi.on("session_start", (_event, ctx) => {
+        if (attachment) return // already attached in this process
+        attachCombiner(makeLog(ctx, notify))
     })
 
     pi.on("session_shutdown", (event: SessionShutdownEvent) => {

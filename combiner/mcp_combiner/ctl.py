@@ -94,6 +94,53 @@ def _emit(args: argparse.Namespace, data: Any) -> None:
 # stop``). sharedserver's ``--pid`` default is the immediate caller, which here
 # would be this CLI and would drop the reference the instant we return, so we
 # always pass ``--pid`` explicitly.
+#
+# Issued from an agent's tool call (pi -> bash -> this CLI), the "calling shell"
+# is ephemeral: its death orphans the restarted combiner, which then grace-stops
+# 30m later (observed live as the recurring unexplained stops). When the ancestry
+# walks past shell-ish processes to a ``pi`` process, THAT is the durable owner —
+# the chat session that keeps using the combiner — and the reference attaches to
+# it instead. Interactive invocations (bash <- Terminal) keep today's semantics.
+#
+_SHELL_BASENAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "nu"}
+
+
+def _owner_pid() -> int:
+    """The ``use`` reference holder: the pi ancestor when invoked from an agent
+    tool call, else the calling shell (today's behavior)."""
+    import subprocess
+
+    start = os.getppid()
+    pid = start
+    for _ in range(6):
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "ppid=,command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return start
+        lines = (out.stdout or "").strip().splitlines()
+        if not lines:
+            return start
+        parts = lines[0].split(None, 1)
+        if len(parts) < 2:
+            return start
+        try:
+            ppid = int(parts[0])
+        except ValueError:
+            return start
+        base = parts[1].strip().split()
+        exe = base[0].rsplit("/", 1)[-1] if base else ""
+        if exe == "pi":
+            return pid  # the durable chat session
+        if exe in _SHELL_BASENAMES:
+            pid = ppid
+            continue
+        return start  # a non-shell, non-pi parent: interactive case
+
 
 
 def _resolve_config(explicit: str | None) -> str | None:
@@ -332,8 +379,9 @@ async def cmd_start(args: argparse.Namespace) -> int:
         print(f"start: config file not found: {config}", file=sys.stderr)
         return 2
 
-    # Attach the reference to the calling shell (this CLI's parent), not the CLI.
-    pid = args.pid if args.pid is not None else os.getppid()
+    # Attach the reference to the durable owner (pi ancestor when invoked from
+    # an agent tool call), else the calling shell (this CLI's parent).
+    pid = args.pid if args.pid is not None else _owner_pid()
 
     extra = list(args.serve_args or [])
     if extra and extra[0] == "--":  # argparse REMAINDER keeps the separator
@@ -487,7 +535,7 @@ async def cmd_restart_combiner(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    pid = args.pid if args.pid is not None else os.getppid()
+    pid = args.pid if args.pid is not None else _owner_pid()
 
     # Serve argv: reuse the RUNNING daemon's registered command verbatim unless
     # the caller explicitly re-specifies serve parameters (--config/--host/--port).
