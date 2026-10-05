@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -281,47 +282,57 @@ async def test_restart_combiner_pid_defaults_to_parent_shell(
 # ── _owner_pid: the pi-ancestor walk ────────────────────────────────────────────
 
 
-def _ps_parents(rows: dict[int, tuple[int, str]]) -> "object":
-    """A fake subprocess.run: rows map pid -> (ppid, command); unknown pids are gone."""
+class _FakePs:
+    """A subprocess.run fake: rows map pid -> (ppid, command); unknown pids are gone."""
 
-    class _FakeCompleted:
-        def __init__(self, stdout: str) -> None:
-            self.stdout = stdout
+    def __init__(self, rows: dict[int, tuple[int, str]]) -> None:
+        self.rows = rows
 
-    def _run(cmd: list[str], **_: object) -> "_FakeCompleted":
+    def __call__(self, cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         target = int(cmd[-1])
-        if target not in rows:
-            return _FakeCompleted("")
-        ppid, command = rows[target]
-        return _FakeCompleted(f"{ppid} {command}\n")
-
-    return _run
+        if target not in self.rows:
+            return subprocess.CompletedProcess(cmd, 0, stdout="")
+        ppid, command = self.rows[target]
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"{ppid} {command}\n")
 
 
 def test_owner_pid_walks_to_pi_ancestor(monkeypatch: pytest.MonkeyPatch) -> None:
     # pi(102) <- bash(101, tool shell) <- bash(100) <- mcp-combiner: the
     # ephemeral shells are walked past and the durable pi process owns it.
-    import subprocess
-
+    monkeypatch.setenv("PI_SESSION_ID", "test-session")
     rows = {
         100: (101, "bash"),
         101: (102, "bash -c mcp-combiner restart"),
         102: (999, "pi"),
     }
     monkeypatch.setattr(ctl.os, "getppid", lambda: 100)
-    monkeypatch.setattr(subprocess, "run", _ps_parents(rows))
+    monkeypatch.setattr("mcp_combiner.ctl.subprocess.run", _FakePs(rows))
     assert ctl._owner_pid() == 102  # the pid whose command IS pi
 
 
 def test_owner_pid_falls_back_to_calling_shell(monkeypatch: pytest.MonkeyPatch) -> None:
-    # bash(200) <- Terminal(201, non-shell non-pi): interactive semantics —
-    # the calling shell keeps the reference.
-    import subprocess
-
+    # bash(200) <- Terminal(201, non-shell non-pi) INSIDE an MCP context:
+    # the walk finds no pi ancestor — the calling shell keeps the reference.
+    monkeypatch.setenv("PI_SESSION_ID", "test-session")
     rows = {
         200: (201, "bash"),
         201: (1, "/Applications/Ghostty.app/Contents/MacOS/ghostty"),
     }
     monkeypatch.setattr(ctl.os, "getppid", lambda: 200)
-    monkeypatch.setattr(subprocess, "run", _ps_parents(rows))
+    monkeypatch.setattr("mcp_combiner.ctl.subprocess.run", _FakePs(rows))
     assert ctl._owner_pid() == 200
+
+
+def test_owner_pid_plain_cli_never_walks(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A plain CLI invocation (no pi env markers) keeps today's semantics
+    # without any ancestry inspection at all.
+    monkeypatch.delenv("PI_SESSION_ID", raising=False)
+    monkeypatch.delenv("PI_CODING_AGENT", raising=False)
+    walked = []
+    monkeypatch.setattr(
+        "mcp_combiner.ctl.subprocess.run",
+        lambda *a, **k: walked.append(a) or subprocess.CompletedProcess(a[0], 0, stdout=""),
+    )
+    monkeypatch.setattr(ctl.os, "getppid", lambda: 31337)
+    assert ctl._owner_pid() == 31337
+    assert not walked  # the ps walk never ran

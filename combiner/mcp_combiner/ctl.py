@@ -21,6 +21,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -95,22 +96,30 @@ def _emit(args: argparse.Namespace, data: Any) -> None:
 # would be this CLI and would drop the reference the instant we return, so we
 # always pass ``--pid`` explicitly.
 #
-# Issued from an agent's tool call (pi -> bash -> this CLI), the "calling shell"
-# is ephemeral: its death orphans the restarted combiner, which then grace-stops
-# 30m later (observed live as the recurring unexplained stops). When the ancestry
-# walks past shell-ish processes to a ``pi`` process, THAT is the durable owner —
-# the chat session that keeps using the combiner — and the reference attaches to
-# it instead. Interactive invocations (bash <- Terminal) keep today's semantics.
+# Issued from an agent's MCP tool call, the "calling shell" is ephemeral: its
+# death orphans the restarted combiner, which then grace-stops 30m later
+# (observed live as the recurring unexplained stops). MCP-initiated restarts are
+# GATED EXPLICITLY on pi's tool-shell environment markers (PI_SESSION_ID /
+# PI_CODING_AGENT — present in every process pi spawns, absent from a user
+# terminal): plain CLI restarts keep today's semantics untouched and never run
+# the walk. Within an MCP context the ancestry walks past shell-ish processes to
+# the ``pi`` process — the chat session that keeps using the combiner — and the
+# reference attaches to it instead.
 #
 _SHELL_BASENAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "nu"}
+
+
+def _in_pi_tool_context() -> bool:
+    """True when this CLI was spawned inside a pi agent process tree."""
+    return "PI_SESSION_ID" in os.environ or "PI_CODING_AGENT" in os.environ
 
 
 def _owner_pid() -> int:
     """The ``use`` reference holder: the pi ancestor when invoked from an agent
     tool call, else the calling shell (today's behavior)."""
-    import subprocess
-
     start = os.getppid()
+    if not _in_pi_tool_context():
+        return start  # plain CLI: never walk
     pid = start
     for _ in range(6):
         try:
