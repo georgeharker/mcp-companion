@@ -113,22 +113,23 @@ Rules:
 **bind** an interface the tailnet routes to. The bind lives in the
 sharedserver-registered command (`--host`), not in servers.json.
 
-### Changing the bind (the sanctioned path)
+### Changing the bind (durable)
 
-The registered command survives `mcp-combiner restart` (it reuses the def), so
-a bind change is a re-registration, then the ordinary restart:
+**The env var is the durable answer**: `MCP_COMBINER_HOST=0.0.0.0` in the
+launching shell (your shell profile — the ctl and the pi extension both
+resolve the command env-first on every fresh start). The `--host` flag and
+the sharedserver *registration* are **not** durable: the registration is
+per-running-instance and dies with every grace-stop, after which a bare
+restart resolves fresh from the ctl's defaults (loopback) — observed live.
 
 ```sh
-# 1. Overwrite the server def with --host 0.0.0.0 (same args as the current
-#    registration — `sharedserver info mcp-combiner` prints them — plus the flag)
-sharedserver config register --scope <scope> mcp-combiner \
-    -- mcp-combiner --mcp --config <servers.json> --host 0.0.0.0 --port 9741 \
-       --log-file <pylog> --log-level info --restore <handover.json>
+# durable (shell profile / the pi launch environment):
+export MCP_COMBINER_HOST=0.0.0.0
 
-# 2. Bounce via the sanctioned path — handover carries state, clients reconnect
-mcp-combiner restart --force
+# immediate, if the current instance is bound wrong:
+mcp-combiner restart --force --host 0.0.0.0
 
-# 3. Verify BOTH healths: loopback (the extension's own client) and the tailnet
+# Verify BOTH healths: loopback (the extension's own client) and the tailnet
 curl http://127.0.0.1:9741/health -H "authorization: Bearer $MCP_COMBINER_AUTH_TOKEN"
 curl http://<tailnet-ip>:9741/health -H "authorization: Bearer $MCP_COMBINER_AUTH_TOKEN"
 ```
