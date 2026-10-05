@@ -22,7 +22,7 @@ import types
 import uvicorn
 
 from mcp_combiner import ctl
-from mcp_combiner.asgi import ServeOptions, create_app
+from mcp_combiner.asgi import ServeOptions, create_app, resolve_bind_host
 from mcp_combiner.inbound_auth import resolve_auth_token
 from mcp_combiner.schemafix import SCHEMA_FIXES
 from mcp_combiner.sharedserver import cleanup as cleanup_sharedservers
@@ -73,8 +73,8 @@ def _add_serve_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="Host to bind to (default: 127.0.0.1)",
+        default=None,
+        help="Bind host (default: $MCP_COMBINER_HOST, then the config's bind.host, then loopback)",
     )
 
     # OAuth token-caching overrides (both override the config-file 'oauth' section)
@@ -261,7 +261,7 @@ def _setup_logging(log_level: str, log_file: str | None) -> None:
 def _serve(args: argparse.Namespace) -> None:
     options = ServeOptions(
         config=args.config,
-        host=args.host,
+        host=resolve_bind_host(args.host, args.config),
         port=args.port,
         oauth_cache=args.oauth_cache,
         oauth_token_dir=args.oauth_token_dir,

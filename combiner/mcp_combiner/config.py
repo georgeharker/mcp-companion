@@ -498,6 +498,18 @@ class IsolationConfig(BaseModel):
         )
 
 
+class BindConfig(BaseModel):
+    """The process bind (``"bind": {"host": ...}`` in servers.json).
+
+    The durable home for the serve bind: CLI ``--host`` > env
+    ``MCP_COMBINER_HOST`` > this setting > the ``127.0.0.1`` default. Binding
+    ``0.0.0.0`` serves loopback + every interface (LAN + tailnet) — required
+    for the remote widget leg (docs/designs/advertised-ui-origin.md).
+    """
+
+    host: str = "127.0.0.1"
+
+
 class CombinerConfig(BaseModel):
     """Full combiner configuration."""
 
@@ -505,6 +517,7 @@ class CombinerConfig(BaseModel):
     shared_servers: dict[str, SharedServerConfig] = Field(default_factory=dict)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
+    bind: BindConfig = Field(default_factory=BindConfig)
     permissions: PermissionPolicy | None = None
     """Global tool-call permission policy applied to every server, unless a
     server overrides it.  ``None`` (default) means **off** — no gate, identical
@@ -539,9 +552,12 @@ class CombinerConfig(BaseModel):
 
         permissions = PermissionPolicy.from_dict(raw.get("permissions"))
 
+        bind = BindConfig(**raw["bind"]) if isinstance(raw.get("bind"), dict) else BindConfig()
+
         return cls(
             servers=servers,
             shared_servers=shared_servers,
+            bind=bind,
             oauth=oauth,
             isolation=isolation,
             permissions=permissions,

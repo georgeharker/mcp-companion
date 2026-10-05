@@ -95,7 +95,10 @@ class ServeOptions:
 
     @classmethod
     def from_env(cls) -> ServeOptions:
-        """Fallback construction from MCP_COMBINER_* env vars (factory launches)."""
+        """Fallback construction from MCP_COMBINER_* env vars (factory launches).
+        The bind host resolves CLI > env > config bind.host > loopback via
+        :func:`resolve_bind_host` (the config path comes from
+        ``$MCP_COMBINER_CONFIG``)."""
 
         def _tristate(name: str) -> bool | None:
             v = os.environ.get(name)
@@ -105,8 +108,10 @@ class ServeOptions:
 
         fixes_env = os.environ.get("MCP_COMBINER_SCHEMA_FIXES")
         grace_env = os.environ.get("MCP_COMBINER_STALE_TOOL_GRACE")
+        cfg_path = os.environ["MCP_COMBINER_CONFIG"]
         return cls(
-            config=os.environ["MCP_COMBINER_CONFIG"],
+            config=cfg_path,
+            host=resolve_bind_host(None, cfg_path),
             oauth_cache=_tristate("MCP_COMBINER_OAUTH_CACHE"),
             oauth_token_dir=os.environ.get("MCP_COMBINER_OAUTH_TOKEN_DIR"),
             normalize_schema=os.environ.get("MCP_COMBINER_NORMALIZE_SCHEMA") == "1",
@@ -324,6 +329,27 @@ class MCPRequestLogMiddleware(BaseHTTPMiddleware):
                 user_agent,
             )
         return response
+
+
+def resolve_bind_host(cli_host: str | None, config_path: str) -> str:
+    """The serve bind host: CLI ``--host`` > env ``MCP_COMBINER_HOST`` > the
+    config's ``bind.host`` (servers.json) > ``127.0.0.1``.
+
+    The config setting is the durable home — the sharedserver registration is
+    per-running-instance and dies with every grace-stop, and env vars depend
+    on the launching shell; the config file is read fresh on every start.
+    """
+    if cli_host:
+        return cli_host
+    env_host = os.environ.get("MCP_COMBINER_HOST", "").strip()
+    if env_host:
+        return env_host
+    try:
+        from mcp_combiner.config import CombinerConfig
+
+        return CombinerConfig.load(config_path).bind.host
+    except Exception:
+        return "127.0.0.1"
 
 
 def create_app(options: ServeOptions | None = None) -> Starlette:

@@ -113,7 +113,8 @@ def resolve_advertised_host(bind_host: str, mode: str | None = None) -> str:
         found = _tailscale_ip() or _interface_scan_ip()
         if found:
             return found
-        return bind_host
+        # Bind-all is a bind, not a name — never construct URLs with it.
+        return "127.0.0.1" if bind_host in ("0.0.0.0", "::", "") else bind_host
     if advertise in ("loopback", "local", "none"):
         return bind_host
     # Explicit origin: accept scheme://host[:port] and a bare host alike.
