@@ -68,6 +68,6 @@
     "@earendil-works/pi-tui": "^0.85.1"
   },
   "dependencies": {
-    "@earendil-works/pi-mcp": "1.0.2"
+    "@earendil-works/pi-mcp": "^1.0.2"
   }
 }
