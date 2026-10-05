@@ -154,7 +154,7 @@ def _instance_for_session(session_id: str | None) -> str | None:
 
 def _inject_instance_arg(params: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of an inputSchema with the optional nvim_instance arg added."""
-    out = dict(params) if isinstance(params, dict) else {"type": "object"}
+    out: dict[str, Any] = dict(params) if isinstance(params, dict) else {"type": "object"}
     raw_props = out.get("properties")
     props = dict(raw_props) if isinstance(raw_props, dict) else {}
     props[_NVIM_INSTANCE_ARG] = {"type": "string", "description": _NVIM_INSTANCE_DESC}
@@ -447,7 +447,7 @@ def register_routes(
         if not get_nvim_channel().has_instance(instance_id):
             return JSONResponse({"error": f"unknown instance: {instance_id}"}, status_code=400)
         _token_instances[token] = instance_id
-        logger.info("REST: bound token %s -> nvim instance %s", token, instance_id)
+        logger.info("REST: bound token %s… -> nvim instance %s", token[:8], instance_id)
         # If the agent already connected and listed tools before this bind, it
         # won't have the neovim_* tools. Fire tools/list_changed so it re-lists.
         await notify_tool_list_changed()

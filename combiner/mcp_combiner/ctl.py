@@ -200,7 +200,10 @@ def _resolve_capture_log(explicit: str | None) -> str | None:
     if explicit:
         return explicit
     log_dir = _default_log_dir()
-    os.makedirs(log_dir, exist_ok=True)
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except OSError:
+        pass  # best-effort: sharedserver degrades gracefully without the capture
     return os.path.join(log_dir, "mcp-combiner.log")
 
 
@@ -337,7 +340,10 @@ def _handover_path(name: str) -> str:
     cache_dir = os.path.join(
         os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "mcp-combiner"
     )
-    os.makedirs(cache_dir, exist_ok=True)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError:
+        pass  # best-effort: the restart still runs; the handover file just fails to write
     return os.path.join(cache_dir, f"handover-{name}.json")
 
 
@@ -445,8 +451,12 @@ def _not_serving_state() -> str:
     finishes bringing up every backing sharedserver, so an expired poll usually
     means "still starting", not "failed". Say so, and point at the evidence.
     """
+    try:
+        timeout_s = int(_STARTUP_HEALTH_TIMEOUT)
+    except (TypeError, ValueError):
+        timeout_s = 0
     return (
-        f"not serving after {int(_STARTUP_HEALTH_TIMEOUT)}s — likely still starting "
+        f"not serving after {timeout_s}s — likely still starting "
         "(the port binds only once every backing sharedserver is up); check "
         f"`mcp-combiner status` shortly, or the logs in {_default_log_dir()}"
     )
@@ -720,7 +730,11 @@ async def cmd_reload(args: argparse.Namespace) -> int:
 
 
 async def cmd_call(args: argparse.Namespace) -> int:
-    tool_args = json.loads(args.args) if args.args else {}
+    try:
+        tool_args = json.loads(args.args) if args.args else {}
+    except json.JSONDecodeError as exc:
+        print(f"call: --args is not valid JSON: {exc}", file=sys.stderr)
+        return 2
     _emit(args, await _call_meta(args, args.tool, tool_args))
     return 0
 
