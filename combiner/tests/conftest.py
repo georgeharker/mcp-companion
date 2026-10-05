@@ -30,6 +30,14 @@ requires_sharedserver = pytest.mark.skipif(
     SHAREDSERVER_BIN is None, reason="sharedserver binary not installed"
 )
 
+# Tests are loopback environments BY DEFINITION: pin the advertised UI origin
+# in the process env so every spawned fixture combiner inherits it — `auto`
+# discovery would otherwise find the DEV MACHINE's real tailnet and point
+# widget URLs at an unreachable origin (observed: ui_host e2e failures whose
+# host-page internals chased 100.x:<testport>).
+os.environ["MCP_COMBINER_UI_ADVERTISE"] = "loopback"
+
+
 # Timing knobs (connections.py env overrides) so reconnect/escalation paths run
 # in seconds instead of minutes under test. Defaults in production are unchanged.
 FAST_TIMING_ENV = {
