@@ -289,8 +289,10 @@ def _serve(args: argparse.Namespace) -> None:
     # Single worker - async handles concurrency
     app = create_app(options)
 
-    # The UI host's sandbox relay: a SECOND loopback origin (host+1). Provider
-    # HTML is same-origin with THIS bind, never with the capability-holding
+    # The UI host's sandbox relay: the SECOND origin (host+1) — it follows the
+    # main bind so remote renderers (un-bien over the tailnet) reach BOTH origins;
+    # the origin separation is by PORT, so binding the same host keeps provider
+    # HTML same-origin with THIS bind and never with the capability-holding
     # host page — that separation is what makes the sandbox's allow-same-origin
     # safe. Daemon thread: its lifetime is the process's; uvicorn inside runs
     # its own loop.
@@ -301,7 +303,7 @@ def _serve(args: argparse.Namespace) -> None:
     relay_thread = threading.Thread(
         target=lambda: uvicorn.run(
             get_relay_app(options),
-            host="127.0.0.1",
+            host=options.host,
             port=options.port + 1,
             log_level="warning",
         ),
