@@ -16,10 +16,23 @@
 # release from the same vX.Y.Z tag.
 #
 # Usage:
-#   scripts/bump-version.sh 0.4.0        # explicit version
+#   scripts/bump-version.sh 0.4.0        # explicit version (prerelease OK — see below)
 #   scripts/bump-version.sh patch        # bump patch from the highest current
 #   scripts/bump-version.sh minor        # bump minor, zero patch
 #   scripts/bump-version.sh major        # bump major, zero minor+patch
+#
+#   scripts/bump-version.sh dev          # the pi npm DEV CHANNEL — see below
+#
+# The dev channel (release-pi-plugin.yml publishes prerelease tags to the npm
+# `dev` dist-tag; every other lockstep workflow skips them):
+#   - stamps ONLY plugins/pi/package.json with <core>-dev.N (auto-incremented:
+#     0.16.0 -> 0.16.0-dev.1 -> 0.16.0-dev.2 ...; other manifests untouched)
+#   - commits + tags vX.Y.Z-dev.N, which triggers the CI dev publish
+#   - consumers opt in with npm:@geohar/pi-mcp-combiner@dev; `latest` and every
+#     range-based resolution never see it (prereleases satisfy no semver range)
+#   - the stable release of the same tree is the plain core version: it sorts
+#     after every -dev.N, so bump-version.sh 0.16.0 after -dev.N is a promotion,
+#     not a rollback
 #
 # Options:
 #   --no-tag       update + commit, skip the tag
@@ -155,7 +168,21 @@ curs=(); for i in "${!MANIFESTS[@]}"; do
 done
 base="$(highest "${curs[@]}")"
 
+is_dev=0
 case "$arg" in
+  dev)
+    # The npm dev channel: pi-only, prerelease version, auto-incremented.
+    [ -f "$PI_PKG" ] || die "no plugins/pi/package.json — the dev channel is the pi npm package"
+    is_dev=1
+    v="$(read_ver "$PI_PKG" "json")"
+    [ -n "$v" ] || die "could not read version from $PI_PKG"
+    core="${v%%-*}"
+    case "$v" in
+      *-dev.*) n="${v##*-dev.}"; n=$((n + 1)) ;;
+      *)       n=1 ;;
+    esac
+    new="$core-dev.$n"
+    ;;
   major|minor|patch)
     IFS=. read -r M m p <<<"$base"
     [[ "$M" =~ ^[0-9]+$ && "$m" =~ ^[0-9]+$ && "$p" =~ ^[0-9]+$ ]] || die "baseline '$base' not X.Y.Z; pass an explicit version"
@@ -172,12 +199,25 @@ case "$arg" in
 esac
 TAG="v$new"
 
+# Dev mode scope: the pi npm package only — the other manifests stay on the
+# stable version; their workflows skip prerelease tags, and the eventual stable
+# lockstep bump brings them all to the core version in one go.
+if [ "$is_dev" = 1 ]; then
+  MANIFESTS=("$PI_PKG"); TARGETS=("json")
+  curs=("$v")
+fi
+
 echo "manifests:"
 for i in "${!MANIFESTS[@]}"; do printf '  %-7s %s  (%s)\n' "${curs[$i]}" "${MANIFESTS[$i]#"$ROOT"/}" "${TARGETS[$i]}"; done
 echo "baseline (max) : $base"
 echo "new version    : $new   (tag $TAG)"
 
-if [ "$(highest "$base" "$new")" = "$base" ] && [ "$new" != "$base" ]; then
+# The backwards guard is skipped in dev mode BY DESIGN: a prerelease sorts below
+# its own core (0.16.0-dev.1 < 0.16.0) — that is the channel, not a rollback.
+# Within the channel the auto-increment guarantees forward motion; the stable
+# release later PROMOTES the core (0.16.0 > every 0.16.0-dev.N) via `highest`'s
+# prerelease ranking, so the normal guard still admits it.
+if [ "$is_dev" = 0 ] && [ "$(highest "$base" "$new")" = "$base" ] && [ "$new" != "$base" ]; then
   die "new version $new is lower than baseline $base; refusing to go backwards"
 fi
 
@@ -207,6 +247,9 @@ echo "updated ${#MANIFESTS[@]} manifests -> $new"
 # as a belt for ad-hoc publishes. (rm first: cp onto a symlink would write
 # THROUGH it instead.)
 INSTRS=()
+if [ "$is_dev" = 1 ]; then
+  : # dev channel: version + commit + tag only — instructions sync rides the stable release
+else
 for _plugdir in "$ROOT/plugins/claude" "$ROOT/plugins/opencode" "$ROOT/plugins/pi"; do
   [ -d "$_plugdir" ] && [ -f "$ROOT/CLAUDE.md.example" ] || continue
   rm -f "$_plugdir/instructions.txt"
@@ -214,6 +257,7 @@ for _plugdir in "$ROOT/plugins/claude" "$ROOT/plugins/opencode" "$ROOT/plugins/p
   INSTRS+=("$_plugdir/instructions.txt")
   echo "  synced ${_plugdir#"$ROOT"/}/instructions.txt from CLAUDE.md.example"
 done
+fi
 
 # Keep any lockfile next to a bumped toml manifest in sync — the package's own
 # self-version entry, so a `--locked` build/publish (cargo) or `uv sync --locked`
@@ -240,7 +284,11 @@ done
 [ "$do_commit" = 0 ] && { echo "files updated; skipped commit (--no-commit)"; exit 0; }
 
 git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"} ${INSTRS+"${INSTRS[@]}"}
-git -C "$ROOT" commit -m "release: $TAG — lockstep version across all manifests"
+if [ "$is_dev" = 1 ]; then
+  git -C "$ROOT" commit -m "release: $TAG — pi npm dev channel"
+else
+  git -C "$ROOT" commit -m "release: $TAG — lockstep version across all manifests"
+fi
 echo "committed."
 
 if [ "$do_tag" = 1 ]; then
