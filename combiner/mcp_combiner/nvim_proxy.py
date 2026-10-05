@@ -155,7 +155,8 @@ def _instance_for_session(session_id: str | None) -> str | None:
 def _inject_instance_arg(params: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of an inputSchema with the optional nvim_instance arg added."""
     out = dict(params) if isinstance(params, dict) else {"type": "object"}
-    props = dict(out.get("properties") or {})
+    raw_props = out.get("properties")
+    props = dict(raw_props) if isinstance(raw_props, dict) else {}
     props[_NVIM_INSTANCE_ARG] = {"type": "string", "description": _NVIM_INSTANCE_DESC}
     out["properties"] = props
     out.setdefault("type", "object")

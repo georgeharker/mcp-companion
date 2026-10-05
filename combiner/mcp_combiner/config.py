@@ -346,9 +346,9 @@ class ServerConfig(BaseModel):
             transport_str = "http" if "url" in data else "stdio"
 
         raw_auto_approve = data.get("autoApprove", [])
-        if raw_auto_approve is True:
-            auto_approve: list[str] = ["*"]
-        elif raw_auto_approve is False or raw_auto_approve is None:
+        if isinstance(raw_auto_approve, bool):
+            auto_approve: list[str] = ["*"] if raw_auto_approve else []
+        elif raw_auto_approve is None:
             auto_approve = []
         else:
             auto_approve = list(raw_auto_approve)
@@ -531,8 +531,11 @@ class CombinerConfig(BaseModel):
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
 
-        with open(path) as f:
-            raw: dict[str, Any] = json.load(f)
+        try:
+            with open(path) as f:
+                raw: dict[str, Any] = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Config file {path} is not valid JSON: {exc}") from exc
 
         raw_servers: dict[str, Any] = raw.get("servers", raw.get("mcpServers", {}))
         servers = {

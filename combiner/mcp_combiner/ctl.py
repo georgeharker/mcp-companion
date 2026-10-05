@@ -149,6 +149,7 @@ def _owner_pid() -> int:
             pid = ppid
             continue
         return start  # a non-shell, non-pi parent: interactive case
+    return start  # walked past the depth budget without finding pi: fall back
 
 
 
