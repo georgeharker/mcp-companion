@@ -17,6 +17,9 @@ permissions:
 
 jobs:
   publish:
+    # Prerelease tags (vX.Y.Z-dev.N) are the pi plugin's dev channel — the
+    # lockstep channels publish stable releases only.
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

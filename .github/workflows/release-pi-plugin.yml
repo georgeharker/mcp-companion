@@ -1,6 +1,6 @@
 name: Release (pi-mcp-combiner)
 
-# Publishes the @geohar/pi-mcp-combiner npm plugin on the unified release tag (v*), in
+# Publishes the @geohar/pi-mcp-combiner npm plugin on release tags (v*), in
 # lockstep with the whole repo — one vX.Y.Z tag releases the combiner pyproject, the
 # Claude Code plugin, the OpenCode plugin, and this Pi extension together. The
 # version-match check enforces plugins/pi/package.json == tag. Release: bump every
@@ -53,4 +53,14 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run build
       - name: Publish to npm (trusted publishing + provenance)
-        run: npm publish --provenance --access public
+        # Prerelease tags (vX.Y.Z-dev.N / -beta.N / -rc.N) publish to the `dev`
+        # dist-tag — invisible to `latest`-resolving consumers and to range-based
+        # upgrades (semver prereleases satisfy no range). Consumers opt in with
+        # npm:@geohar/pi-mcp-combiner@dev.
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "prerelease tag ${GITHUB_REF_NAME} — publishing to the dev dist-tag"
+            npm publish --provenance --access public --tag dev
+          else
+            npm publish --provenance --access public
+          fi

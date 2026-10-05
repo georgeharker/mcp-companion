@@ -13,7 +13,9 @@ concurrency:
 jobs:
   deploy:
     # Inert until the deploy vars/secrets are configured on the repo.
-    if: ${{ vars.DOCS_SSH_DEST != '' }}
+    # Inert until the deploy vars/secrets are configured; prerelease tags (the
+    # pi plugin's dev channel) don't refresh docs.
+    if: ${{ vars.DOCS_SSH_DEST != '' && !contains(github.ref_name, '-') }}
     uses: georgeharker/gh-quarto-publish/.github/workflows/publish.yml@main
     with:
       # Tags are cut from the default branch; releases refresh its docs.
