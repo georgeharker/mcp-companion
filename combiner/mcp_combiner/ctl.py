@@ -152,7 +152,6 @@ def _owner_pid() -> int:
     return start  # walked past the depth budget without finding pi: fall back
 
 
-
 def _resolve_config(explicit: str | None) -> str | None:
     """Resolve the servers.json path: explicit flag, then env, then standard files.
 
