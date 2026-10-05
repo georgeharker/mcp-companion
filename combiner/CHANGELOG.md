@@ -22,6 +22,15 @@ tagged `vX.Y.Z`.
 
 ### Fixed
 
+- **Advertised UI origin** — widget URLs name a reachable origin, not
+  loopback: `MCP_COMBINER_UI_ADVERTISE` (`auto` default — tailscale daemon
+  probe, then a 100.64.0.0/10 interface scan, then the bind host;
+  `loopback`; or an explicit origin for the tailscale-serve variant). URL
+  construction only — binding stays `--host`. Remote renderers (un-bien's
+  paired app over the tailnet) now load widgets end to end.
+- The sandbox relay (the second origin, port+1) follows the main bind
+  instead of hardcoded loopback — without this, remote host pages loaded
+  furniture but the widget content iframe ("loading ui…") never resolved.
 - Last-wins token→session mapping: a reloaded/reconnected client mints a new
   downstream session for the same chat token; the map now follows the live
   session instead of first-wins routing elicit forwards to dead streams.

@@ -1,7 +1,11 @@
 # Advertised UI origin — widgets over remote clients (un-bien)
 
-Status: **sketch (2026-10-04, post-discussion)** — the un-bien widget leg's
-blocker. Companion doc:
+Status: **implemented + live-verified (2026-10-04)** — the widget renders on a
+remote tailnet device end to end (host page, relay content origin, handshake,
+server-side session record). The two predicted traps were both found live and
+fixed: the advertised origin (ui_host/advertise.py, `MCP_COMBINER_UI_ADVERTISE`)
+and the relay's hardcoded loopback bind (now follows `--host`). The TTL
+self-healing refinement remains future work. Companion doc:
 [`interactive-resource-host.md`](./interactive-resource-host.md) (the host
 design this extends).
 
