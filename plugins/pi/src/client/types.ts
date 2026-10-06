@@ -59,7 +59,10 @@ export interface CombinerConnection {
     getPrompt(name: string, args: Record<string, string>): Promise<unknown>
     listResources(force?: boolean): Promise<ResourceSummary[]>
     readResource(uri: string): Promise<unknown>
-    callTool(name: string, args: Record<string, unknown> | undefined): Promise<unknown>
+    /** Call a combiner tool. `options.signal` rides into the transport — pi's cancel
+     *  aborts upstream work and widget holds. Throws on transport failure (with a
+     *  recovery hint) and on server-marked tool errors (result.isError). */
+    callTool(name: string, args: Record<string, unknown> | undefined, options?: { signal?: AbortSignal }): Promise<unknown>
     controlOrigin(): string
     uiUrlFor(resourceUri: string): string
     applyFilter(filter: ServerFilter): Promise<void>

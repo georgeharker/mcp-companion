@@ -1,32 +1,34 @@
 // NATIVE MODE : activation entry for the
 // pi-mcp-based combiner connection + native tool surface. This file exists so the
-// wire-in stays a few lines in src/index.ts's mode gate while the shape is reviewed:
+// wire-in stays a few lines in src/index.ts:
 //
-//   const native = settings.integration === "nativeTools"   // new tri-state member
-//   const conn = native ? new NativeCombinerConnection(…, clientLog)   // same contract
-//                        : new CombinerConnection(…, clientLog)
-//   if (native) void activateNativeTools(pi, { connection: conn, ... }) as needed
+//   const conn = new NativeCombinerConnection(…, clientLog)   // implements CombinerConnection
+//   const nativeSurface = activateNativeMode(pi, { connection: conn, … })
+//   … nativeSurface.run() at session_start (post-setToken) and on list_changed
 //
-// Mode matrix (the native-migration plan item):: extension-owned connection (peer dep on @earendil-works/pi-mcp) + native
-// tool declaration via pi.registerTool(exposure/namespace/annotations) = native
-// exposure with elicitation STILL ANSWERED (capability advertised on the owned
-// connection) — no mcp() proxy, no script tool, no upstream PR required for v1.
+// The FIRST run is deferred by design (see activateNativeMode): the grouping token
+// only exists after session_start. Configuration (directTools spec, server filter)
+// rides as GETTERS so every pass resolves the CURRENT session's values — worktree
+// and project switches re-resolve session config, and a load-time snapshot would
+// apply the wrong allow/deny set to later sessions (review finding #5).
 
 import type { ExtensionAPI, ExtensionContext } from "../pi.js"
 import type { ServerFilter } from "../client/config-ladder.js"
 import { NativeCombinerConnection } from "./combiner-connection.js"
-import { activateNativeTools } from "./tool-surface.js"
+import { activateNativeTools, type NativeToolSurfaceState } from "./tool-surface.js"
 import { activateNativeResources } from "./resources.js"
 
 export { NativeCombinerConnection } from "./combiner-connection.js"
-export { activateNativeTools, type NativeToolSurfaceOptions } from "./tool-surface.js"
+export { activateNativeTools, type NativeToolSurfaceOptions, type NativeToolSurfaceState } from "./tool-surface.js"
 export { tokenedUrl } from "./combiner-connection.js"
 export { activateNativeResources, filterInteractiveResources, type NativeResourceOptions } from "./resources.js"
 
 export type NativeActivationOptions = {
     connection: NativeCombinerConnection
-    directSpec?: string[] | "search"
-    serverFilter?: ServerFilter
+    /** Per-project directTools spec, resolved PER PASS (not a load-time snapshot). */
+    directSpec?: () => string[] | "search" | undefined
+    /** Per-project server filter, resolved PER PASS (same reason). */
+    serverFilter?: () => ServerFilter | undefined
     /** Register the interactive read_<resource> tools (index.ts's exposeResources
      *  setting); default true. */
     exposeResources?: boolean
@@ -40,34 +42,42 @@ export type NativeActivationOptions = {
 
 /** Register the declared tool surface + interactive-resource read_* tools + the
  *  list_changed re-registration handler. Called once at session_start; the
- *  list_changed hook re-syncs both surfaces on the same names. */
+ *  list_changed hook re-syncs both surfaces on the same names. One shared
+ *  NativeToolSurfaceState diff across all passes — unchanged declarations are
+ *  skipped, removed ones re-registered hidden (see activateNativeTools). */
 export function activateNativeMode(
     pi: ExtensionAPI,
     opts: NativeActivationOptions,
 ): { run(): void; dispose(): void } {
-    const resourceRegistered = new Set<string>()
     let active = true
-    const resourceOpts = {
-        connection: opts.connection,
-        serverFilter: opts.serverFilter,
-        uiAutoOpen: opts.uiAutoOpen,
-        log: opts.log,
-    }
+    const toolState: NativeToolSurfaceState = { names: new Set(), signatures: new Map() }
+    // Cross-pass memory for the read_* tools (skip re-registration of unchanged
+    // names — pi.registerTool replaces-by-name with a warning).
+    const resourceRegistered = new Set<string>()
     const run = () => {
         if (!active) return
         void activateNativeTools(pi, {
             connection: opts.connection,
             serverFilter: opts.serverFilter,
             directSpec: opts.directSpec,
+            state: toolState,
             warnLargeDirectExposure: opts.warnLargeDirectExposure,
             log: opts.log,
         }).catch((e) =>
             opts.log("warn", `native tool surface failed: ${e instanceof Error ? e.message : String(e)}`),
         )
         if (opts.exposeResources !== false) {
-            void activateNativeResources(pi, resourceOpts, resourceRegistered).catch((e) =>
-                opts.log("warn", `native resource surface failed: ${e instanceof Error ? e.message : String(e)}`),
-            )
+            void activateNativeResources(
+                pi,
+                {
+                    connection: opts.connection,
+                    serverFilter: opts.serverFilter,
+                    directSpec: opts.directSpec,
+                    uiAutoOpen: opts.uiAutoOpen,
+                    log: opts.log,
+                },
+                resourceRegistered,
+            ).catch((e) => opts.log("warn", `native resource surface failed: ${e instanceof Error ? e.message : String(e)}`))
         }
     }
     // The FIRST run is the caller's to schedule: the grouping token only exists

@@ -152,6 +152,13 @@ The recognized `mcp-combiner` entry carries connection + per-project exposure:
   `tool_search`). `"search"` degrades to all-codemode — pi's own discovery replaces
   the old search-promote. A >50-entry allowlist warns; `true` is deliberately not
   offered (context cost: every direct schema rides in every request).
+- **Codemode activation (pi 1.0.x quirk)** — pi does NOT auto-activate the codemode
+  tool for extension-registered tools (only for its own connected MCP servers), so
+  `codemode`-exposed combiner tools are unreachable from scripts until you add
+  `"defaultTools": ["+codemode"]` to your pi settings.json. That setting applies at a
+  **fresh session's** creation (resumed sessions keep their recorded tool set). If you
+  don't use codemode, combiner tools outside `directTools` stay callable via the `mcp`
+  discovery/router tool.
 - Project layers are read against the **session cwd** — worktree subagents and
   project switches get their own `.pi/mcp.json`. Commit the `combiner` block if you
   want worktree agents to honour it.

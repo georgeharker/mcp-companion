@@ -60,6 +60,10 @@ read_lines() { # $1 = array name
 # ---- locate manifests -------------------------------------------------------
 MANIFESTS=()   # every file that gets the new version
 TARGETS=()     # parallel: "toml" | "json"
+# Explicit init for read_lines targets: read_lines populates via eval, which no
+# static analyzer can trace — and under set -u an empty find would otherwise
+# leave the array unset when the count-check dereferences it.
+declare -a _py=() _cg=() _pj=() _oc=()
 
 # pyproject.toml: the project's own (root OR a package subdir, e.g. combiner/),
 # excluding vendored/submodule copies (vendor/, node_modules/).
@@ -236,6 +240,30 @@ fi
 
 for i in "${!MANIFESTS[@]}"; do write_ver "${MANIFESTS[$i]}" "${TARGETS[$i]}" "$new"; done
 echo "updated ${#MANIFESTS[@]} manifests -> $new"
+
+# The native client's declared CLIENT_INFO version must track the package version
+# (a stale constant misreports the client to the combiner's status surfaces).
+# The published package ships src and pi's loader prefers it, so stamping the
+# source TS line is the authoritative copy; `dist` is rebuilt from it at publish.
+CLIENT_INFO_FILE="$ROOT/plugins/pi/src/native/combiner-connection.ts"
+if [ -f "$CLIENT_INFO_FILE" ]; then
+  python3 - "$CLIENT_INFO_FILE" "$new" <<'PY'
+import re, sys
+path, new = sys.argv[1:3]
+src = open(path).read()
+out, n = re.subn(
+    r'const CLIENT_INFO = \{ name: "pi-mcp-combiner", version: "[^"]+" \}',
+    f'const CLIENT_INFO = {{ name: "pi-mcp-combiner", version: "{new}" }}',
+    src,
+    count=1,
+)
+if n != 1:
+    sys.exit("error: CLIENT_INFO line not found in native/combiner-connection.ts")
+open(path, "w").write(out)
+PY
+else
+  echo "note: CLIENT_INFO stamp skipped (native/combiner-connection.ts missing)" >&2
+fi
 
 # Both plugins ship instructions.txt as a REAL FILE copied from
 # CLAUDE.md.example — never a symlink. Marketplace installs copy the plugin

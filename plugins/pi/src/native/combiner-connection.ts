@@ -11,12 +11,12 @@
 // path, the optional inbound bearer, tools/prompts/resources caches, one stale-session
 // retry, and the widget log-notification tap.
 //
-// CONTRACT: this class matches client/connection.ts's public surface structurally, so
-// existing consumers (prompts.ts, resources.ts, footer.ts, panel.ts, control.ts) work
-// unchanged and index.ts's mode gate can pick either implementation. The model-facing
-// difference from the SDK client half is registration: see native/tool-surface.ts —
-// tools are declared to pi NATIVELY (pi.registerTool with exposure/namespace), there is
-// no mcp() proxy and no script tool.
+// CONTRACT: this class implements client/types.ts's CombinerConnection interface, so
+// every surface (prompts.ts, resources.ts, footer.ts, panel.ts, control.ts) types
+// against the interface, not against this file. The model-facing difference in native
+// mode is registration: see native/tool-surface.ts — tools are declared to pi NATIVELY
+// (pi.registerTool with exposure/namespace/annotations), and the mcp() router
+// (createMcpTool in index.ts) ALSO rides this same connection — there is no script tool.
 //
 // Why instantiate instead of wrapping: pi's built-in MCP extension owns its client
 // instances privately; no hook reaches them (verified 0.99→1.0). Owning the connection
@@ -25,8 +25,16 @@
 // endgame; this class is what the extension ships until and after that lands.
 
 import { appendFileSync } from "node:fs"
-import { McpClient, McpSessionExpiredError, StreamableHttpTransport } from "@earendil-works/pi-mcp"
-import type { CallToolResult } from "@earendil-works/pi-mcp"
+import {
+    McpClient,
+    McpConnectionClosedError,
+    McpSessionExpiredError,
+    McpTimeoutError,
+    StreamableHttpTransport,
+    type CallToolResult,
+    type McpRequestOptions,
+    type McpTransport,
+} from "@earendil-works/pi-mcp"
 import { handleElicitation, type ElicitResponse, type ElicitUi } from "../client/elicitation.js"
 import type { CombinerConnection } from "../client/types.js"
 import type { ServerFilter } from "../client/config-ladder.js"
@@ -83,7 +91,11 @@ export type ConnectionHooks = {
 export type ElicitResult = ElicitResponse
 
 
+// Debug logging is OPT-IN (env PI_MCP_COMBINER_NC_DBG=1): it writes tool names, session
+// ids and error text to /tmp/pi-combiner-dbg.log. Ships disabled — never on by default.
+const ncDbgEnabled = process.env.PI_MCP_COMBINER_NC_DBG === "1"
 function ncDbg(s: string): void {
+    if (!ncDbgEnabled) return
     try {
         appendFileSync("/tmp/pi-combiner-dbg.log", `${new Date().toISOString()} ${s}\n`)
     } catch {
@@ -91,7 +103,9 @@ function ncDbg(s: string): void {
     }
 }
 
-const CLIENT_INFO = { name: "pi-mcp-combiner", version: "0.14.3" }
+// Keep in sync with plugins/pi/package.json "version": scripts/bump-version.sh stamps
+// this line alongside the package files (the string is what this client declares).
+const CLIENT_INFO = { name: "pi-mcp-combiner", version: "0.16.0-dev.3" }
 const CONNECT_TIMEOUT_MS = 8_000
 const LIST_CACHE_MS = 5_000
 
@@ -117,6 +131,9 @@ export class NativeCombinerConnection implements CombinerConnection {
     private elicitUi: ElicitUi = { hasUI: false }
     private token: string | undefined
     private client: McpClient | undefined
+    /** Bumped by every reset: in-flight connects check it before publishing a client
+     *  (a connect that started before the reset must never win the publish race). */
+    private generation = 0
     private connecting: Promise<McpClient> | undefined
     private tools: ToolSummary[] | undefined
     private toolsFetchedAt = 0
@@ -128,9 +145,15 @@ export class NativeCombinerConnection implements CombinerConnection {
     state: ConnectionState = "disconnected"
     lastError: string | undefined
 
-    constructor(conn: ResolvedConnection, log: LogFn) {
+    /** Test seam: build the transport for one connect (defaults to
+     *  StreamableHttpTransport). Injection lets tests drive the connection over an
+     *  in-memory pair instead of HTTP. */
+    private readonly transportFactory: ((url: URL) => McpTransport) | undefined
+
+    constructor(conn: ResolvedConnection, log: LogFn, opts?: { transportFactory?: (url: URL) => McpTransport }) {
         this.conn = conn
         this.log = log
+        this.transportFactory = opts?.transportFactory
     }
 
     setHooks(hooks: ConnectionHooks): void {
@@ -170,6 +193,7 @@ export class NativeCombinerConnection implements CombinerConnection {
 
     /** Drop the connection + caches (session reset / shutdown). Never throws. */
     async reset(reason: string): Promise<void> {
+        this.generation++
         const client = this.client
         this.client = undefined
         this.connecting = undefined
@@ -207,7 +231,8 @@ export class NativeCombinerConnection implements CombinerConnection {
         const bearer = this.conn.bearerTokenEnv ? process.env[this.conn.bearerTokenEnv] : undefined
 
         this.state = "connecting"
-        this.connecting = (async () => {
+        const genAtStart = this.generation
+        const connectPromise = (async (): Promise<McpClient> => {
             const client = new McpClient({
                 name: CLIENT_INFO.name,
                 version: CLIENT_INFO.version,
@@ -273,17 +298,54 @@ export class NativeCombinerConnection implements CombinerConnection {
                 }
             })
 
-            const transport = new StreamableHttpTransport({
-                url,
-                authProvider: bearer ? { token: async () => bearer } : undefined,
-            })
-            await Promise.race([
-                client.connect(transport),
-                new Promise((_, reject) => setTimeout(() => reject(new Error("connect timeout")), CONNECT_TIMEOUT_MS)),
-            ])
+            const transport = this.transportFactory
+                ? this.transportFactory(url)
+                : new StreamableHttpTransport({
+                      url,
+                      authProvider: bearer ? { token: async () => bearer } : undefined,
+                  })
+            let timer: ReturnType<typeof setTimeout> | undefined
+            const connectP = client.connect(transport)
+            const settle = connectP.then((r) => r)
+            // Late rejections (close beats connect, timeout raced a slow success) must
+            // not become unhandled rejections — pi crashes on those.
+            settle.catch(() => undefined)
+            try {
+                await Promise.race([
+                    settle,
+                    new Promise((_, reject) =>
+                        setTimeout(
+                            () => reject(new Error(`connect timeout after ${CONNECT_TIMEOUT_MS}ms`)),
+                            CONNECT_TIMEOUT_MS,
+                        ),
+                    ),
+                ])
+            } catch (e) {
+                // The client may STILL complete its connect after this failure (the
+                // timeout raced a slow success): close it best-effort, non-blocking, so
+                // no untracked SSE stream/handlers compete for the token's elicitation
+                // routing (the zombie class the reload teardown also guards).
+                void client.close().catch(() => undefined)
+                throw e
+            } finally {
+                if (timer) clearTimeout(timer)
+            }
+
+            if (this.generation !== genAtStart) {
+                // A reset() (setToken/rebind/session switch) ran while this connect was
+                // in flight: never publish the laggard — it would resurrect the old
+                // token/routing the reset just dropped. Close it; the NEXT
+                // ensureConnected builds its own.
+                void client.close().catch(() => undefined)
+                throw new Error("connect superseded by a connection reset (token/config changed)")
+            }
 
             this.client = client
-            ncDbg(`ensureConnected: CONNECTED session=${(client as unknown as { sessionId?: string }).sessionId ?? "?"} state=${(client as unknown as { transport?: { sessionId?: string } }).transport?.sessionId ?? "?"}`)
+            // SAFETY: pi-mcp's McpClient session id lives only on concrete internals —
+            // the casts read it for debug output only; unknown means "unexposed".
+            ncDbg(
+                `ensureConnected: CONNECTED session=${(client as unknown as { sessionId?: string }).sessionId ?? "?"} state=${(client as unknown as { transport?: { sessionId?: string } }).transport?.sessionId ?? "?"}`,
+            )
             this.state = "connected"
             this.lastError = undefined
             // Catch-up after (re)connect — same rationale as client/connection.ts:
@@ -297,17 +359,25 @@ export class NativeCombinerConnection implements CombinerConnection {
             this.hooks.onStateChange?.(this.state)
             return client
         })()
+        this.connecting = connectPromise
 
         try {
-            return await this.connecting
+            return await connectPromise
         } catch (e) {
-            this.state = "failed"
-            this.lastError = e instanceof Error ? e.message : String(e)
-            this.log("warn", `combiner connect failed (${this.lastError})`)
-            this.hooks.onStateChange?.(this.state)
-            throw new Error(`cannot reach the combiner at ${this.conn.baseUrl}: ${this.lastError} — the combiner may have restarted; this call did not run and is safe to retry (carried state: grants, filters, parked sessions survives restarts)`)
+            const superseded = this.generation !== genAtStart
+            if (!superseded) {
+                this.state = "failed"
+                this.lastError = e instanceof Error ? e.message : String(e)
+                this.log("warn", `combiner connect failed (${this.lastError})`)
+                this.hooks.onStateChange?.(this.state)
+            }
+            throw superseded
+                ? e
+                : new Error(`cannot reach the combiner at ${this.conn.baseUrl}: ${this.lastError} — the combiner may have restarted; this call did not run and is safe to retry (carried state: grants, filters, parked sessions survives restarts)`)
         } finally {
-            this.connecting = undefined
+            // Identity check: a reset + newer connect may have repopulated
+            // this.connecting while we awaited — never wipe the newer single-flight.
+            if (this.connecting === connectPromise) this.connecting = undefined
         }
     }
 
@@ -315,22 +385,44 @@ export class NativeCombinerConnection implements CombinerConnection {
      *  bounce invalidates the transport session, and the first operation to notice
      *  can be any of them (the router's listTools lookup runs BEFORE callTool;
      *  without this it surfaced raw McpSessionExpiredError and never reset the
-     *  client, wedging the connection until reload). Same classification as
-     *  callTool: the typed McpSessionExpiredError first, the message regex as belt. */
-    private async withStaleRetry<T>(label: string, op: (client: McpClient) => Promise<T>): Promise<T> {
+     *  client, wedging the connection until reload).
+     *  Classification is TYPE-based over pi-mcp's exported taxonomy; the message
+     *  regex remains only as a belt for raw transport failures pi-mcp does not wrap
+     *  (e.g. fetch failed). callTool passes retryStaleOnly: only
+     *  McpSessionExpiredError — which the server raises BEFORE executing anything —
+     *  may trigger an automatic re-run there. */
+    private async withStaleRetry<T>(
+        label: string,
+        op: (client: McpClient) => Promise<T>,
+        opts?: { retryStaleOnly?: boolean },
+    ): Promise<T> {
         const client = await this.ensureConnected()
         try {
             return await op(client)
         } catch (e) {
-            const typedStale = e instanceof McpSessionExpiredError
             const msg = e instanceof Error ? e.message : String(e)
-            ncDbg(`${label} THROW typed=${typedStale} ${msg.slice(0, 140)}`)
+            const staleOnly = opts?.retryStaleOnly === true
             const stale =
-                typedStale || /404|stale|session|not found|closed|fetch failed|illegal/i.test(msg)
+                e instanceof McpSessionExpiredError ||
+                (!staleOnly &&
+                    (e instanceof McpConnectionClosedError ||
+                        e instanceof McpTimeoutError ||
+                        /404|stale|session|not found|closed|fetch failed|illegal/i.test(msg)))
             if (!stale) throw e
-            ncDbg(`${label} stale-retry FIRED`)
-            this.log("info", `${label} went stale (${msg}); reconnecting once`)
-            await this.reset("stale session")
+            ncDbg(`${label} stale-retry FIRED typed=${e instanceof McpSessionExpiredError}`)
+            this.log(
+                "info",
+                `${label} went stale (${e instanceof McpSessionExpiredError ? "session expired" : msg}); reconnecting once`,
+            )
+            // Reset ONLY if the failing client is still the current one — a concurrent
+            // caller may already have reset and reconnected ("detach, don't close" was
+            // pi's builtin wording); resetting here would close the FRESH client every
+            // in-flight call just reconnected, cascading into another stale round.
+            if (this.client === client) {
+                await this.reset("stale session")
+            } else {
+                ncDbg(`${label} skipped reset — client already replaced by a concurrent reset`)
+            }
             return await op(await this.ensureConnected())
         }
     }
@@ -339,7 +431,6 @@ export class NativeCombinerConnection implements CombinerConnection {
      *  pi-mcp returns the tools array directly (pagination already resolved). */
     async listTools(force = false): Promise<ToolSummary[]> {
         if (!force && this.tools && Date.now() - this.toolsFetchedAt < LIST_CACHE_MS) return this.tools
-        const client = await this.ensureConnected()
         const tools: ToolSummary[] = (await this.withStaleRetry("listTools", (c) => c.listTools())).map((t) => ({
             name: t.name,
             description: t.description,
@@ -390,52 +481,33 @@ export class NativeCombinerConnection implements CombinerConnection {
         return this.withStaleRetry(`readResource ${uri}`, (c) => c.readResource(uri))
     }
 
-    /** callTool with one stale-session retry (combiner bounce; handover keeps token).
-     *  A server-marked error (CallToolResult.isError) THROWS so pi records the call
-     *  as a tool error — same convention the rest of the extension uses. */
-    async callTool(name: string, args: Record<string, unknown> | undefined): Promise<CallToolResult> {
-        const attempt = async (): Promise<CallToolResult> => {
-            const client = await this.ensureConnected()
-            const result = await client.callTool(name, args)
-            if (result.isError) {
-                const text = (result.content ?? [])
-                    .map((b) => (isRecord(b) && b.type === "text" && typeof b.text === "string" ? b.text : JSON.stringify(b)))
-                    .filter(Boolean)
-                    .join("\n")
-                throw new Error(`combiner tool error (${name}): ${text}`)
-            }
-            return result
-        }
-        try {
-            return await attempt()
-        } catch (e) {
-            // pi-mcp raises a TYPED McpSessionExpiredError on 404-with-session-id (the
-            // combiner's stale-session 404) — catch it first-class, exactly like pi's
-            // own builtin does ("retry once on a new session; the old client is
-            // detached, not closed, so other in-flight calls get their own 404 and
-            // retry the same way"). The message regex stays as a belt for anything
-            // the transport doesn't classify.
-            const typedStale = e instanceof McpSessionExpiredError
-            const msg = e instanceof Error ? e.message : String(e)
-            ncDbg(`callTool ${name} THROW typed=${typedStale} status=${(e as { status?: number } | null)?.status} ${msg.slice(0, 140)}`)
-            const stale = typedStale || /404|stale|session|not found|closed|fetch failed|illegal/i.test(msg)
-            if (!stale) throw e
-            ncDbg(`callTool ${name} stale-retry FIRED`)
-            this.log(
-                "info",
-                `call "${name}" went stale (${typedStale ? "session expired (typed)" : msg}); reconnecting once`,
-            )
-            await this.reset("stale session")
-            ncDbg(`callTool ${name} reset done; retrying`)
-            try {
-                const result = await attempt()
-                ncDbg(`callTool ${name} RETRY SUCCEEDED`)
-                return result
-            } catch (e2) {
-                ncDbg(`callTool ${name} RETRY FAILED: ${e2 instanceof Error ? e2.message : String(e2)}`)
-                throw e2
-            }
-        }
+    /** callTool. Transport-level stale retry is STALE-ONLY (typed
+     *  McpSessionExpiredError): that error is raised by the server BEFORE it
+     *  executes the request, so one re-run is provably safe. Any other failure —
+     *  closed/timeout/"fetch failed" AFTER delivery — may correspond to a request
+     *  that already EXECUTED upstream; an automatic re-run could repeat a
+     *  destructive tool, so those surface as errors (with the recovery hints) and
+     *  the model/user decides whether to call again.
+     *  A server-marked error (CallToolResult.isError) is checked AFTER the transport
+     *  retry layer and THROWS, so pi records the call as a tool error — and crucially
+     *  the tool's own error TEXT can never reach the retry classification (a
+     *  "…not found" tool error must not look like transport staleness).
+     *  `options.signal` rides into the transport: cancellation cancels upstream work
+     *  and widget holds (notifications/cancelled). */
+    async callTool(
+        name: string,
+        args: Record<string, unknown> | undefined,
+        options?: McpRequestOptions,
+    ): Promise<CallToolResult> {
+        const result = await this.withStaleRetry(`callTool ${name}`, (c) => c.callTool(name, args, options), {
+            retryStaleOnly: true,
+        })
+        if (!result.isError) return result
+        const text = (result.content ?? [])
+            .map((b) => (isRecord(b) && b.type === "text" && typeof b.text === "string" ? b.text : JSON.stringify(b)))
+            .filter(Boolean)
+            .join("\n")
+        throw new Error(`combiner tool error (${name}): ${text}`)
     }
 
     // ── control plane (unchanged from client/connection.ts) ─────────────────────────

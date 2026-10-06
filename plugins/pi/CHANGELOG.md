@@ -37,6 +37,23 @@ tagged `vX.Y.Z`.
   `readResource` were bare, so the router's listTools-first lookup surfaced raw
   `McpSessionExpiredError` after a combiner bounce and never reset the client,
   wedging the connection until reload.
+- Review-driven fixes (dev native-MCP review): `callTool` retries transport
+  failures **stale-only** (typed `McpSessionExpiredError` — raised before the
+  server executes anything), so a tool error's own text can no longer trigger a
+  re-run of a destructive tool; connection races closed (a reset no longer
+  publishes an in-flight laggard connect, resets target the failing client only,
+  and a slow connect that loses its timeout race is closed instead of leaking an
+  untracked stream); pi's cancel signal now actually rides into `callTool`
+  (upstream work + widget holds abort); per-project `directTools`/filter ride as
+  per-pass getters (worktrees get their own exposure); `read_*` tool UI URLs are
+  computed per call (stale session tokens no longer baked in at registration);
+  the panel's async rejection is handled to stderr; debug logging is opt-in via
+  `PI_MCP_COMBINER_NC_DBG=1`; removed tools are re-registered `hidden`, and
+  unchanged declarations skip re-registration via schema-signature diffing;
+  tool results map through pi-mcp's `toLlmContent` (real image blocks); README
+  documents the codemode activation quirk; lockfile regenerated; three
+  transport-level regression tests added (fake combiner over pi-mcp's
+  in-memory pair).
 - Stale-ctx sweep (pi 1.0's hard assertion on `ctx.ui` reads from async
   callbacks): every async callback now uses a **captured ui object** (the
   getter asserts; the object doesn't), catches degrade to stderr and never

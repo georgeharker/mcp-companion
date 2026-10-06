@@ -54,7 +54,6 @@
     "access": "public"
   },
   "devDependencies": {
-    "@earendil-works/pi-mcp": "^1.0.0",
     "@earendil-works/pi-tui": "^0.85.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
@@ -66,6 +65,11 @@
   "peerDependencies": {
     "@earendil-works/pi-mcp": "^1.0.2",
     "@earendil-works/pi-tui": "^0.85.1"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-mcp": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@earendil-works/pi-mcp": "^1.0.2"

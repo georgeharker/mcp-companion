@@ -27,11 +27,23 @@ import type { ServerFilter } from "../client/config-ladder.js"
 
 export type NativeResourceOptions = {
     connection: NativeCombinerConnection
-    /** Per-project server filter, same semantics as legacy filterResources. */
-    serverFilter?: ServerFilter
+    /** Per-project server filter, same semantics as legacy filterResources; a getter
+     *  resolves per call (worktrees/project switches re-resolve session config). */
+    serverFilter?: ServerFilter | (() => ServerFilter | undefined)
+    /** The directTools spec (same vocabulary as the tool surface): a read_* tool whose
+     *  name matches the allowlist is declared "direct", otherwise codemode — consistent
+     *  with how regular tools are exposed (a getter resolves per call). */
+    directSpec?: string[] | "search" | (() => string[] | "search" | undefined)
     /** Auto-open the widget URL on read (index.ts's uiAutoOpen setting). */
     uiAutoOpen?: boolean
     log: (level: "info" | "warn" | "error", message: string) => void
+}
+
+function resolveFilter(f: NativeResourceOptions["serverFilter"]): ServerFilter | undefined {
+    return typeof f === "function" ? f() : f
+}
+function resolveDirectSpec(d: NativeResourceOptions["directSpec"]): string[] | "search" | undefined {
+    return typeof d === "function" ? d() : d
 }
 
 /** Project server filter for resources — mirrors legacy filterResources
@@ -51,9 +63,21 @@ export function filterInteractiveResources(
     return interactive
 }
 
+function resolveResourceExposure(
+    opts: NativeResourceOptions,
+    toolName: string,
+): NonNullable<ToolDefinition["exposure"]> {
+    const spec = resolveDirectSpec(opts.directSpec)
+    return Array.isArray(spec) && spec.some((p) => matchesResourceGlob(toolName, p)) ? "direct" : "codemode"
+}
+
+function matchesResourceGlob(name: string, pattern: string): boolean {
+    // Same glob vocabulary as the tool surface (matchesGlob from tool-matching).
+    return name === pattern || (pattern.endsWith("*") && name.startsWith(pattern.slice(0, -1)))
+}
+
 function toReadTool(toolName: string, resource: ResourceSummary, opts: NativeResourceOptions): ToolDefinition {
     const label = resource.name ?? resource.uri
-    const url = opts.connection.uiUrlFor(resource.uri)
     return {
         name: toolName,
         label: `MCP resource: ${label}`,
@@ -67,11 +91,16 @@ function toReadTool(toolName: string, resource: ResourceSummary, opts: NativeRes
             .join(" | "),
         promptSnippet: `Read MCP resource ${label}.`,
         parameters: { type: "object", properties: {} },
-        exposure: "direct",
+        exposure: resolveResourceExposure(opts, toolName),
         namespace: { name: "mcp_combiner", description: "mcp-combiner aggregated tools" },
         execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
             try {
                 const result = await opts.connection.readResource(resource.uri)
+                // Compute the URL PER CALL: the session token changes across /new and
+                // resume, and the registered set skips re-registration — a
+                // registration-time URL would carry a dead token after the first
+                // session switch.
+                const url = opts.connection.uiUrlFor(resource.uri)
                 let text = renderResourceResult(result)
                 if (url) {
                     text = `${text}\n\ninteractive: ${url}`
@@ -94,7 +123,7 @@ export async function activateNativeResources(
 ): Promise<string[]> {
     let resources: ResourceSummary[] = []
     try {
-        resources = filterInteractiveResources(await opts.connection.listResources(true), opts.serverFilter)
+        resources = filterInteractiveResources(await opts.connection.listResources(true), resolveFilter(opts.serverFilter))
     } catch (e) {
         opts.log("warn", `interactive resource discovery failed (${e instanceof Error ? e.message : String(e)})`)
         return []

@@ -409,20 +409,16 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         // without a grouping token); list_changed re-syncs ride resyncAll below.
         nativeSurface = activateNativeMode(pi, {
             connection,
-            directSpec: sessionCfg?.directSpec ?? [],
-            serverFilter: sessionCfg?.serverFilter,
+            // Getters, not snapshots: worktrees / project switches re-resolve
+            // sessionCfg per session_start, and a load-time value would apply the
+            // wrong allow/deny set and directTools spec to later sessions.
+            directSpec: () => sessionCfg?.directSpec,
+            serverFilter: () => sessionCfg?.serverFilter,
             exposeResources: settings.exposeResources !== false,
             uiAutoOpen: settings.uiAutoOpen !== false,
             warnLargeDirectExposure: settings.warnLargeDirectExposure,
             log: clientLog,
         })
-        if (sessionCfg.otherServers.length && !adapterPackageInstalled()) {
-            clientLog(
-                "info",
-                `note: ${sessionCfg.otherServers.length} non-combiner server(s) in the mcp.json ladder are not ` +
-                    `connected by this extension (${sessionCfg.otherServers.join(", ")})`,
-            )
-        }
     }
 
     if (!adapterEnabled && notify) {
@@ -491,10 +487,12 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
 
         pi.on("session_start", (event, ctx) => {
             try {
-                uiNotify = notify && ctx.hasUI && ctx.ui?.notify ? (m, l) => ctxUi?.notify?.(m, l) : undefined
-                uiCtx = ctx.ui
-                const ctxUi = ctx.ui // SAFETY: the object, once — never re-enter the getter async
-                conn.bindUi({ hasUI: ctx.hasUI && Boolean(ctx.ui?.select && ctx.ui?.input), ui: ctx.ui })
+                // SAFETY: capture ctx.ui ONCE, first — the getter asserts staleness,
+                // the object does not; every async closure below uses the object only.
+                const ctxUi = ctx.ui
+                uiNotify = notify && ctx.hasUI && ctxUi?.notify ? (m, l) => ctxUi?.notify?.(m, l) : undefined
+                uiCtx = ctxUi
+                conn.bindUi({ hasUI: ctx.hasUI && Boolean(ctxUi?.select && ctxUi?.input), ui: ctxUi })
                 // Per-session config re-resolution: worktrees and project switches read
                 // THEIR project layers (.mcp.json / .pi/mcp.json); a changed URL rebinds.
                 sessionCfg = resolveSessionConfig({
@@ -594,6 +592,16 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
             // not — capture once, use the object in async paths (stale after a
             // reload is a no-op render, not a crash).
             const ctxUi = ctx.ui
+            // SAFETY: the shared async-notify shape (notify via the captured object,
+            // degrade to stderr) — a catch must never re-enter the same stale ctx it
+            // is handling, so every async .then/.catch funnels through here.
+            const uiNotifySafe = (msg: string, level: "info" | "warn" | "error"): void => {
+                try {
+                    ctxUi?.notify?.(msg, level)
+                } catch {
+                    process.stderr.write(`mcp-combiner: ${msg}\n`)
+                }
+            }
             if (v === "panel") {
                 if (!connection) {
                     ctx.ui?.notify?.(
@@ -602,7 +610,9 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                     )
                     return
                 }
-                openCombinerPanel(
+                // Async (it opens a held tool session); its rejection must be handled
+                // via STDERR — not via the stale getter this handler was entered for.
+                void openCombinerPanel(
                     {
                         connection,
                         toolName,
@@ -611,7 +621,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                         notify: (m, l) => ctxUi?.notify?.(m, l),
                     },
                     ctxUi,
-                )
+                ).catch((e) => process.stderr.write(`mcp-combiner: panel failed (${e instanceof Error ? e.message : String(e)})\n`))
                 return
             }
             if (v === "" || v === "status") {
@@ -622,27 +632,11 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                     )
                     return
                 }
-                // SAFETY: capture ctx.ui ONCE synchronously (the getter asserts
-                // staleness; the OBJECT it returns does not) — an async callback
-                // must never re-enter the getter, and a catch must never touch
-                // the same stale ctx it's handling.
-                const ctxUi = ctx.ui
                 void controlStatusText(connection, ctx.cwd)
-                    .then((t) => {
-                        try {
-                            ctxUi?.notify?.(t, "info")
-                        } catch {
-                            process.stderr.write(`${t}\n`)
-                        }
-                    })
-                    .catch((e) => {
-                        const msg = `mcp-combiner: status failed (${e instanceof Error ? e.message : String(e)})`
-                        try {
-                            ctxUi?.notify?.(msg, "error")
-                        } catch {
-                            process.stderr.write(`${msg}\n`)
-                        }
-                    })
+                    .then((t) => uiNotifySafe(t, "info"))
+                    .catch((e) =>
+                        uiNotifySafe(`status failed (${e instanceof Error ? e.message : String(e)})`, "error"),
+                    )
                 return
             }
             if (v === "enable" || v === "disable" || v === "restart-server") {
@@ -655,23 +649,9 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                     ctx.ui?.notify?.(`mcp-combiner: ${v} needs a server name`, "warn")
                     return
                 }
-                const ctxUi = ctx.ui
                 void metaToolCall(connection, v, server)
-                    .then((t) => {
-                        try {
-                            ctxUi?.notify?.(t, "info")
-                        } catch {
-                            process.stderr.write(`${t}\n`)
-                        }
-                    })
-                    .catch((e) => {
-                        const msg = `mcp-combiner: ${v} failed (${e instanceof Error ? e.message : String(e)})`
-                        try {
-                            ctxUi?.notify?.(msg, "error")
-                        } catch {
-                            process.stderr.write(`${msg}\n`)
-                        }
-                    })
+                    .then((t) => uiNotifySafe(t, "info"))
+                    .catch((e) => uiNotifySafe(`${v} failed (${e instanceof Error ? e.message : String(e)})`, "error"))
                 return
             }
             if (v === "system-prompt") {

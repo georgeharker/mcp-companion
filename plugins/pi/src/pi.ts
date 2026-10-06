@@ -67,6 +67,8 @@ export type ToolCallContext = ExtensionContext & {
 }
 
 export type TextBlock = { type: "text"; text: string }
+/** Image block as pi-ai accepts it (tool results may carry images — see toLlmContent). */
+export type ImageBlock = { type: "image"; data: string; mimeType: string }
 
 /** pi's TUI Component contract (pi-tui's Component). invalidate() is REQUIRED,
  *  not optional: MouseRegion.invalidate calls it unconditionally, and a component
@@ -87,7 +89,9 @@ export type ToolRenderResultOptions = { expanded: boolean; isPartial: boolean }
 /** pi's real tool-result contract: content is an ARRAY of blocks; the error flag is
  *  set by THROWING from execute, never by returning a property. */
 export type ToolResult = {
-    content: TextBlock[]
+    /** SAFETY: content blocks follow pi-ai's block union — text or base64 image. The
+     *  wider-than-TextBlock shape keeps MCP image results lossless (toLlmContent). */
+    content: (TextBlock | ImageBlock)[]
     details?: unknown
     terminate?: boolean
 }
