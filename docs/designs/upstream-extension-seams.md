@@ -1,5 +1,9 @@
 # Upstream: extension seams for pi's MCP surface
 
+## 0. Paste-ready texts
+
+`upstream-pr-drafts.md` holds PR A (enabler) and RFC B (seams + stability tier) ready to file.
+
 Status: draft — file as (a) PR `extension-host-provided-pi-mcp` (branch drafted
 in ~/Development/pi/pi @ `extension-host-provided-pi-mcp`) + (b) RFC issue,
 **both together, after mcp-companion 0.16.0 ships stable** so we can cite a
