@@ -491,8 +491,9 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
 
         pi.on("session_start", (event, ctx) => {
             try {
-                uiNotify = notify && ctx.hasUI && ctx.ui?.notify ? (m, l) => ctx.ui?.notify?.(m, l) : undefined
+                uiNotify = notify && ctx.hasUI && ctx.ui?.notify ? (m, l) => ctxUi?.notify?.(m, l) : undefined
                 uiCtx = ctx.ui
+                const ctxUi = ctx.ui // SAFETY: the object, once — never re-enter the getter async
                 conn.bindUi({ hasUI: ctx.hasUI && Boolean(ctx.ui?.select && ctx.ui?.input), ui: ctx.ui })
                 // Per-session config re-resolution: worktrees and project switches read
                 // THEIR project layers (.mcp.json / .pi/mcp.json); a changed URL rebinds.
@@ -589,6 +590,10 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
         handler: (args, ctx) => {
             const [verb, ...rest] = args.trim().split(/\s+/)
             const v = verb ?? ""
+            // SAFETY: ctx.ui's GETTER asserts staleness; the object it returns does
+            // not — capture once, use the object in async paths (stale after a
+            // reload is a no-op render, not a crash).
+            const ctxUi = ctx.ui
             if (v === "panel") {
                 if (!connection) {
                     ctx.ui?.notify?.(
@@ -597,15 +602,15 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                     )
                     return
                 }
-                void openCombinerPanel(
+                openCombinerPanel(
                     {
                         connection,
                         toolName,
                         getToken: () => connection.sessionToken,
                         getFilter: () => sessionCfg?.serverFilter,
-                        notify: (m, l) => ctx.ui?.notify?.(m, l),
+                        notify: (m, l) => ctxUi?.notify?.(m, l),
                     },
-                    ctx.ui,
+                    ctxUi,
                 )
                 return
             }
@@ -617,14 +622,27 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                     )
                     return
                 }
+                // SAFETY: capture ctx.ui ONCE synchronously (the getter asserts
+                // staleness; the OBJECT it returns does not) — an async callback
+                // must never re-enter the getter, and a catch must never touch
+                // the same stale ctx it's handling.
+                const ctxUi = ctx.ui
                 void controlStatusText(connection, ctx.cwd)
-                    .then((t) => ctx.ui?.notify?.(t, "info"))
-                    .catch((e) =>
-                        ctx.ui?.notify?.(
-                            `mcp-combiner: status failed (${e instanceof Error ? e.message : String(e)})`,
-                            "error",
-                        ),
-                    )
+                    .then((t) => {
+                        try {
+                            ctxUi?.notify?.(t, "info")
+                        } catch {
+                            process.stderr.write(`${t}\n`)
+                        }
+                    })
+                    .catch((e) => {
+                        const msg = `mcp-combiner: status failed (${e instanceof Error ? e.message : String(e)})`
+                        try {
+                            ctxUi?.notify?.(msg, "error")
+                        } catch {
+                            process.stderr.write(`${msg}\n`)
+                        }
+                    })
                 return
             }
             if (v === "enable" || v === "disable" || v === "restart-server") {
@@ -637,14 +655,23 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                     ctx.ui?.notify?.(`mcp-combiner: ${v} needs a server name`, "warn")
                     return
                 }
+                const ctxUi = ctx.ui
                 void metaToolCall(connection, v, server)
-                    .then((t) => ctx.ui?.notify?.(t, "info"))
-                    .catch((e) =>
-                        ctx.ui?.notify?.(
-                            `mcp-combiner: ${v} failed (${e instanceof Error ? e.message : String(e)})`,
-                            "error",
-                        ),
-                    )
+                    .then((t) => {
+                        try {
+                            ctxUi?.notify?.(t, "info")
+                        } catch {
+                            process.stderr.write(`${t}\n`)
+                        }
+                    })
+                    .catch((e) => {
+                        const msg = `mcp-combiner: ${v} failed (${e instanceof Error ? e.message : String(e)})`
+                        try {
+                            ctxUi?.notify?.(msg, "error")
+                        } catch {
+                            process.stderr.write(`${msg}\n`)
+                        }
+                    })
                 return
             }
             if (v === "system-prompt") {
@@ -927,15 +954,24 @@ function installConfig(ctx: ExtensionCommandContext, pathArg?: string): void {
 }
 
 function makeLog(ctx: ExtensionContext, notify: boolean): LogFn {
+    // SAFETY: capture ctx.ui ONCE at call time (the getter asserts staleness; the
+    // OBJECT does not) — a returned logger may outlive the ctx (async paths,
+    // deferred attaches) and must degrade to stderr, never crash pi 1.0.
+    const ctxUi = ctx.ui
+    const hasUi = Boolean(ctx.hasUI && ctxUi)
     return (level, message) => {
         const line = `mcp-combiner: ${message}`
         // Pi has no structured plugin log sink like OpenCode's client.app.log; surface
         // through the UI when there is one (and the user has not opted out), else stderr.
-        if (notify && ctx.hasUI && ctx.ui?.notify) {
+        if (notify && hasUi && ctxUi?.notify) {
             let uiLevel: "info" | "warn" | "error" = "info"
             if (level === "warn") uiLevel = "warn"
             else if (level === "error") uiLevel = "error"
-            ctx.ui.notify(line, uiLevel)
+            try {
+                ctxUi.notify(line, uiLevel)
+            } catch {
+                process.stderr.write(`${line}\n`)
+            }
         } else if (level === "error" || level === "warn") {
             process.stderr.write(`${line}\n`)
         }

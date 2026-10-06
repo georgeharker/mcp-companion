@@ -37,6 +37,12 @@ tagged `vX.Y.Z`.
   `readResource` were bare, so the router's listTools-first lookup surfaced raw
   `McpSessionExpiredError` after a combiner bounce and never reset the client,
   wedging the connection until reload.
+- Stale-ctx sweep (pi 1.0's hard assertion on `ctx.ui` reads from async
+  callbacks): every async callback now uses a **captured ui object** (the
+  getter asserts; the object doesn't), catches degrade to stderr and never
+  re-enter the getter, and the second logger (`makeLog`) captures at call
+  time + guards its notify. The slash-command paths (status, meta-tool
+  calls, the panel) audited: all async `ctx.ui` re-entries eliminated.
 - Stale-ctx crash on `/reload` (pi 1.0's hard assertion): the teardown's
   reset-reason log rode the orphaned instance's captured `ctx.ui` — an
   uncaught throw in the fire-and-forget microtask killed pi. `clientLog`
