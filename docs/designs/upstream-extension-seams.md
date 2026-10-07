@@ -28,7 +28,7 @@ dependency of the coding-agent, but extensions importing it fail to resolve
 Mechanical, reviewable alone; unblocks every other ask since examples can't
 even import otherwise.
 
-## 2. The seam (RFC: elicitation + resources as callable hooks)
+## 2. The seam (RFC: registration verbs for MCP intercept sites)
 
 Today the only way an extension can intercept elicitation or `resources/read`
 on pi's built-in MCP connections is to own the connection itself (our native
@@ -37,17 +37,26 @@ plugin does: pi-mcp transport, capability advertise
 listeners). That forecloses coexistence with anything else and duplicates the
 connection lifecycle.
 
-Proposal: sanctioned hooks on the extension API, e.g.
-`pi.onMcpElicitRequest(handler)` and `pi.onMcpResourceRead(handler)` (or a
-general `onMcpRequest(kind, handler)`), receiving requests raised on
-built-in-owned connections, async handlers, typed.
+Proposal: register-functions-per-use-site, in pi's existing verb idiom
+(`registerTool`, `registerCommand`, `registerProvider`, `registerMcpServer`, each
+with an `unregister` pair where dynamic):
+- `pi.registerMcpElicitationHandler((server, request, ctx) => Promise<ElicitResult>)`
+- `pi.registerMcpResourceReader((server, uri, ctx) => Promise<ReadResourceResult | undefined>)`
+- `pi.registerMcpConnectOptions((server, options) => options)` — headers/auth/timeouts,
+  i.e. how per-session token identity reaches the wire without owning the connection
+
+(Not an event-emitter surface: pi's API culture is registration, and claim-vs-listen
+is the difference that makes capability advertisement decidable — see two-switch.)
+For the full signatures, replacement semantics, and the stale-registration lifecycle
+question, see `upstream-pr-drafts.md` (RFC B).
 
 Design questions for the RFC (not for us to decide unilaterally):
-- **Claim model**: exclusive (first registered wins) vs composed (chain of
-  responsibility). Combiner's position: consent authority must be singular —
-  multiple askers should be a composition bug, not a UX.
-- **Two-switch capability advertisement**: pi should advertise `elicitation`
-  server-capability only when an extension claims the handler (otherwise the
+- **Claim model**: singular for the elicit claim (consent authority must not fork —
+  multiple askers should be a composition bug, not a UX; re-registration replaces with
+  a warning, matching registerTool — which also makes the /reload story work); resource
+  readers may compose later (the `undefined`-defers return leaves the door open).
+- **Two-switch capability advertisement**: pi advertises `elicitation`
+  server-capability only while a handler is registered (otherwise the
   server sends into the void), and the tool-exposure switch stays independent.
 - **Resources**: interactive `ui://` resources are the interesting case — pi's
   built-in `read_mcp_resource` skips them; extensions are the right renderer.

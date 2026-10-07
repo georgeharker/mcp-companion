@@ -75,11 +75,11 @@ What the extension owns today *solely because the hooks don't exist*:
 |---|---|---|
 | Connection lifecycle: connect/reconnect, teardown, reload-time zombie disposal, stale-session retry | pi owns all of it | **deleted** |
 | Capability advertisement (`elicitation: {}` in client capabilities so servers will send elicit requests) | pi advertises when a hook is claimed | **deleted** |
-| `setRequestHandler("elicitation/create")` claim | `pi.onMcpElicitRequest(server, request) => Promise<ElicitResult>` | **replaced by the hook** |
+| `setRequestHandler("elicitation/create")` claim | `registerMcpElicitationHandler((server, request) => …)` — registration IS the claim | **replaced by the seam** |
 | `list_changed` listeners ×2 (tool-plane churn) | pi refreshes internally; extension may want a lighter hook for its *own* additions | mostly deleted |
 | Tool exposure per server tool + the router call-form | pi's built-in `mcp` tool + bare-name tools already cover this | mostly deleted |
-| Interactive `ui://` resources (pi's `read_mcp_resource` skips ui://) | `pi.onMcpResourceRead(server, uri)` — extension becomes the renderer | **replaced by the hook** |
-| Per-chat token identity sent as connection headers | needs a connect-options seam (`onMcpConnect(server, options)` or per-server header config) | **new hook needed** |
+| Interactive `ui://` resources (pi's `read_mcp_resource` skips ui://) | `registerMcpResourceReader((server, uri) => …)` — extension becomes the renderer | **replaced by the seam** |
+| Per-chat token identity sent as connection headers | `registerMcpConnectOptions((server, options) => options)` (per-server header config can be the static subset) | **new seam needed** |
 | Consent gate on `tools/call` | stays with our backend (combiner middleware) — deliberately not an extension hook | unchanged (correct place) |
 
 The headline: with three hooks — **elicit-claim, resource-read, connect-options**
@@ -88,28 +88,60 @@ class of lifecycle hazards we debugged (stale-ctx crashes on reload being the
 crash-visible one), and it is the difference between "extending pi's MCP
 surface" being a sanctioned act versus a workaround with a known blast radius.
 
-### Proposed hooks (names TBD by you, shape for discussion)
+### Proposed seams (names TBD by you, shape for discussion)
+
+These follow pi's existing extension-verb idiom — the API is register-functions-per-use-site
+(`registerTool`, `registerCommand`, `registerProvider`, `registerMcpServer`,
+`registerToolRenderer`), not an event-emitter surface, and each dynamic registration
+pairs with an explicit unregister (see `unregisterProvider`, `unregisterMcpServer`):
 
 ```ts
-// Called when a built-in-owned MCP connection raises elicitation/create.
-// Claim model: exclusive-first-wins is the simplest correct semantic —
-// multiple simultaneous askers should be a composition bug, not a UX.
-pi.onMcpElicitRequest(server: string, request: ElicitRequest, ctx: ElicitHookContext): Promise<ElicitResult>
+// ELICITATION — registered when a built-in-owned MCP connection raises
+// elicitation/create. Registration IS the claim; pi advertises the elicitation
+// capability for that server exactly while a handler is registered (two-switch,
+// below). Replacement semantics match registerTool (re-register replaces with a
+// warning) — deliberate: on /reload the fresh extension instance re-registers and
+// the stale one's claim must yield, which is the same last-wins-with-warning the
+// tool registry already exercises.
+pi.registerMcpElicitationHandler(
+    (server: string, request: ElicitRequest, ctx: ElicitHookContext) => Promise<ElicitResult>,
+): void
+pi.unregisterMcpElicitationHandler(): void
 
-// Called for resources/read on built-in connections; lets an extension render
-// interactive resources (ui://) that pi's own resource tool does not.
-pi.onMcpResourceRead(server: string, uri: string, ctx: ResourceHookContext): Promise<ReadResourceResult> | undefined
+// RESOURCES — called for resources/read on built-in connections; lets an extension
+// render interactive resources (ui://) that pi's own resource tool does not.
+// Returning undefined defers (future: composed readers); a value renders.
+pi.registerMcpResourceReader(
+    (server: string, uri: string, ctx: ResourceHookContext) => Promise<ReadResourceResult | undefined>,
+): void
+pi.unregisterMcpResourceReader(): void
 
-// Connect-time seam for per-server customization (headers, auth, timeouts).
-// This is how per-chat token identity gets onto the wire without the
-// extension owning the connection.
-pi.onMcpConnect(server: string, options: TransportOptions): TransportOptions
+// CONNECT OPTIONS — connect-time seam for per-server customization (headers, auth,
+// timeouts). This is how per-session/per-chat token identity gets onto the wire
+// without the extension owning the connection. Clone-and-return shape (the hook
+// receives a copy; mutating across connects is a bug this shape forbids).
+pi.registerMcpConnectOptions(
+    (server: string, options: TransportOptions) => TransportOptions,
+): void
+pi.unregisterMcpConnectOptions(): void
 ```
 
-Two-switch capability advertisement: pi should advertise `elicitation` (and
-claim-resource behavior) *only when an extension claims the hook* — otherwise
-a server sends requests into the void. Tool exposure stays an independent
-switch regardless.
+Claim-model asymmetry, stated on purpose: the elicit claim is SINGULAR (consent
+authority must not fork — two simultaneous askers would be a UX bug, not a
+feature, and the first-wins/replace ambiguity should be a loud warning, not a
+silent chain) while resource readers may later compose if a use appears — the
+`undefined` defers path leaves that door open without designing it now.
+
+Open question for the maintainers (they own ExtensionRunner/contexts): a stale
+extension instance's registration should arguably retire automatically when its
+ctx goes stale (the same assertActive rule pi applies to ctx reads), so a
+forgotten unregister cannot leave a zombie claim. Not specified here — flagged
+as the one lifecycle question we cannot settle from outside.
+
+Two-switch capability advertisement: pi advertises `elicitation` (and honors
+reader claims) ONLY while an extension holds the registration — otherwise a
+server sends requests into the void. Tool exposure stays an independent switch
+regardless.
 
 ### How much of pi-mcp is reasonable to make stable?
 
