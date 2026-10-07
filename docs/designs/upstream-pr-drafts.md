@@ -1,7 +1,8 @@
 # Upstream PR drafts — paste-ready texts
 
-Companion to `upstream-extension-seams.md`. File both together (after
-mcp-companion 0.16.0 ships stable), citing `@geohar/pi-mcp-combiner`.
+Companion to `upstream-extension-seams.md`. **PR A files alone** (0.16.0 is
+shipped — the stable citation exists); the RFC sketch below stays in our pocket
+and is shared only if the hooks question draws engagement.
 
 ---
 
@@ -45,13 +46,35 @@ Extensions that mirror the built-in's MCP-client behavior (session-expired
 retry, elicitation capability advertisement) then share pi's single copy,
 versioned with pi, with no private installs.
 
-A companion RFC (filed alongside) proposes the longer-term shape: sanctioned
-hooks for elicitation/resources on built-in connections, and a documented
-stability tier for the pi-mcp surface extensions may build on.
+### What we'd love next (shape welcome — no spec attached)
+
+This extension today WRAPS pi-mcp directly and owns its own connection, because
+three intercepts are needed for MCP features and no sanctioned seam reaches the
+built-in-owned connections. Naming them, in the order they hurt:
+
+1. **Elicitation** — answering `elicitation/create` on built-in-owned servers.
+   The built-in never advertises `elicitation`, so servers can't even ask.
+2. **Resource rendering** — serving `resources/read` for interactive (`ui://`)
+   resources, which the built-in's read path deliberately skips.
+3. **Connect-time options** — per-session transport customization (headers,
+   auth values), i.e. how chat-scoped credentials get onto the wire without
+   owning the connection.
+
+We do not have a shape to pitch — pi already offers two idioms that could fit
+(result-bearing `.on()` events, e.g. `before_provider_request` and the
+`mcp_servers_change` claim-by-listener, versus `register*` verbs like
+`registerTool`), and MCP interception has precedents pointing either way. If
+the maintainers have a preferred direction for exposing these on built-in
+connections, we'd be glad to build the extension on it — and to share a fuller
+sketch of what such connections would no longer need to own (lifecycle incl.
+zombie-reload disposal being the crash-visible one) if useful.
 
 ---
 
-## RFC B — Extension seams for pi's MCP surface (hooks + stability tier)
+## RFC B (BACK POCKET) — Extension seams for pi's MCP surface
+
+*Not filed. Share when the hooks question draws engagement, or link from PR A
+on request. Kept here so the analysis survives.*
 
 ### Title
 
@@ -174,11 +197,12 @@ root (underscore the internals in docs).
 
 ### Sequence
 
-1. PR "Host-provide `@earendil-works/pi-mcp`" (filed alongside this RFC) —
-   unblocks imports so any of this can even be written.
-2. If the hook shapes land in principle, an example extension in-repo
-   (connect, claim an elicit, render a resource) citing mcp-combiner as the
-   deployed instance.
+1. PR "Host-provide `@earendil-works/pi-mcp`" files alone, carrying the
+   three-feature ask as an open shape question (maintainers may prefer either
+   idiom; we bring the deep sketch only on engagement).
+2. If the hooks question lands, this RFC text becomes the discussion document
+   and an example extension in-repo follows (connect, claim an elicit, render a
+   resource), citing mcp-combiner as the deployed instance.
 
 ---
 
