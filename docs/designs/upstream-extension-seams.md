@@ -28,7 +28,7 @@ dependency of the coding-agent, but extensions importing it fail to resolve
 Mechanical, reviewable alone; unblocks every other ask since examples can't
 even import otherwise.
 
-## 2. The seam (RFC: registration verbs for MCP intercept sites)
+## 2. The seam (RFC: result-bearing `mcp_*` interception events)
 
 Today the only way an extension can intercept elicitation or `resources/read`
 on pi's built-in MCP connections is to own the connection itself (our native
@@ -37,27 +37,31 @@ plugin does: pi-mcp transport, capability advertise
 listeners). That forecloses coexistence with anything else and duplicates the
 connection lifecycle.
 
-Proposal: register-functions-per-use-site, in pi's existing verb idiom
-(`registerTool`, `registerCommand`, `registerProvider`, `registerMcpServer`, each
-with an `unregister` pair where dynamic):
-- `pi.registerMcpElicitationHandler((server, request, ctx) => Promise<ElicitResult>)`
-- `pi.registerMcpResourceReader((server, uri, ctx) => Promise<ReadResourceResult | undefined>)`
-- `pi.registerMcpConnectOptions((server, options) => options)` — headers/auth/timeouts,
-  i.e. how per-session token identity reaches the wire without owning the connection
+Proposal: result-bearing events in pi's `.on()` idiom — NOT register-verbs,
+because nothing nameable is added to a registry; these are flow-interception
+points, the shape of `before_provider_request` / `before_provider_headers` /
+`session_before_fork`. pi already claims capability by event-listener for MCP:
+`mcp_servers_change` ("handling marks the extension that connects registered
+servers", with the runner gating on `hasHandlers`).
+- `pi.on("mcp_elicit", handler) => ElicitResult | void` — first answer wins;
+  pi advertises elicitation exactly while a handler exists (two-switch)
+- `pi.on("mcp_resource_read", handler) => ReadResourceResult | void` —
+  void defers to pi's default (which skips ui://)
+- `pi.on("mcp_connect", handler)` — mutate-in-place transport options
+  (headers/auth/timeouts = the `before_provider_headers` shape), i.e. how
+  per-session token identity reaches the wire without owning the connection
 
-(Not an event-emitter surface: pi's API culture is registration, and claim-vs-listen
-is the difference that makes capability advertisement decidable — see two-switch.)
-For the full signatures, replacement semantics, and the stale-registration lifecycle
-question, see `upstream-pr-drafts.md` (RFC B).
+For full signatures, composition semantics, and the lifecycle note, see
+`upstream-pr-drafts.md` (RFC B).
 
 Design questions for the RFC (not for us to decide unilaterally):
-- **Claim model**: singular for the elicit claim (consent authority must not fork —
-  multiple askers should be a composition bug, not a UX; re-registration replaces with
-  a warning, matching registerTool — which also makes the /reload story work); resource
-  readers may compose later (the `undefined`-defers return leaves the door open).
+- **Claim model**: singular for elicit (consent authority must not fork —
+  multiple askers should be a composition bug, not a UX; pi warns on multiple
+  handlers, first result wins); readers/connect fold sequentially like the
+  provider events do.
 - **Two-switch capability advertisement**: pi advertises `elicitation`
-  server-capability only while a handler is registered (otherwise the
-  server sends into the void), and the tool-exposure switch stays independent.
+  server-capability only while a handler exists (the `hasHandlers` mechanism
+  `mcp_servers_change` already uses); the tool-exposure switch stays independent.
 - **Resources**: interactive `ui://` resources are the interesting case — pi's
   built-in `read_mcp_resource` skips them; extensions are the right renderer.
 
