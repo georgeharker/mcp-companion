@@ -7,17 +7,23 @@ and is shared only if the hooks question draws engagement.
 ## Tracker status (2026-10-07)
 
 - **#10590** (enabler PR, fork georgeharker:extension-host-provided-pi-mcp):
-  auto-closed — upstream gate: PRs need prior `lgtm`; issues review daily.
-- **#10589** (hooks shape question): auto-closed + `no-action`. The label is the
-  UNIFORM buffer label (every auto-closed issue carries it — not a verdict on
-  substance). Rewritten to the required Contribution Proposal template
-  (what/why/how, one screen) + AI-disclosure comment per CONTRIBUTING.
+  auto-closed — PRs need prior `lgtm` approval.
+- **#10589** (hooks shape question): CLOSED `no-action` + `not_planned`.
+  **CORRECTED READ (2026-10-07, empirical):** the earlier "uniform buffer,
+  daily sweep, patience" framing was wrong. The `no-action` label is TERMINAL —
+  paired with `not_planned` on 100% of sampled issues (recent batch back to
+  #2158, ~8k issues of history); ZERO no-action issues open anywhere; ZERO
+  reopen events in sampled timelines (incl. #10599). CONTRIBUTING's
+  "reviewed daily, worthwhile ones reopened" does not evidence itself in the
+  tracker's behavior. Treat as closed with no intent, awaiting nothing.
 - **#10599** (independent report: reload's invalidate-first/replace-last =
-  stale-ctx window): we corroborated with the crash-escape variant (three pi
-  deaths 2026-10-04, crashes.json verified) + our sweep as the mitigation.
-  Bug-class issues reopen easiest; goodwill there feeds the lgtmi/lgtm ladder.
-- Pocket moves if the sweep passes next week: Discord route ("may I open the
-  six-line PR? issue #10589"); or split the ask to elicitation-alone.
+  stale-ctx window): corroborated with the crash-escape variant (three pi
+  deaths 2026-10-04, verified) + our sweep as the mitigation. Same terminal
+  label applies to it — the comment stands as public record, not a bet.
+- **Primary upstream route now = Discord** (CONTRIBUTING directs urgent items
+  there): short post = enabler-PR approval ask (six lines, issue #10589) +
+  hooks shape question with the published extension as evidence. Smallest-ask
+  possible per interaction; the three-feature RFC does not fit the tracker.
 - Product-side: zero dependency on any of this — pi-mcp ships as a real dep.
 
 ---
