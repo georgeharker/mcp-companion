@@ -11,6 +11,7 @@
 // does). No custom renderers — pi's default tool rendering.
 
 import { spawn } from "node:child_process"
+import { safeHasUi } from "./runner-stale.js"
 import type { ToolCallContext, ToolDefinition } from "../pi.js"
 import type { CombinerConnection, ToolSummary } from "./types.js"
 import { compileSafeRegex, rankTools, regexMatches, type SearchableTool } from "./ranking.js"
@@ -41,20 +42,24 @@ export function openInBrowser(url: string): void {
     }
 }
 
-/** Append the interactive-UI line + auto-open for results carrying a ui:// resource. */
+/** Append the interactive-UI line + auto-open for results carrying a ui:// resource.
+ *  Takes the hasUi BOOLEAN resolved at execute entry (see client/runner-stale.ts):
+ *  reading ctx here — after the upstream call already ran — would let the reload
+ *  window's throwing getter (pi#10599) turn a completed call into a rejection the
+ *  model might retry, re-executing it. */
 function withUiResource(
     connection: CombinerConnection,
     deps: { uiAutoOpen?: boolean },
     text: string,
     result: unknown,
-    ctx: ToolCallContext | undefined,
+    hasUi: boolean,
 ): string {
     const uri = toolUiResourceUri(result)
     if (!uri) return text
     const url = connection.uiUrlFor(uri)
     if (!url) return text
-    if (deps.uiAutoOpen !== false && ctx?.hasUI) openInBrowser(url)
-    return `${text}\n\ninteractive: ${url}${deps.uiAutoOpen !== false && ctx?.hasUI ? " (opened in your browser)" : ""}`
+    if (deps.uiAutoOpen !== false && hasUi) openInBrowser(url)
+    return `${text}\n\ninteractive: ${url}${deps.uiAutoOpen !== false && hasUi ? " (opened in your browser)" : ""}`
 }
 
 const PARAMETERS: Record<string, unknown> = {
@@ -141,6 +146,9 @@ export function createMcpTool(deps: ProxyToolDeps): ToolDefinition {
         parameters: PARAMETERS,
         ...proxyRenderers(toolName),
         execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+            // SAFETY: read the guarded ctx ONCE, before any await (runner-stale
+            // rule) — never re-enter ctx after the upstream call ran.
+            const hasUi = safeHasUi(ctx)
             const p = params as Record<string, unknown>
             // ── call ──
             if (typeof p.tool === "string" && p.tool) {
@@ -164,7 +172,7 @@ export function createMcpTool(deps: ProxyToolDeps): ToolDefinition {
                 }
                 const result = await connection.callTool(match!.name, args)
                 const raw = renderToolResult(result)
-                const text = withUiResource(connection, deps, raw, result, ctx)
+                const text = withUiResource(connection, deps, raw, result, hasUi)
                 if ((result as { isError?: boolean })?.isError) throw new Error(text)
                 return textResult(text, { mode: "call", tool: match!.name, server: serverOf(match!.name) })
             }

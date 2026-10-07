@@ -23,6 +23,7 @@ import type { ExtensionAPI, ToolDefinition } from "../pi.js"
 import type { NativeCombinerConnection, ResourceSummary } from "./combiner-connection.js"
 import { isInteractiveResource, openInBrowser, renderResourceResult } from "../client/widget-support.js"
 import { resourceNameToToolName, resourceServer } from "../client/resource-naming.js"
+import { isRunnerStaleError, runnerStaleHint, safeHasUi } from "../client/runner-stale.js"
 import type { ServerFilter } from "../client/config-ladder.js"
 
 export type NativeResourceOptions = {
@@ -94,6 +95,11 @@ function toReadTool(toolName: string, resource: ResourceSummary, opts: NativeRes
         exposure: resolveResourceExposure(opts, toolName),
         namespace: { name: "mcp_combiner", description: "mcp-combiner aggregated tools" },
         execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+            // SAFETY: guarded ctx read ONCE at entry, never re-read after the await
+            // (client/runner-stale.ts — a mid-window read would reject a COMPLETED
+            // resource read; the model retrying would re-read, which is at least
+            // read-only, but the failure text helps nobody).
+            const hasUi = safeHasUi(ctx)
             try {
                 const result = await opts.connection.readResource(resource.uri)
                 // Compute the URL PER CALL: the session token changes across /new and
@@ -104,10 +110,13 @@ function toReadTool(toolName: string, resource: ResourceSummary, opts: NativeRes
                 let text = renderResourceResult(result)
                 if (url) {
                     text = `${text}\n\ninteractive: ${url}`
-                    if (opts.uiAutoOpen !== false && ctx?.hasUI) openInBrowser(url)
+                    if (opts.uiAutoOpen !== false && hasUi) openInBrowser(url)
                 }
                 return { content: [{ type: "text", text }], details: { mode: "resource", uri: resource.uri, url: url || undefined } }
             } catch (e) {
+                if (isRunnerStaleError(e)) {
+                    throw new Error(runnerStaleHint(toolName))
+                }
                 throw new Error(`${toolName}: resource read failed (${e instanceof Error ? e.message : String(e)})`)
             }
         },

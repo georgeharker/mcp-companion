@@ -54,6 +54,15 @@ tagged `vX.Y.Z`.
   documents the codemode activation quirk; lockfile regenerated; three
   transport-level regression tests added (fake combiner over pi-mcp's
   in-memory pair).
+- Runner-stale guard (pi earendil-works/pi#10599): pi's `reload()` invalidates
+  the extension runner BEFORE replacing it — a window of seconds in which any
+  guarded ctx read throws. Tool executes now read `ctx.hasUI` ONCE at entry
+  through a throwing-getter-safe helper (`client/runner-stale.ts`) and never
+  re-read past an await: a call that already executed can no longer be turned
+  into a rejection (whose model-retry would re-execute it). Runner-stale errors
+  that do surface get a recovery hint naming what happened and when retrying
+  is safe, instead of pi's raw assertion text. No auto-retry for this class:
+  unlike transport staleness, execution may already have happened.
 - Stale-ctx sweep (pi 1.0's hard assertion on `ctx.ui` reads from async
   callbacks): every async callback now uses a **captured ui object** (the
   getter asserts; the object doesn't), catches degrade to stderr and never

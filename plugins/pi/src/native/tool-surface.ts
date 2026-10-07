@@ -33,6 +33,7 @@ import type { NativeCombinerConnection, ToolSummary } from "./combiner-connectio
 import { applyServerFilter, matchesGlob, RESERVED_TOOL_NAMES } from "../client/tool-matching.js"
 import { renderSchemaSignature } from "../client/schema-signature.js"
 import { toLlmContent, type CallToolResult } from "@earendil-works/pi-mcp"
+import { isRunnerStaleError, runnerStaleHint } from "../client/runner-stale.js"
 import type { ServerFilter } from "../client/config-ladder.js"
 
 export type NativeToolSurfaceOptions = {
@@ -117,6 +118,11 @@ function toNativeTool(sum: ToolSummary, conn: NativeCombinerConnection, exposure
             } catch (e) {
                 // pi's error convention: THROWING marks the call an error (no isError
                 // property on successful results).
+                if (isRunnerStaleError(e)) {
+                    // pi#10599: a completed call must not surface pi's raw stale-text
+                    // — name what happened, when retrying is safe.
+                    throw new Error(isRunnerStaleError(e) ? runnerStaleHint(name) : undefined as never)
+                }
                 throw e instanceof Error ? e : new Error(String(e))
             }
         },
