@@ -311,7 +311,7 @@ done
 
 [ "$do_commit" = 0 ] && { echo "files updated; skipped commit (--no-commit)"; exit 0; }
 
-git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"} ${INSTRS+"${INSTRS[@]}"}
+git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"} ${INSTRS+"${INSTRS[@]}"} ${CLIENT_INFO_FILE+"$CLIENT_INFO_FILE"}
 if [ "$is_dev" = 1 ]; then
   git -C "$ROOT" commit -m "release: $TAG — pi npm dev channel"
 else
