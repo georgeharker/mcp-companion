@@ -15,7 +15,11 @@ and is shared only if the hooks question draws engagement.
   #2158, ~8k issues of history); ZERO no-action issues open anywhere; ZERO
   reopen events in sampled timelines (incl. #10599). CONTRIBUTING's
   "reviewed daily, worthwhile ones reopened" does not evidence itself in the
-  tracker's behavior. Treat as closed with no intent, awaiting nothing.
+  tracker's behavior. The label is also WRITE-ONCE in observed history: zero
+  unlabeled (removal) events on any sampled issue — no reopen AND no label
+  removal from #2158 to ours. Treat as closed with no intent, awaiting
+  nothing; engagement, if it ever happens, will surface as label removal
+  (watch for that exact event, nothing else).
 - **#10599** (independent report: reload's invalidate-first/replace-last =
   stale-ctx window): corroborated with the crash-escape variant (three pi
   deaths 2026-10-04, verified) + our sweep as the mitigation. Same terminal
