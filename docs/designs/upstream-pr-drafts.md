@@ -4,6 +4,22 @@ Companion to `upstream-extension-seams.md`. **PR A files alone** (0.16.0 is
 shipped — the stable citation exists); the RFC sketch below stays in our pocket
 and is shared only if the hooks question draws engagement.
 
+## Tracker status (2026-10-07)
+
+- **#10590** (enabler PR, fork georgeharker:extension-host-provided-pi-mcp):
+  auto-closed — upstream gate: PRs need prior `lgtm`; issues review daily.
+- **#10589** (hooks shape question): auto-closed + `no-action`. The label is the
+  UNIFORM buffer label (every auto-closed issue carries it — not a verdict on
+  substance). Rewritten to the required Contribution Proposal template
+  (what/why/how, one screen) + AI-disclosure comment per CONTRIBUTING.
+- **#10599** (independent report: reload's invalidate-first/replace-last =
+  stale-ctx window): we corroborated with the crash-escape variant (three pi
+  deaths 2026-10-04, crashes.json verified) + our sweep as the mitigation.
+  Bug-class issues reopen easiest; goodwill there feeds the lgtmi/lgtm ladder.
+- Pocket moves if the sweep passes next week: Discord route ("may I open the
+  six-line PR? issue #10589"); or split the ask to elicitation-alone.
+- Product-side: zero dependency on any of this — pi-mcp ships as a real dep.
+
 ---
 
 ## PR A — Host-provide `@earendil-works/pi-mcp` to extensions
