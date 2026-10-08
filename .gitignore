@@ -20,3 +20,6 @@ _quarto-deploy.yml
 *.egg-info/
 .DS_Store
 /node_modules
+
+# Vitest run metadata
+.vitest/
