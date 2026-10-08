@@ -64,6 +64,10 @@ export type ToolParameters = Record<string, unknown>
 
 export type ToolCallContext = ExtensionContext & {
     onUpdate?: (update: { level: "info" | "warn" | "error"; message: string }) => void
+    /** The active model (pi passes it on tool calls); the tool-result guard reads
+     *  `input` for image-visibility parity with the read tool. Runtime has more
+     *  members (inputLimits etc.) — declared only to the slice we use. */
+    model?: { input?: string[] }
 }
 
 export type TextBlock = { type: "text"; text: string }

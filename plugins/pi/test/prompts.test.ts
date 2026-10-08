@@ -15,7 +15,7 @@ import {
     resolvePromptArgs,
     sanitizePromptName,
 } from "../src/client/prompts.js"
-import type { PromptSummary } from "../src/client/connection.js"
+import type { PromptSummary } from "../src/client/types.js"
 
 function meta(overrides: Partial<PromptSummary> = {}): PromptSummary {
     return {

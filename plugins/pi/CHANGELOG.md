@@ -4,6 +4,23 @@ All notable changes to the Pi extension are documented here. The version moves
 in lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [Unreleased]
+
+### Changed
+
+- **Tool-result truncation spills instead of cutting** (`client/render.ts`): text over the
+  `maxResultChars` cap (default 16 KiB, setting `extensions/mcp-combiner.json`, env
+  `PI_MCP_COMBINER_MAX_RESULT_CHARS`) gets a surrogate-safe head + a notice naming a 0600
+  temp file with the FULL text (`/tmp/pi-mcp-*/<tool>.txt`) — recoverable via `read`, never
+  a mid-JSON dead end; `full_output_path` rides the result `details` (bash parity). Applied
+  on every surface: `mcp()` router calls, the native tool surface (previously UNGUARDED —
+  full 80 KB+ results went straight to the model), and `read_*` resources.
+- **Image-block handling unified** — images stay real `{type:"image"}` blocks on all call
+  paths (`mcp()`, native surface, `read_*`); the non-vision omission note (read-tool
+  parity, via the new guarded `safeModel` read in `runner-stale.ts`) replaces the old
+  pre-emptive flattening in the `mcp()` router. `widget-support.ts` re-exports the shared
+  guarded `renderResourceResult` from `render.ts` instead of its own 16 KB cut.
+
 ## [0.16.0] — 2026-10-04
 
 ### Removed

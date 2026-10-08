@@ -37,6 +37,8 @@ export type NativeResourceOptions = {
     directSpec?: string[] | "search" | (() => string[] | "search" | undefined)
     /** Auto-open the widget URL on read (index.ts's uiAutoOpen setting). */
     uiAutoOpen?: boolean
+    /** Cap on guarded result text before spill-to-file (maxResultChars setting). */
+    maxResultChars?: number
     log: (level: "info" | "warn" | "error", message: string) => void
 }
 
@@ -107,7 +109,7 @@ function toReadTool(toolName: string, resource: ResourceSummary, opts: NativeRes
                 // registration-time URL would carry a dead token after the first
                 // session switch.
                 const url = opts.connection.uiUrlFor(resource.uri)
-                let text = renderResourceResult(result)
+                let text = await renderResourceResult(result, { maxResultChars: opts.maxResultChars }, toolName)
                 if (url) {
                     text = `${text}\n\ninteractive: ${url}`
                     if (opts.uiAutoOpen !== false && hasUi) openInBrowser(url)

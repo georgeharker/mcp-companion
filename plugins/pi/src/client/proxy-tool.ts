@@ -11,17 +11,25 @@
 // does). No custom renderers — pi's default tool rendering.
 
 import { spawn } from "node:child_process"
-import { safeHasUi } from "./runner-stale.js"
-import type { ToolCallContext, ToolDefinition } from "../pi.js"
+import { safeHasUi, safeModel } from "./runner-stale.js"
+import type { ToolDefinition } from "../pi.js"
 import type { CombinerConnection, ToolSummary } from "./types.js"
 import { compileSafeRegex, rankTools, regexMatches, type SearchableTool } from "./ranking.js"
-import { renderDescribe, renderSearchHit, renderToolResult, textResult, toolUiResourceUri } from "./render.js"
+import {
+    renderDescribe,
+    renderSearchHit,
+    renderToolResultBlocks,
+    textResult,
+    toolUiResourceUri,
+} from "./render.js"
 import { proxyRenderers } from "./renderers.js"
 
 export type ProxyToolDeps = {
     connection: CombinerConnection
     /** Human label for error messages, e.g. "mcp". */
     toolName: string
+    /** Cap on guarded tool-result text before spill-to-file (maxResultChars setting). */
+    maxResultChars?: number
     /** Client-side server filter (mirrors the combiner-side token filter) — a GETTER
      *  so per-session re-resolution (worktrees, project switch) applies mid-flight. */
     getServerFilter?: () => { allow?: string[]; deny?: string[] } | undefined
@@ -149,6 +157,7 @@ export function createMcpTool(deps: ProxyToolDeps): ToolDefinition {
             // SAFETY: read the guarded ctx ONCE, before any await (runner-stale
             // rule) — never re-enter ctx after the upstream call ran.
             const hasUi = safeHasUi(ctx)
+            const model = safeModel(ctx)
             const p = params as Record<string, unknown>
             // ── call ──
             if (typeof p.tool === "string" && p.tool) {
@@ -171,10 +180,20 @@ export function createMcpTool(deps: ProxyToolDeps): ToolDefinition {
                     )
                 }
                 const result = await connection.callTool(match!.name, args)
-                const raw = renderToolResult(result)
-                const text = withUiResource(connection, deps, raw, result, hasUi)
+                const rendered = await renderToolResultBlocks(
+                    result,
+                    { maxResultChars: deps.maxResultChars, model },
+                    match!.name,
+                )
+                const text = withUiResource(connection, deps, rendered.text, result, hasUi)
                 if ((result as { isError?: boolean })?.isError) throw new Error(text)
-                return textResult(text, { mode: "call", tool: match!.name, server: serverOf(match!.name) })
+                const details: Record<string, unknown> = {
+                    mode: "call",
+                    tool: match!.name,
+                    server: serverOf(match!.name),
+                }
+                if (rendered.spillPath) details.full_output_path = rendered.spillPath
+                return { content: rendered.content, details }
             }
 
             // ── describe ──

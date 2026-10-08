@@ -1,28 +1,32 @@
-// Smoke test: exercise the built client half against the live combiner on :9741.
+// Smoke test: exercise the built client half (v0.16 native architecture) against
+// the live combiner on :9741.
 // Run: node scripts/smoke.mjs   (from plugins/pi)
-import { CombinerConnection, tokenedUrl } from "../dist/client/connection.js"
+//
+// The :9741 URLs below are INTENTIONAL loopback constants — this script's subject
+// is that live combiner instance (same convention as the original smoke; not a
+// config surface).
+//
+// Mode map (what changed vs the legacy smoke — the legacy script tested
+// script.ts / direct-tools.ts / connection.ts / resources.ts, all deleted by the
+// native factoring): the connection is NativeCombinerConnection (pi-mcp based),
+// the batch tool is gone (codemode replaces it — needs pi's runtime, covered by
+// vitest/note docs, not here), direct-tool promotion is pi's native exposure
+// (activateNativeTools), and the mcp() router + spill guard are exercised
+// end-to-end with a tiny cap.
+
+import { NativeCombinerConnection, tokenedUrl } from "../dist/native/index.js"
 import { rankTools } from "../dist/client/ranking.js"
 import { readLadder } from "../dist/client/config-ladder.js"
 import { handleElicitation } from "../dist/client/elicitation.js"
 import { formatPromptResult, parsePromptArgs, promptCommandName, resolvePromptArgs } from "../dist/client/prompts.js"
 import { countsFromHealth, footerText } from "../dist/client/footer.js"
-import { createScriptTool } from "../dist/client/script.js"
-import {
-    filterResources,
-    isInteractiveResource,
-    MCP_APP_MIME,
-    resourceNameToToolName,
-    resourceServer,
-} from "../dist/client/resources.js"
+import { isInteractiveResource, MCP_APP_MIME } from "../dist/client/widget-support.js"
 import { renderResourceResult } from "../dist/client/render.js"
 import { resolveSessionConfig, stripUrlToken, urlTokenOf } from "../dist/client/config-ladder.js"
-import {
-    activateFromSearch,
-    applyServerFilter,
-    matchesGlob,
-    resolveAllowlist,
-    syncAllowlistTools,
-} from "../dist/client/direct-tools.js"
+import { matchesGlob } from "../dist/client/tool-matching.js"
+import { resourceNameToToolName, resourceServer } from "../dist/client/resource-naming.js"
+import { activateNativeTools } from "../dist/native/index.js"
+import { readFile } from "node:fs/promises"
 
 const log = (level, message) => console.error(`[${level}] ${message}`)
 const results = []
@@ -50,8 +54,8 @@ console.log(
     `  combiner entry url: ${ladder.entry.url ?? "(none — defaults apply)"}; other servers: ${ladder.otherServers.join(", ") || "(none)"}`,
 )
 
-// 3. connect + listTools
-const conn = new CombinerConnection(
+// 3. connect + listTools (native pi-mcp transport)
+const conn = new NativeCombinerConnection(
     { baseUrl: "http://127.0.0.1:9741/mcp", bearerTokenEnv: "MCP_COMBINER_AUTH_TOKEN" },
     log,
 )
@@ -88,9 +92,10 @@ if (gh) {
     check("describe renders schema", false, "github_search_code not in list")
 }
 
-// 6. callTool — combiner meta-tool (harmless read)
+// 6. callTool — combiner meta-tool (harmless read). Native callTool THROWS on
+// isError (the transport carries server errors as exceptions — by design).
 try {
-    const r = await conn.callTool("combiner__status", {})
+    const r = await conn.callTool("combiner__status")
     const text = JSON.stringify(r)
     check("callTool combiner__status", text.includes("todoist") || text.length > 100, `${text.length} chars`)
 } catch (e) {
@@ -108,6 +113,9 @@ try {
     // nosemgrep: intentional loopback HTTP — this is the smoke test hitting the local combiner’s control plane.
     const del = await fetch("http://127.0.0.1:9741/sessions/token/pi-smoke-test/filter", { method: "DELETE", headers })
     check("token filter cleared", del.ok, `DELETE ${del.status}`)
+    // The un-filtered list needs a fresh LIST (the per-token cache is keyed to the filter state)
+    const restored = await conn.listTools(true)
+    check("filter removal restores the full list", restored.length >= tools.length, `${restored.length} tools`)
 } catch (e) {
     check("token filter", false, e.message)
 }
@@ -217,7 +225,7 @@ try {
     check("footer counts from LIVE /health", liveCounts.enabled >= 1, JSON.stringify(liveCounts))
 }
 
-// 13. resources: discovery, naming, filtering, live read
+// 12. interactive resources: naming, filtering, live read through the guard
 try {
     const resources = await conn.listResources()
     check(
@@ -226,11 +234,6 @@ try {
         `${resources.length} resources (e.g. ${resources[0]?.name ?? resources[0]?.uri})`,
     )
     const r = resources.find((x) => x.uri.startsWith("ui://")) ?? resources[0]
-    check(
-        "resource naming (adapter sanitizer)",
-        resourceNameToToolName("todoist-task-list") === "read_todoist_task_list".replace("read_", "") || true,
-        resourceNameToToolName(r.name ?? r.uri),
-    )
     check(
         "resource name → tool name",
         `read_${resourceNameToToolName("My Fancy Doc!!")}` === "read_my_fancy_doc",
@@ -241,25 +244,30 @@ try {
         resourceNameToToolName("4pi") === "resource_4pi",
         resourceNameToToolName("4pi"),
     )
+    check(
+        "resource server attribution (uri host)",
+        resourceServer({ uri: "ui://todoist/x", mimeType: MCP_APP_MIME }) === "todoist",
+        String(resourceServer({ uri: "ui://todoist/x", mimeType: MCP_APP_MIME })),
+    )
     const interactive = isInteractiveResource({ uri: "ui://todoist/x", mimeType: MCP_APP_MIME })
     check("mcp-app resource detected interactive", interactive, "")
-    const byServer = filterResources([{ uri: "ui://todoist/a" }, { uri: "ui://github/b" }, { uri: "plain.txt" }], {
-        allow: ["todoist"],
-    })
+    const { filterInteractiveResources } = await import("../dist/native/index.js")
+    const byServer = filterInteractiveResources(
+        [
+            { uri: "ui://todoist/a", mimeType: MCP_APP_MIME },
+            { uri: "ui://github/b", mimeType: MCP_APP_MIME },
+        ],
+        { allow: ["todoist"] },
+    )
     check(
-        "resource filter by uri host",
+        "interactive resource filter by uri host",
         byServer.length === 1 && byServer[0].uri === "ui://todoist/a",
         byServer.map((x) => x.uri).join(","),
     )
-    check(
-        "resource server attribution",
-        resourceServer({ uri: "ui://todoist/x" }) === "todoist",
-        resourceServer({ uri: "ui://todoist/x" }),
-    )
     const live = await conn.readResource(r.uri)
-    const text = renderResourceResult(live)
+    const text = await renderResourceResult(live)
     check(
-        "live readResource + guard",
+        "live readResource + guarded render",
         text.length > 0,
         `${text.length} chars, head: ${text.slice(0, 60).replace(/\n/g, " ")}`,
     )
@@ -267,107 +275,84 @@ try {
     check("resources", false, e.message)
 }
 
-try {
-    const tool = createScriptTool({ connection: conn, name: "mcpScript" })
-    const r = await tool.execute("t1", {
-        code: `
-            const hits = await tools.search("combiner status", { limit: 3 })
-            const lines = String(hits).split("\\n").filter(Boolean)
-            const desc = await tools.describe(lines[0].split(" — ")[0].split(" ")[0])
-            const status = await tools.call("combiner__status", {})
-            return { found: lines.length, described: desc.length, statusChars: String(status).length }`,
-    })
-    const txt = (res) =>
-        Array.isArray(res.content) ? res.content.map((b) => b.text ?? "").join("\n") : String(res.content)
-    const parsed2 = JSON.parse(txt(r))
-    check(
-        "script tool batches search+describe+call",
-        parsed2.found >= 1 && parsed2.statusChars > 50,
-        txt(r).slice(0, 120),
-    )
-    let boomErr = ""
-    try {
-        await tool.execute("t2", { code: "throw new Error('boom')" })
-    } catch (e) {
-        boomErr = e.message
-    }
-    check("script tool surfaces errors (throws)", boomErr.includes("boom"), boomErr.slice(0, 60))
-    let timeoutErr = ""
-    try {
-        await tool.execute("t3", { code: "await new Promise(() => {})", timeoutMs: 300 })
-    } catch (e) {
-        timeoutErr = e.message
-    }
-    check("script tool enforces timeout (throws)", timeoutErr.includes("timed out"), timeoutErr.slice(0, 60))
-} catch (e) {
-    check("script tool", false, e.message)
-}
-
-// 14. directTools: glob allowlist + search-mode activation
+// 13. native tool surface: exposure mapping + registration + live execute
 try {
     check(
         "glob matching",
         matchesGlob("github_search_code", "github_search_*") && !matchesGlob("github_search_code", "todoist_*"),
         "",
     )
-    const tools = await conn.listTools()
-    const promoted = resolveAllowlist(tools, ["combiner__status", "github_search_*"])
-    check(
-        "allowlist resolves globs against live tools",
-        promoted.some((t) => t.name === "combiner__status") &&
-            promoted.filter((t) => t.name.startsWith("github_search")).length >= 3,
-        `${promoted.length} tools promoted`,
-    )
-    const filtered = applyServerFilter(tools, { allow: ["github"] })
-    check(
-        "server filter for direct tools",
-        filtered.every((t) => t.name.startsWith("github_") || t.name.startsWith("combiner__")),
-        `${filtered.length} tools`,
-    )
-
-    // Registration mechanics via a fake pi register + live execute of a promoted tool.
     const registeredDefs = []
-    const deps = {
+    const fakePi = { registerTool: (t) => registeredDefs.push(t) }
+    const names = await activateNativeTools(fakePi, {
         connection: conn,
-        registered: new Set(),
-        reserved: new Set(["read", "mcp", "combiner"]),
-        register: (t) => registeredDefs.push(t),
+        serverFilter: { allow: ["combiner"] },
+        directSpec: ["combiner__status"],
+        warnLargeDirectExposure: false,
         log: () => {},
+    })
+    check("native surface registers tools", names.length > 0, `${names.length} names; ${registeredDefs.length} defs`)
+    const direct = registeredDefs.find((t) => t.name === "combiner__status")
+    const codemode = registeredDefs.find((t) => t.name === "combiner__refresh_tools")
+    check(
+        "exposure: allowlist glob → direct, rest → codemode",
+        direct?.exposure === "direct" && (codemode === undefined || codemode.exposure === "codemode"),
+        direct ? `combiner__status=${direct.exposure}` : "combiner__status absent",
+    )
+    check(
+        "direct def carries the combiner namespace",
+        direct?.namespace?.name === "mcp_combiner",
+        JSON.stringify(direct?.namespace ?? null),
+    )
+    if (direct) {
+        const r = await direct.execute("smoke", {}, undefined, undefined, { hasUI: false })
+        const text = Array.isArray(r.content) ? r.content.map((b) => b.text ?? "").join("\n") : String(r.content)
+        check("native direct tool executes live", text.length > 20, text.slice(0, 70))
+        check(
+            "under-cap result is not truncated",
+            !text.includes("Truncated") && r.details?.full_output_path === undefined,
+            `details keys: ${Object.keys(r.details ?? {}).join(",")}`,
+        )
     }
-    const added = syncAllowlistTools(promoted.slice(0, 3), ["*"], deps)
-    check(
-        "allowlist registers tools (idempotent, reserved refused)",
-        added === 3 && registeredDefs.length === 3,
-        `${added}/${registeredDefs.length}`,
-    )
-    const again = syncAllowlistTools(promoted.slice(0, 3), ["*"], deps)
-    check("re-sync adds nothing new", again === 0, `${again}`)
-    const first = registeredDefs.find((t) => t.name === "combiner__status")
-    check(
-        "promoted tool builds with schema + execute",
-        Boolean(first) && Boolean(first.parameters),
-        first?.name ?? "missing",
-    )
-    if (first) {
-        const r = await first.execute("smoke", {})
-        const rt = Array.isArray(r.content) ? r.content.map((b) => b.text ?? "").join("\n") : String(r.content)
-        check("promoted tool executes live", rt.length > 50, rt.slice(0, 60))
-    }
-    // Search-mode activation (disjoint slice — the first three are already registered)
-    const before = deps.registered.size
-    const activated = activateFromSearch(promoted.slice(3, 5), deps)
-    check(
-        "search-mode activates matched tools",
-        activated.length >= 1 && deps.registered.size > before,
-        activated.join(","),
-    )
 } catch (e) {
-    check("directTools", false, e.message)
+    check("native tool surface", false, e.message)
+}
+
+// 14. mcp() router + the SPILL GUARD end-to-end: tiny cap → truncated notice,
+// spill file with the FULL text, details.full_output_path.
+try {
+    const { createMcpTool } = await import("../dist/client/proxy-tool.js")
+    const tool = createMcpTool({
+        connection: conn,
+        toolName: "mcp",
+        maxResultChars: 64,
+    })
+    const r = await tool.execute("smoke", { tool: "combiner__status" }, undefined, undefined, { hasUI: false })
+    const text = Array.isArray(r.content) ? r.content.map((b) => b.text ?? "").join("\n") : String(r.content)
+    check("router call truncates over the cap", text.includes("Truncated"), `len=${text.length}`)
+    const spillPath = /Full content: (\S+)/.exec(text)?.[1] ?? r.details?.full_output_path
+    check("truncated notice + details name the spill file", Boolean(spillPath), String(spillPath))
+    if (spillPath) {
+        const full = await readFile(spillPath, "utf8")
+        check("spill file holds the full content", full.length > 64 && text.startsWith(full.slice(0, 10)), `full=${full.length} chars`)
+    }
+    check(
+        "details carry mode/tool/server",
+        r.details?.mode === "call" && r.details?.tool === "combiner__status" && r.details?.server === "combiner",
+        JSON.stringify(r.details?.tool ? { mode: r.details.mode, tool: r.details.tool, server: r.details.server } : r.details),
+    )
+    // Under the default cap the same call is NOT truncated.
+    const tool2 = createMcpTool({ connection: conn, toolName: "mcp" })
+    const r2 = await tool2.execute("smoke", { tool: "combiner__status" })
+    const t2 = Array.isArray(r2.content) ? r2.content.map((b) => b.text ?? "").join("\n") : String(r2.content)
+    check("default cap leaves small results untouched", !t2.includes("Truncated"), `len=${t2.length}`)
+} catch (e) {
+    check("mcp router + spill guard", false, e.message)
 }
 
 // 15. renderers: compact rows, collapse/expand, error styling (passthrough theme)
 {
-    const { proxyRenderers, directToolRenderers, argsPreview } = await import("../dist/client/renderers.js")
+    const { proxyRenderers, argsPreview } = await import("../dist/client/renderers.js")
     const theme = { fg: (_c, t) => t, bold: (t) => t }
     const pr = proxyRenderers("combiner")
     const callRow = pr.renderCall({ search: "github search code" }, theme, { toolCallId: "t" }).render(60)
@@ -408,13 +393,6 @@ try {
         "expanded result shows all lines",
         expanded.length === 3 && !expanded.some((l) => l.includes("Ctrl+O")),
         `${expanded.length} lines`,
-    )
-    const dr = directToolRenderers("combiner__status")
-    const dRow = dr.renderCall({ server: "github" }, theme, { toolCallId: "t" }).render(60)
-    check(
-        "direct tool call row",
-        dRow[0].includes("MCP combiner__status") && dRow[0].includes("server=github"),
-        JSON.stringify(dRow),
     )
     check(
         "argsPreview bounded",

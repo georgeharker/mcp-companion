@@ -401,6 +401,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
             createMcpTool({
                 connection,
                 toolName,
+                maxResultChars: settings.maxResultChars,
                 getServerFilter: () => sessionCfg?.serverFilter,
             }),
         )
@@ -417,6 +418,7 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
             exposeResources: settings.exposeResources !== false,
             uiAutoOpen: settings.uiAutoOpen !== false,
             warnLargeDirectExposure: settings.warnLargeDirectExposure,
+            maxResultChars: settings.maxResultChars,
             log: clientLog,
         })
     }

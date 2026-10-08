@@ -33,7 +33,8 @@ import type { NativeCombinerConnection, ToolSummary } from "./combiner-connectio
 import { applyServerFilter, matchesGlob, RESERVED_TOOL_NAMES } from "../client/tool-matching.js"
 import { renderSchemaSignature } from "../client/schema-signature.js"
 import { toLlmContent, type CallToolResult } from "@earendil-works/pi-mcp"
-import { isRunnerStaleError, runnerStaleHint } from "../client/runner-stale.js"
+import { renderToolResultBlocks } from "../client/render.js"
+import { isRunnerStaleError, runnerStaleHint, safeModel } from "../client/runner-stale.js"
 import type { ServerFilter } from "../client/config-ladder.js"
 
 export type NativeToolSurfaceOptions = {
@@ -52,6 +53,10 @@ export type NativeToolSurfaceOptions = {
      *  first call; the SAME object on every pass so the diffing + hidden-removal
      *  work. native/index.ts owns one per activation. */
     state?: NativeToolSurfaceState
+    /** Cap on guarded tool-result text before spill-to-file (maxResultChars setting).
+     *  Captured per Registration pass — changing it takes effect on the next
+     *  re-registration (/reload, per the settings file's read-only-at-load rule). */
+    maxResultChars?: number
     /** Warn when the direct-exposure set grows large (every declared schema rides in
      *  every request). Settings kill-switch: warnLargeDirectExposure (default true). */
     warnLargeDirectExposure?: boolean
@@ -94,7 +99,12 @@ const DIRECT_EXPOSURE_WARN_THRESHOLD = 50
 
 /** Turn one combiner ToolSummary into pi's ToolDefinition, plus the native-only fields
  *  pi 1.0 accepts on registerTool (exposure/namespace/annotations). */
-function toNativeTool(sum: ToolSummary, conn: NativeCombinerConnection, exposure: ToolDefinition["exposure"]): ToolDefinition {
+function toNativeTool(
+    sum: ToolSummary,
+    conn: NativeCombinerConnection,
+    exposure: ToolDefinition["exposure"],
+    maxResultChars?: number,
+): ToolDefinition {
     const name = sum.name
     return {
         name,
@@ -108,13 +118,27 @@ function toNativeTool(sum: ToolSummary, conn: NativeCombinerConnection, exposure
         exposure,
         namespace: COMBINER_NAMESPACE,
         annotations: sum.annotations,
-        execute: async (_toolCallId, params, signal) => {
+        execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+            // SAFETY: guarded ctx read ONCE at entry (runner-stale rule) — the model
+            // feeds the non-vision omission note (render parity with pi's read tool).
+            const model = safeModel(ctx)
             // The abort signal rides into the transport (callTool's options.signal):
             // cancellation cancels upstream work, and widget holds respect it
             // (notifications/cancelled).
             try {
                 const result = await conn.callTool(name, params, { signal })
-                return { ...toToolResult(result), details: result }
+                // Guard: text blocks join + spill over the char cap (notice names the
+                // 0600 temp file with the FULL text; never a mid-JSON dead end);
+                // images stay real blocks (toLlmContent already made them lossless).
+                const guarded = await renderToolResultBlocks(toToolResult(result),
+                    { maxResultChars, model }, name)
+                // SAFETY: CallToolResult is a JSON-RPC result object (plain key/value) —
+                // TS lacks the index signature, but spreading it into a Record<string,
+                // unknown> is exactly what renderers expect (details carry the full
+                // result; full_output_path is added below when text spilled).
+                const details: Record<string, unknown> = { ...(result as unknown as Record<string, unknown>) }
+                if (guarded.spillPath) details.full_output_path = guarded.spillPath
+                return { content: guarded.content, details }
             } catch (e) {
                 // pi's error convention: THROWING marks the call an error (no isError
                 // property on successful results).
@@ -176,7 +200,7 @@ export async function activateNativeTools(pi: ExtensionAPI, opts: NativeToolSurf
         if (state.names.has(sum.name) && state.signatures.get(sum.name) === sig) {
             continue
         }
-        pi.registerTool(toNativeTool(sum, opts.connection, exposure))
+        pi.registerTool(toNativeTool(sum, opts.connection, exposure, opts.maxResultChars))
         state.signatures.set(sum.name, sig)
         state.names.add(sum.name)
         fresh++

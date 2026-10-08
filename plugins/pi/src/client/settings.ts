@@ -49,6 +49,11 @@ export type CombinerSettings = {
     url?: string
     /** Notify (vs stderr-only) for connection lifecycle messages. */
     notify: boolean
+    /** Cap (chars) on MCP tool-result text before spill-to-file. Oversized results get
+     *  the head + a notice naming the 0600 temp file with the full content (recoverable
+     *  via `read`). Env PI_MCP_COMBINER_MAX_RESULT_CHARS wins. Default 16 KiB — was a
+     *  mid-JSON hard cut with no recovery story. */
+    maxResultChars: number
 }
 
 export const DEFAULT_SETTINGS: CombinerSettings = {
@@ -62,6 +67,7 @@ export const DEFAULT_SETTINGS: CombinerSettings = {
     uiAutoOpen: true,
     warnLargeDirectExposure: true,
     notify: true,
+    maxResultChars: 16 * 1024,
 }
 
 /** Pi's agent dir: `$PI_CODING_AGENT_DIR` when set, else the first existing of the
@@ -106,5 +112,16 @@ export function loadSettings(path = settingsPath()): CombinerSettings {
     if (typeof d.warnLargeDirectExposure === "boolean") out.warnLargeDirectExposure = d.warnLargeDirectExposure
     if (typeof d.url === "string" && d.url.trim()) out.url = d.url.trim()
     if (typeof d.notify === "boolean") out.notify = d.notify
+    if (typeof d.maxResultChars === "number" && Number.isFinite(d.maxResultChars)) {
+        out.maxResultChars = clampResultChars(d.maxResultChars)
+    }
+    // Env wins over the file (same precedence as PI_MCP_COMBINER_TOOL_NAME in index.ts).
+    const envChars = Number(process.env.PI_MCP_COMBINER_MAX_RESULT_CHARS)
+    if (Number.isFinite(envChars) && envChars > 0) out.maxResultChars = clampResultChars(envChars)
     return out
+}
+
+/** Sanity band for the result cap: low but readable ceiling/floor. */
+function clampResultChars(n: number): number {
+    return Math.min(4 * 1024 * 1024, Math.max(1024, Math.floor(n)))
 }

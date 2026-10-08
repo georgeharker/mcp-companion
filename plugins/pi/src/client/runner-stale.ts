@@ -33,6 +33,21 @@ export function safeHasUi(ctx: HasUiCtx): boolean {
     }
 }
 
+/** Intersected with HasUiCtx (shared `hasUI`) so pi's context types — which don't
+ *  declare `model` — satisfy TS's weak-type rule (no overlapping properties). */
+export type ModelCtx = HasUiCtx & { model?: { input?: string[] } } | undefined
+
+/** Read ctx.model (image support + input limits source, read-tool parity) without
+ *  ever letting the guarded getter throw. Same execute-time rule as safeHasUi: call
+ *  BEFORE any await, pass the value down. */
+export function safeModel(ctx: ModelCtx): { input?: string[] } | undefined {
+    try {
+        return ctx?.model
+    } catch {
+        return undefined
+    }
+}
+
 /** True when the error is pi's runner-staleness (pi#10599), whether raw or
  *  wrapped by our own catch-rethrows (the stable substring survives both). */
 export function isRunnerStaleError(e: unknown): boolean {

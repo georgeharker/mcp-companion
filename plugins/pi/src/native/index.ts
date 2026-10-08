@@ -37,6 +37,9 @@ export type NativeActivationOptions = {
     /** Warn when the direct-exposure set grows large; settings kill-switch
      *  warnLargeDirectExposure disables it (default true, i.e. warn). */
     warnLargeDirectExposure?: boolean
+    /** Cap on guarded tool-result text before spill-to-file (maxResultChars setting);
+     *  forwarded to the tool surface and the interactive read_* tools. */
+    maxResultChars?: number
     log: (level: "info" | "warn" | "error", message: string) => void
 }
 
@@ -62,6 +65,7 @@ export function activateNativeMode(
             directSpec: opts.directSpec,
             state: toolState,
             warnLargeDirectExposure: opts.warnLargeDirectExposure,
+            maxResultChars: opts.maxResultChars,
             log: opts.log,
         }).catch((e) =>
             opts.log("warn", `native tool surface failed: ${e instanceof Error ? e.message : String(e)}`),
@@ -74,6 +78,7 @@ export function activateNativeMode(
                     serverFilter: opts.serverFilter,
                     directSpec: opts.directSpec,
                     uiAutoOpen: opts.uiAutoOpen,
+                    maxResultChars: opts.maxResultChars,
                     log: opts.log,
                 },
                 resourceRegistered,
