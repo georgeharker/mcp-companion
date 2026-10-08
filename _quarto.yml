@@ -3,7 +3,7 @@ project:
   render:
     - index.md
     - README.md # README files must be listed explicitly; globs skip them
-    - plugins/README.md # agent-plugin install guide (Claude Code, OpenCode & Pi)
+    - plugins/README.md # agent-plugin install guide (CC, OpenCode & Pi)
     - plugins/opencode/README.md # OpenCode plugin options reference
     - plugins/pi/README.md # Pi extension (@geohar/pi-mcp-combiner) reference
     - combiner/README.md # standalone combiner package + inbound-auth reference
@@ -16,10 +16,11 @@ project:
     # setup lives in README.md's Authentication section.
     - "!docs/oauth.md"
     # docs/designs/ (design/investigation records) is not matched by the
-    # non-recursive docs/*.md glob — but the two README-linked design docs ARE
+    # non-recursive docs/*.md glob — but the README-linked design docs ARE
     # rendered (the docs harness link-checks READMEs against the render list):
     - docs/designs/interactive-resource-host.md
     - plugins/pi/docs/adapter-design.md
+    - plugins/pi/docs/call-chain.md # README-linked native-mode explainer
   # The project-config JSON Schema is linked from README.md and referenced by
   # $schema URLs; ship it with the site so the relative link resolves.
   resources:

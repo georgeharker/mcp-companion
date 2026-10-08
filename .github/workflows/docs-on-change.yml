@@ -11,6 +11,8 @@ on:
       - "plugins/README.md"
       - "plugins/opencode/README.md"
       - "plugins/pi/README.md"
+      - "plugins/pi/docs/adapter-design.md" # render-listed (README-linked)
+      - "plugins/pi/docs/call-chain.md" # render-listed (README-linked)
       - "docs/schemas/project.schema.json"
       - "_quarto.yml"
       - ".github/workflows/docs-on-change.yml"
