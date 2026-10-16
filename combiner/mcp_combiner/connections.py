@@ -111,6 +111,18 @@ _HEALTH_FAILURES_BEFORE_RECONNECT = _env_int("MCP_COMBINER_HEALTH_FAILURES", 3)
 # Seconds to await a just-connected upstream's first tools/list.
 _TOOLS_READY_TIMEOUT = _env_float("MCP_COMBINER_TOOLS_READY_TIMEOUT", 30.0)
 
+# Bound on the initialize handshake when opening a persistent connection to a
+# NON-OAuth upstream. fastmcp's default per-request read timeout is 300s, so an
+# upstream that accepts TCP but never answers made restarts/enables/reconnects
+# hang for five silent minutes each (seen live restarting an unresponsive HTTP
+# server). OAuth servers are exempt: their first connect legitimately blocks in
+# the interactive browser flow, bounded only by the 300s request read timeout.
+_CONNECT_TIMEOUT = _env_float("MCP_COMBINER_CONNECT_TIMEOUT", 30.0)
+# Bound on closing an upstream session at disconnect. ``stack.aclose()`` awaits
+# the (cancelled) session task, which can itself be wedged inside a hung HTTP
+# POST — without a bound, disconnect/restart wedges as long as the wedge does.
+_TEARDOWN_TIMEOUT = _env_float("MCP_COMBINER_TEARDOWN_TIMEOUT", 15.0)
+
 # How long the factory waits for an in-flight connect before giving up.
 _FACTORY_WAIT_TIMEOUT = 60.0  # seconds
 
@@ -526,7 +538,26 @@ class ConnectionManager:
             )
             # Enter the async-with context — this starts the session runner
             # and (for OAuth servers) triggers the auth flow.
-            await conn.stack.enter_async_context(client)
+            if conn.srv.auth:
+                # OAuth: entering the context may block in the interactive
+                # browser flow — do not bound it here.
+                await conn.stack.enter_async_context(client)
+            else:
+                # Plain/no-auth upstream: bound the handshake so a wedged
+                # upstream fails the open (→ backoff + monitor retry) instead
+                # of hanging the caller for fastmcp's 300s read timeout.
+                try:
+                    await asyncio.wait_for(
+                        conn.stack.enter_async_context(client), timeout=_CONNECT_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Connect for '%s' exceeded %ss (initialize never answered) "
+                        "— bailing out; the health monitor retries with backoff",
+                        conn.name,
+                        _CONNECT_TIMEOUT,
+                    )
+                    raise
             conn.client_ref[0] = client
             conn._backoff = _INITIAL_BACKOFF
             conn._auth_failed = False
@@ -639,7 +670,18 @@ class ConnectionManager:
             except asyncio.CancelledError:
                 pass
         try:
-            await conn.stack.aclose()
+            await asyncio.wait_for(conn.stack.aclose(), timeout=_TEARDOWN_TIMEOUT)
+        except asyncio.TimeoutError:
+            # aclose awaits the cancelled session task, which can be wedged
+            # inside a hung upstream POST; pop the task ourselves so
+            # disconnect/restart cannot hang on it.
+            logger.warning(
+                "Timed out closing session for '%s' after %ss — upstream wedged "
+                "mid-request; force-cancelling the session task",
+                conn.name,
+                _TEARDOWN_TIMEOUT,
+            )
+            _hard_kill_session(conn)
         except Exception as e:
             logger.debug("Error closing stack for '%s': %s", conn.name, e)
         conn.client_ref[0] = None
@@ -908,6 +950,16 @@ def build_http_transport(srv: ServerConfig) -> StreamableHttpTransport | SSETran
     if srv.transport == Transport.SSE:
         return SSETransport(url=url, headers=headers)
     return StreamableHttpTransport(url=url, headers=headers)
+
+
+def _hard_kill_session(conn: "_ManagedConnection") -> None:
+    """Best-effort cancel of a fastmcp session task ``aclose()`` failed to reap."""
+    client = conn.client_ref[0]
+    if client is None:
+        return
+    task = getattr(getattr(client, "_session_state", None), "session_task", None)
+    if task is not None and not task.done():
+        task.cancel()
 
 
 def _make_disconnected_client(

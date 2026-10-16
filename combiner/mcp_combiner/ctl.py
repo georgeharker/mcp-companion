@@ -62,9 +62,30 @@ async def _call_meta(args: argparse.Namespace, tool: str, tool_args: dict[str, A
     from fastmcp import Client
     from fastmcp.client.transports.http import StreamableHttpTransport
 
+    # The only bound fastmcp applies is its 300s read timeout, so a wedged
+    # combiner made e.g. `restart clickup` hang for five silent minutes —
+    # Ctrl-C was the only way out (seen live). Bound each meta call
+    # generously; a combiner still wedged after this needs `restart --force`,
+    # but the CLI then reports instead of hanging.
+    timeout_raw = os.environ.get("MCP_COMBINER_CTL_META_TIMEOUT", "120")
+    try:
+        timeout = float(timeout_raw)
+    except ValueError:
+        print(
+            f"warn: MCP_COMBINER_CTL_META_TIMEOUT={timeout_raw!r} is not numeric — using 120s",
+            file=sys.stderr,
+        )
+        timeout = 120.0
+
     transport = StreamableHttpTransport(f"{_base_url(args)}/mcp", headers=_auth_headers())
     async with Client(transport) as client:
-        result = await client.call_tool(tool, tool_args)
+        try:
+            result = await asyncio.wait_for(client.call_tool(tool, tool_args), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"meta call '{tool}' got no answer after {int(timeout)}s — the combiner "
+                f"at {_base_url(args)} may be wedged; try `mcp-combiner restart --force`"
+            )
         parts = []
         for item in result.content:
             text = getattr(item, "text", None)

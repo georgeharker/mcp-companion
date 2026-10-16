@@ -119,3 +119,61 @@ p = parent.providers[-1]
 assert "namespace='x'" not in repr(p)          # matcher branch 1 dead
 assert getattr(p, '_namespace', None) is None  # matcher branch 2 dead
 ```
+
+---
+
+## Follow-up (2026-10-15): a SECOND wedge mode — restart hangs, Ctrl-C needed
+
+The stale-provider root cause above is **fixed** (mount registry +
+`drop_server_providers` by object identity, with the "dropped 0 providers"
+warning). What wedged next was a different beast, hit by `restart clickup`:
+
+## Symptom
+
+`mcp-combiner restart-server clickup` (the ctl CLI, same path as
+`:MCPRestartServer`) **hung indefinitely** — no output until the user Ctrl-C'd.
+Interrupted, the traceback ends in:
+
+```text
+fastmcp/client/client.py: _await_with_session_monitoring → asyncio.wait → await waiter
+ctl.py: asyncio.run(args.func(args)) → KeyboardInterrupt
+```
+
+Two unbounded/long awaits make this reachable:
+
+1. **ctl side** — `_call_meta` awaits `client.call_tool` with no timeout at all;
+   the only bound fastmcp applies client-side is a 300s per-request read
+   timeout, and a server-side handler stuck in a non-request await is never
+   timed out by it. So a wedged combiner = a visibly hung CLI.
+2. **Combiner side** — `combiner__restart_server` itself awaits several steps
+   with no bound: `conn_manager.disconnect` → `_teardown` →
+   `conn.stack.aclose()` (awaits the session task, which can be wedged inside
+   a hung upstream POST) and `_open` → `enter_async_context` (the initialize
+   handshake, fastmcp default read timeout 300s). A wedged upstream made every
+   such await hang ~5 minutes — or forever on the aclose path.
+
+(Also note: Ctrl-C kills the ctl's MCP session, which cancels the in-flight
+server-side `restart_server` mid-flight — possibly between disconnect and
+remount, leaving the server unmounted. Another route to "it wedged".)
+
+## Fix (2026-10-15)
+
+Stop guessing where it hangs; bound every await on the restart path:
+
+- `connections.py` — `_CONNECT_TIMEOUT` (`MCP_COMBINER_CONNECT_TIMEOUT`, 30s):
+  bounds `enter_async_context` for **non-OAuth** upstreams (OAuth is exempt —
+  its first connect legitimately blocks in the interactive browser flow).
+  `_TEARDOWN_TIMEOUT` (`MCP_COMBINER_TEARDOWN_TIMEOUT`, 15s): bounds
+  `stack.aclose()` in `_teardown`; on expiry the fastmcp session task is
+  force-cancelled (`_hard_kill_session`) so disconnect/restart cannot wait on
+  a wedged POST.
+- `ctl.py` — `_call_meta` bounds `client.call_tool` at 120s
+  (`MCP_COMBINER_CTL_META_TIMEOUT`), raising a clean
+  `error: meta call '...' got no answer ... try \`mcp-combiner restart --force\``
+  via the existing catch-all in `run()`.
+
+With both, an unresponsive upstream now fails a restart in bounded time — the
+restart returns an error, the health monitor retries with backoff, and the CLI
+reports instead of hanging. Verified live against a black-hole (accepts TCP,
+never answers) upstream for both bounded paths.
+
