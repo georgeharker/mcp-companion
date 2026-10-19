@@ -28,7 +28,7 @@
 // tools the server REMOVED are re-registered `hidden` so they stop being
 // callable/declared rather than lingering as broken names.
 
-import type { ExtensionAPI, ToolDefinition, ToolParameters } from "../pi.js"
+import type { ExtensionAPI, ToolDefinition, ToolParameters, ToolResult } from "../pi.js"
 import type { NativeCombinerConnection, ToolSummary } from "./combiner-connection.js"
 import { applyServerFilter, matchesGlob, RESERVED_TOOL_NAMES } from "../client/tool-matching.js"
 import { renderSchemaSignature } from "../client/schema-signature.js"
@@ -106,7 +106,7 @@ function toNativeTool(
     maxResultChars?: number,
 ): ToolDefinition {
     const name = sum.name
-    return {
+    const def: ToolDefinition = {
         name,
         label: name,
         description: sum.description ?? name,
@@ -132,13 +132,20 @@ function toNativeTool(
                 // images stay real blocks (toLlmContent already made them lossless).
                 const guarded = await renderToolResultBlocks(toToolResult(result),
                     { maxResultChars, model }, name)
+                // Structured passthrough (pi ≥ 1.2 dual channel): when the upstream served
+                // structuredContent, ride it to the result so codemode scripts (and render
+                // handlers that keep content) see the machine-readable value. When the
+                // result only carries content, omit — pi treats absence as "text-only".
+                const structured = (result as { structuredContent?: unknown }).structuredContent
                 // SAFETY: CallToolResult is a JSON-RPC result object (plain key/value) —
                 // TS lacks the index signature, but spreading it into a Record<string,
                 // unknown> is exactly what renderers expect (details carry the full
                 // result; full_output_path is added below when text spilled).
                 const details: Record<string, unknown> = { ...(result as unknown as Record<string, unknown>) }
                 if (guarded.spillPath) details.full_output_path = guarded.spillPath
-                return { content: guarded.content, details }
+                const out: ToolResult = { content: guarded.content, details }
+                if (structured !== undefined) out.structuredContent = structured
+                return out
             } catch (e) {
                 // pi's error convention: THROWING marks the call an error (no isError
                 // property on successful results).
@@ -151,6 +158,11 @@ function toNativeTool(
             }
         },
     }
+    // pi ≥ 1.2: declaring the upstream's outputSchema lets codemode scripts resolve
+    // the result's structuredContent instead of re-parsing stringified text.
+    // Optional on ToolDefinition so 0.99.x hosts ignore it (like exposure/namespace).
+    if (sum.outputSchema) def.outputSchema = sum.outputSchema as ToolParameters
+    return def
 }
 
 /** Registration for a tool the combiner no longer offers: same name (replaces the old

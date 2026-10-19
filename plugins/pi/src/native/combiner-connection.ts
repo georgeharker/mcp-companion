@@ -58,6 +58,10 @@ export type ToolSummary = {
     name: string
     description?: string
     inputSchema?: unknown
+    /** JSON Schema of the tool's structured content, carried straight to pi ≥ 1.2's
+     *  registerTool(outputSchema) so codemode scripts resolve the structured value.
+     *  Optional so 0.99.x hosts and schema-less upstreams leave it undefined. */
+    outputSchema?: unknown
     /** MCP tool annotations, carried straight through to pi.registerTool so pi's
      *  permission extensions can classify calls. */
     annotations?: ToolAnnotationsSummary
@@ -435,6 +439,7 @@ export class NativeCombinerConnection implements CombinerConnection {
             name: t.name,
             description: t.description,
             inputSchema: t.inputSchema,
+            outputSchema: t.outputSchema,
             annotations: t.annotations as ToolAnnotationsSummary | undefined,
         }))
         this.tools = tools

@@ -97,6 +97,12 @@ export type ToolResult = {
      *  wider-than-TextBlock shape keeps MCP image results lossless (toLlmContent). */
     content: (TextBlock | ImageBlock)[]
     details?: unknown
+    /** Machine-readable passthrough for tools that declare an outputSchema (pi ≥ 1.2
+     *  dual-channel contract: codemode scripts resolve to this INSTEAD of the text).
+     *  Must be set whenever a tool declares outputSchema; omit when the upstream
+     *  didn't answer with one (rare but spec-legal even under a declared schema).
+     *  Handlers that modify content on redact paths must keep/replace this too. */
+    structuredContent?: unknown
     terminate?: boolean
 }
 
@@ -106,6 +112,10 @@ export type ToolDefinition = {
     description: string
     promptSnippet?: string
     parameters: ToolParameters
+    /** JSON Schema of `structuredContent` in results (pi ≥ 1.2 host contract;
+     *  optional so 0.99.x hosts drop it). Declaring it makes codemode scripts
+     *  resolve to the structured value instead of re-parsing text output. */
+    outputSchema?: ToolParameters
     execute: (
         toolCallId: string,
         params: Record<string, unknown>,
