@@ -7,7 +7,10 @@ that one process.
 **It reuses Pi's MCP stack rather than replacing it.** The transport is
 `@earendil-works/pi-mcp` — Pi's own MCP client library (carried at `^1.2.0`; host-providing it
 as a true peer is asked upstream — until then pi's loader shares only pi-ai/agent-core/tui/typebox, so the
-physical copy is the sanctioned route and is safe: no pi-mcp object crosses into pi's copies) —
+physical copy is the sanctioned route and is safe: no pi-mcp object crosses into pi's copies). One
+flip-condition to watch: **if pi ever host-provides pi-mcp, drop the `dependencies` entry in the same
+release** — the carried copy would then shadow the host's module mapping (the antipattern
+`docs/packages.md` warns about), so the manifest must move with it:
 and Pi's built-in MCP support keeps its role (`/mcp`, codemode, `tool_search`). The
 extension is *additive*; it adds the pieces Pi's built-in can't do:
 
