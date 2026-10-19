@@ -1,29 +1,41 @@
 name: Vendored drift
 
-# The sharedserver resolver under plugins/claude/bin/ is a byte-identical copy of the
-# one in georgeharker/sharedserver. There is no way to share it — marketplace symlinks
-# do not cross repos, plugin dependencies control installation but not hook order, and
-# OpenCode has no dependency mechanism at all.
+# The sharedserver resolver under plugins/claude/bin/ is a byte-identical
+# copy of the one in georgeharker/sharedserver. There is no way to share it —
+# marketplace symlinks do not cross repos, plugin dependencies control
+# installation but not hook order, and OpenCode has no dependency mechanism.
 #
-# A copy is fine. An UNDETECTED copy is not: that is how the shared bump-version.sh
-# silently diverged across four repos and had the same fix applied three times. This
-# job re-runs the sync and fails if anything changed.
+# A copy is fine. An UNDETECTED copy is not: that is how the shared
+# bump-version.sh silently diverged across four repos and had the same fix
+# applied three times. This job re-runs the sync and fails on any change.
+#
+# ENFORCEMENT (settled 2026-10-19, keep-as-is): the "main-required-checks"
+# ruleset names this check, but a required status check can only gate a
+# PULL REQUEST — this repo's flow is direct admin pushes to main, which
+# always land BEFORE this job has a run, so GitHub auto-bypasses with
+# "Required status check "vendored drift" is expected" on every push.
+# That bypass line is expected, deliberate noise kept as a nudge; the
+# working gate is this post-push run plus the weekly schedule. Deleting
+# the ruleset would silence the nudge; a PR-only flow would give the check
+# pre-merge teeth but change our release push habits. This is not a bug
+# in the workflow.
 
 on:
   pull_request:
   push:
     branches: [main, dev]
-  # Upstream can move without anything changing here, so also check on a schedule —
-  # otherwise a drifted copy stays green until someone happens to touch the repo.
+  # Upstream can move without anything changing here, so also check on a
+  # schedule — otherwise a drifted copy stays green until someone happens
+  # to touch the repo.
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
 jobs:
   check:
-    # The check-run name is what branch protection matches on, and the bare job id
-    # "check" collides with ci.yml's job of the same name — name it explicitly so the
-    # required status check on main is unambiguous.
+    # The check-run name is what branch protection matches on, and the bare
+    # job id "check" collides with ci.yml's job of the same name — name it
+    # explicitly so the required status check on main is unambiguous.
     name: vendored drift
     runs-on: ubuntu-latest
     steps:
@@ -36,19 +48,24 @@ jobs:
         run: |
           changed="$(git diff --name-only)"
           if [ -z "$changed" ]; then
-            echo "vendored files match upstream $(cat plugins/.sharedserver-version)"
+            stamp="$(cat plugins/.sharedserver-version)"
+            echo "vendored files match upstream $stamp"
             exit 0
           fi
-          # Only the version stamp moved: the vendored CODE is byte-identical, upstream
-          # just cut a release that did not touch the resolver. Not drift worth failing
-          # on — warn so the stamp is refreshed on a future commit, but pass.
+          # Only the version stamp moved: the vendored CODE is byte-identical,
+          # upstream just cut a release that did not touch the resolver. Not
+          # drift worth failing on — warn so the stamp is refreshed on a
+          # future commit, but pass.
           if [ "$changed" = "plugins/.sharedserver-version" ]; then
-            echo "::warning::vendored code is byte-identical to upstream; only the .sharedserver-version stamp lags. Run scripts/sync-vendored.sh and commit to refresh it."
+            echo "::warning::vendored code is byte-identical to upstream; only"
+            echo "  the .sharedserver-version stamp lags. Run"
+            echo "  scripts/sync-vendored.sh and commit to refresh it."
             git --no-pager diff plugins/.sharedserver-version
             exit 0
           fi
           # Real drift: the vendored code itself differs from upstream.
-          echo "::error::vendored code is out of date — run scripts/sync-vendored.sh and commit"
+          echo "::error::vendored code is out of date — run"
+          echo "  scripts/sync-vendored.sh and commit"
           git --no-pager diff --stat
           git --no-pager diff
           exit 1
