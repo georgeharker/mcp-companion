@@ -63,7 +63,7 @@
     "node": ">=18.0.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-mcp": "^1.0.2",
+    "@earendil-works/pi-mcp": "^1.2.0",
     "@earendil-works/pi-tui": "^0.85.1"
   },
   "peerDependenciesMeta": {
@@ -72,6 +72,6 @@
     }
   },
   "dependencies": {
-    "@earendil-works/pi-mcp": "^1.0.2"
+    "@earendil-works/pi-mcp": "^1.2.0"
   }
 }

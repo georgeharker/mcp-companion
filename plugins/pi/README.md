@@ -5,7 +5,9 @@ combiner process fronts *all* your MCP servers, and every client you use talks t
 that one process.
 
 **It reuses Pi's MCP stack rather than replacing it.** The transport is
-`@earendil-works/pi-mcp` — Pi's own MCP client library (peer dependency, `^1.0.2`) —
+`@earendil-works/pi-mcp` — Pi's own MCP client library (carried at `^1.2.0`; host-providing it
+as a true peer is asked upstream — until then pi's loader shares only pi-ai/agent-core/tui/typebox, so the
+physical copy is the sanctioned route and is safe: no pi-mcp object crosses into pi's copies) —
 and Pi's built-in MCP support keeps its role (`/mcp`, codemode, `tool_search`). The
 extension is *additive*; it adds the pieces Pi's built-in can't do:
 
@@ -94,8 +96,8 @@ router, `read_<resource>` tools, `/<server>__<prompt>` slash commands, a footer 
   combiner ≥ 0.8.0 (version-gated automatically).
 - A combiner **`servers.json`** (auto-probe locations below).
 - pi-mcp-adapter **not** required.
-- **Pi ≥ 1.0** with its bundled `@earendil-works/pi-mcp` (peer dependency,
-  `^1.0.2`) — the transport is Pi's own MCP client library.
+- **Pi ≥ 1.0** with its bundled `@earendil-works/pi-mcp` (resolved in-tree at
+  `^1.2.0`) — the transport is Pi's own MCP client library.
 
 ## Configuration — three layers
 
