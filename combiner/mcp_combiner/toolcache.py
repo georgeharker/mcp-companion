@@ -48,8 +48,17 @@ class PrimeOutcome(str, Enum):
     FAILED = "failed"
 
 
-# Timeout for individual upstream server queries during tools/list
-UPSTREAM_TOOL_LIST_TIMEOUT = 5.0  # seconds
+# Per-provider bound for LISTING calls (tools/resources/prompts) inside an
+# aggregate fetch, applied by mounts.BoundedListProvider: a persistent upstream
+# in a half-dead state (external combiner reset, wedged POST) can otherwise
+# make one provider's list await forever and wedge tools/list for every
+# downstream session (see COMBINER-RESTART-BUG.md follow-up 2026-10-20).
+# Tunable via env — a cold OAuth upstream on a high-latency link can need
+# longer than the default, at the cost of the wedge bound being loose.
+try:
+    UPSTREAM_TOOL_LIST_TIMEOUT = float(os.environ["MCP_COMBINER_LIST_TIMEOUT"])
+except (KeyError, ValueError):
+    UPSTREAM_TOOL_LIST_TIMEOUT = 15.0  # seconds
 
 # How long to keep priming a just-restarted stdio/sharedserver proxy's tools/list
 # before giving up (the respawned process needs a moment to start serving).

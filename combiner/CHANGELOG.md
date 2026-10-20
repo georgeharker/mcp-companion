@@ -4,6 +4,34 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [0.17.4] — 2026-10-20
+
+### Fixed
+
+- **Wedged tools/list after an external combiner reset** — the wedge that made
+  every client (pi sessions, ctl) see endless "stale connection" warnings until
+  a bounce (COMBINER-RESTART-BUG.md follow-up 2026-10-20). Two layers:
+  - Every mounted upstream provider's LISTING (tools/resources/prompts) is now
+    time-bounded (`BoundedListProvider` wraps the mount;
+    `MCP_COMBINER_LIST_TIMEOUT`, default 15s) — `UPSTREAM_TOOL_LIST_TIMEOUT`,
+    previously defined and imported but never wired up, is finally live. A
+    wedged or half-dead upstream is logged and skipped from the aggregate
+    fetch instead of hanging it; its tools reappear when the health monitor
+    reconnects it.
+  - The single-flight tools/list fetch is bounded (`FETCH_TIMEOUT`,
+    `MCP_COMBINER_FETCH_TIMEOUT`, default 60s): the owner falls back to
+    last-known-good tools on timeout (same shape as its upstream-error path),
+    joiners never hang on a future whose owner died or was cancelled, and a
+    pre-wedged future (the historical stuck state) is dropped + served from
+    the stale cache instead of stranding every session forever.
+  - `test_tool_fetch_wedge.py` covers all paths; `test_mounts.py`'s e2e
+    restart/visibility suites cover the real mount shape (the bounded
+    provider sits UNDER fastmcp's namespace wrapper so call routing is
+    unaffected — verified by live round-trip tests).
+
+- **FastMCPProvider surface honesty in the fake tests** (`FakeCombiner`):
+  models `add_provider` to match the real mount path.
+
 ## [0.16.0] — 2026-10-04
 
 ### Added

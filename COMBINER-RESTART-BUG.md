@@ -177,3 +177,83 @@ restart returns an error, the health monitor retries with backoff, and the CLI
 reports instead of hanging. Verified live against a black-hole (accepts TCP,
 never answers) upstream for both bounded paths.
 
+
+---
+
+## Follow-up (2026-10-20): a THIRD wedge mode — external process reset wedges tools/list for every client forever
+
+Hit live with pi 1.3.0 against the combiner on :9741: after an external reset
+(sharedserver respawn with `--restore` at 10:33), tools/list stopped answering
+for EVERY downstream session. pi re-initialized fine (its `McpSessionExpiredError`
+retry-on-new-session path works — 404 "Session not found" on a stale session ID
+is spec-correct and handled), but every fresh session's tools/list then hung
+until pi's 60s timeout → an endless reconnect loop surfacing as "stale
+connection" warnings. Even a brand-new curl session wedged: initialize
+answered in 3ms, tools/list answered with nothing but SSE pings forever.
+
+### What the logs showed
+
+- The boot-time `tools/list: CACHE MISS - fetching fresh (no prior cache)` at
+  10:33:17 — the FIRST aggregate fetch — never completed (no
+  `tools/list: cached N tools`, no `CACHE HIT` for the rest of the process
+  lifetime).
+- Every subsequent Downstream ListToolsRequest logged only
+  `Processing request` + `downstream request ctxvar SET` and then nothing —
+  joiners of the single-flight don't log at info level.
+- `metrics-test` was in a `ClosedResourceError → reconnecting` loop; an
+  analogous half-dead persistent session's `provider.list_tools()` awaited
+  forever.
+
+### Root causes (two independent, compounding)
+
+1. **The aggregate fetch has no per-provider timeout.** FastMCP's
+   `AggregateProvider` gathers each mounted provider's `list_tools()` with
+   `return_exceptions=True` — errors are logged+skipped, but a HANG awaits
+   forever. `UPSTREAM_TOOL_LIST_TIMEOUT` sat in toolcache.py defined,
+   imported by server.py, and wired to NOTHING (dead code — the per-provider
+   bound it names was never implemented).
+2. **The single-flight future in ToolProcessingMiddleware._fetch_or_join has
+   no timeout and no cancellation release.** The owner of the 10:33:17 fetch
+   hung inside `call_next`; every later session did `is_owner=False → await
+   fut` — unbounded. Nothing ever resolved the future, so tools/list wedged
+   for every downstream session until process restart.
+
+### Fix (2026-10-20)
+
+- **Per-provider listing bound** — `mounts.BoundedListProvider` wraps every
+  upstream proxy at mount time, bounding `list_tools` /
+  `list_resources` / `list_prompts` / `list_resource_templates` (and the
+  `get_*` resolution, same bound) with `UPSTREAM_TOOL_LIST_TIMEOUT`
+  (`MCP_COMBINER_LIST_TIMEOUT`, default 15s; finally live code). A
+  timed-out provider is skipped from the aggregate fetch with a WARNING that
+  names it; its tools reappear via prime/monitor once reconnecting.
+  `get_tool` is bounded too (call routing), but the tool RUN path stays
+  unbounded — legitimate calls take minutes.
+  *Mount-shape note:* the bound must sit UNDER fastmcp's namespace wrapper —
+  `mount_server_provider` now replicates `mount()`'s provider construction
+  (`FastMCPProvider` when the proxy is a FastMCP) and passes the bounded
+  wrapper to `combiner.add_provider(..., namespace=…)`, so the stack is
+  `_WrappedProvider(Bounded(raw))` and the Namespace transform stays outside
+  the bound. Do NOT wrap the already-wrapped provider: base `Provider`'s
+  `_get_tool`/`_list_tools` defaults (and its read-only `transforms`
+  property) shadow `__getattr__` delegation and break call routing with
+  "Unknown tool" — the wrapper therefore explicitly overrides the full
+  `_list_*`/`_get_*` surface, mirroring `_WrappedProvider`'s delegation.
+- **Bounded single-flight** — `ToolProcessingMiddleware.FETCH_TIMEOUT`
+  (`MCP_COMBINER_FETCH_TIMEOUT`, default 60s): the owner's `_do_fetch` is
+  `wait_for`-bounded; on timeout it serves the last-known-good cache (same
+  shape as its upstream-error path). Joiners `wait_for`-bound on a
+  `shield`ed future, drop a wedged future from the slot, and fall back to
+  stale. Owner death (cancellation — e.g. its downstream session was
+  evicted mid-fetch) releases the joiners via a set exception.
+- Regression tests: `combiner/tests/test_tool_fetch_wedge.py` (provider
+  bound incl. real-mount round-trip; owner timeout; owner-cancel release;
+  pre-wedged joiner fallbacks).
+
+### Session-not-found on a stale session ID — not a bug
+
+Posting to a session ID the server no longer knows returns HTTP 404 with a
+JSON-RPC body `{"code":-32600, "message":"Session not found"}` — that IS the
+spec-correct answer (only `initialize` without a session ID creates one), and
+pi handles it correctly by re-initializing. The visible "stale connection"
+churn was the tools/list wedge above, not session handling.

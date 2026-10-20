@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Sequence
 from typing import Any, ClassVar, TypeGuard, cast
@@ -34,6 +35,13 @@ from mcp_combiner.toolcache import (
 )
 
 logger = logging.getLogger("mcp-combiner")
+
+# Whole-fetch bound for the single-flight owner (see ToolProcessingMiddleware.
+# FETCH_TIMEOUT). Tunable via env.
+try:
+    _FETCH_TIMEOUT = float(os.environ["MCP_COMBINER_FETCH_TIMEOUT"])
+except (KeyError, ValueError):
+    _FETCH_TIMEOUT = 60.0  # seconds
 
 
 def _is_uri(value: Any) -> TypeGuard[str]:
@@ -121,6 +129,8 @@ class ToolProcessingMiddleware(Middleware):
 
     CACHE_TTL = 300  # 5 minutes max cache age
 
+    FETCH_TIMEOUT = _FETCH_TIMEOUT
+
     # Single-flight coalescing for concurrent cache misses.
     # When the cache is empty/stale and many sessions request tools/list at
     # once (e.g. after a tools_list_changed broadcast), only the first caller
@@ -207,7 +217,21 @@ class ToolProcessingMiddleware(Middleware):
         call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
         cache_age: float,
     ) -> list[Tool]:
-        """Single-flight cache fill. First caller fetches; others await its result."""
+        """Single-flight cache fill. First caller fetches; others await its result.
+
+        Both waits are bounded (FETCH_TIMEOUT):
+
+        - The owner's aggregate fetch wraps fastmcp's no-timeout aggregation
+          over every mounted provider. A wedged upstream (external combiner
+          reset, half-dead persistent session) must not hold ONE session
+          open forever; on timeout the owner falls back to the
+          last-known-good cache exactly like _do_fetch's upstream-error path.
+        - A joiner awaiting the owner's future gets the same bound; if the
+          future is wedged (pre-bounded owner, or the owner's task was
+          cancelled between fetch start and result) the joiner clears the
+          slot and falls back to the stale cache, so the next fetch starts
+          fresh instead of piling onto a dead future.
+        """
         cls = type(self)
 
         async with cls._inflight_lock:
@@ -221,7 +245,7 @@ class ToolProcessingMiddleware(Middleware):
 
         if not is_owner:
             logger.debug("tools/list: joining in-flight fetch")
-            return await fut
+            return await self._join(cls, fut)
 
         if RUNTIME.tools.cache is None:
             # No prior cache (first fetch, or just invalidated). cache_age would
@@ -230,16 +254,64 @@ class ToolProcessingMiddleware(Middleware):
         else:
             logger.warning("tools/list: CACHE MISS - fetching fresh (cache_age=%.1fs)", cache_age)
         try:
-            tools = await self._do_fetch(context, call_next)
+            try:
+                tools = await asyncio.wait_for(
+                    self._do_fetch(context, call_next), timeout=cls.FETCH_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "tools/list: aggregate fetch did not complete within %.0fs — servicing from "
+                    "last-known-good tools; one upstream provider's listing is wedged or slow "
+                    "(see the per-provider bound warnings above/below for the culprit)",
+                    cls.FETCH_TIMEOUT,
+                )
+                # Same shape as _do_fetch's upstream-error path: serve the
+                # last-known-good cache, or nothing if none exists.
+                stale = RUNTIME.tools.cache
+                tools = list(stale) if stale is not None else []
             fut.set_result(tools)
             return tools
-        except Exception as exc:
-            fut.set_exception(exc)
+        except BaseException as exc:
+            # Owner died otherwise (cancellation, unexpected error): release
+            # the joiners. Without this, joiners awaiting a future that will
+            # never complete hang for as long as the process lives — the
+            # downstream-tools/list-wedged-forever failure seen after the
+            # 2026-10-20 combiner reset (see COMBINER-RESTART-BUG.md).
+            if not fut.done():
+                fut.set_exception(exc if isinstance(exc, Exception) else RuntimeError(exc))
             raise
         finally:
             async with cls._inflight_lock:
                 if cls._inflight is fut:
                     cls._inflight = None
+
+    async def _join(
+        self, cls: type["ToolProcessingMiddleware"], fut: asyncio.Future[list[Tool]]
+    ) -> list[Tool]:
+        """Await another session's in-flight fetch, bounded, with a stale fallback."""
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=cls.FETCH_TIMEOUT)
+        except (asyncio.TimeoutError, TimeoutError):
+            # The owner is wedged or slow and the bound expired. Drop the
+            # dead future from the slot (a still-running owner keeps ITS
+            # result; whoever resolves first wins) and serve last-known-good.
+            async with cls._inflight_lock:
+                if cls._inflight is fut and not fut.done():
+                    cls._inflight = None
+            stale = RUNTIME.tools.cache
+            if stale is not None:
+                logger.warning(
+                    "tools/list: joiner gave up on the in-flight fetch after %.0fs — "
+                    "serving %d last-known-good tool(s)",
+                    cls.FETCH_TIMEOUT,
+                    len(stale),
+                )
+                return list(stale)
+            raise TimeoutError(
+                f"tools/list fetch did not complete within {cls.FETCH_TIMEOUT:.0f}s and no "
+                "last-known-good list is available — retry shortly; the fetch path is "
+                "bounded so this cannot persist"
+            )
 
     async def _do_fetch(
         self,

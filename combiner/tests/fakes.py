@@ -30,7 +30,7 @@ class FakeCombiner:
         self.providers: list[Any] = []
         self.tools: dict[str, Any] = {}
 
-    def tool(self, *_args: Any, **_kwargs: Any):
+    def tool(self, *_args: Any, **_kwargs: Any) -> Any:
         def _decorator(fn: Any) -> Any:
             self.tools[fn.__name__] = fn
             return fn
@@ -38,6 +38,10 @@ class FakeCombiner:
         return _decorator
 
     def mount(self, proxy: Any, namespace: str) -> None:
+        self.providers.append(FakeProvider(namespace))
+
+    def add_provider(self, provider: Any, *, namespace: str = "") -> None:
+        """Matches FastMCP.add_provider: one provider entry under the namespace."""
         self.providers.append(FakeProvider(namespace))
 
 
