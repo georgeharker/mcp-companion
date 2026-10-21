@@ -510,6 +510,43 @@ class BindConfig(BaseModel):
     host: str = "127.0.0.1"
 
 
+class ValidationConfig(BaseModel):
+    """Schema-validation gates (top-level ``"validation"`` in servers.json).
+
+    Example JSON (top-level section)::
+
+        "validation": {"input": true}
+
+    Tri-state semantics: ``true`` forces validation on, ``false`` forces it
+    off, a missing key expresses no preference (the fastmcp/SDK default
+    applies). Launch-path flags take precedence: ``--input-validation`` /
+    ``--no-input-validation`` (or their ``MCP_COMBINER_*`` env forms) > the
+    config value > the SDK default.
+    """
+
+    input: bool | None = None
+    """Strict JSON-schema validation of tool *call arguments* against the
+    aggregated tool's inputSchema, before forwarding upstream. ``true`` — a
+    mismatched call fails at the combiner (``isError`` "Input validation
+    error: ...", no upstream call). ``False``/missing — inputs pass through
+    and the upstream decides (pydantic-strict servers reject permissively
+    typed calls; permissive ones accept junk keys)."""
+
+    output: bool | None = None
+    """Tool *result* validation against a declared outputSchema (tri-state,
+    see fastvalidate). ``false`` is the useful direction: the upstream
+    already validated its structured output, so the proxy re-check is
+    redundant per-call work on large responses."""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ValidationConfig":
+        """Parse the top-level ``validation`` config dict."""
+        return cls(
+            input=data.get("input"),
+            output=data.get("output"),
+        )
+
+
 class CombinerConfig(BaseModel):
     """Full combiner configuration."""
 
@@ -517,6 +554,7 @@ class CombinerConfig(BaseModel):
     shared_servers: dict[str, SharedServerConfig] = Field(default_factory=dict)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
+    validation: ValidationConfig = Field(default_factory=ValidationConfig)
     bind: BindConfig = Field(default_factory=BindConfig)
     permissions: PermissionPolicy | None = None
     """Global tool-call permission policy applied to every server, unless a
@@ -553,6 +591,11 @@ class CombinerConfig(BaseModel):
         raw_isolation: dict[str, Any] = raw.get("isolation", {})
         isolation = IsolationConfig.from_dict(raw_isolation) if raw_isolation else IsolationConfig()
 
+        raw_validation: dict[str, Any] = raw.get("validation", {})
+        validation = (
+            ValidationConfig.from_dict(raw_validation) if raw_validation else ValidationConfig()
+        )
+
         permissions = PermissionPolicy.from_dict(raw.get("permissions"))
 
         bind = BindConfig(**raw["bind"]) if isinstance(raw.get("bind"), dict) else BindConfig()
@@ -563,6 +606,7 @@ class CombinerConfig(BaseModel):
             bind=bind,
             oauth=oauth,
             isolation=isolation,
+            validation=validation,
             permissions=permissions,
             config_path=str(path),
         )

@@ -251,6 +251,19 @@ def create_combiner(
         RUNTIME.tools.stale_grace = stale_tool_grace
         logger.info("Stale-tool grace set to %.0fs", RUNTIME.tools.stale_grace)
 
+    config = CombinerConfig.load(config_path)
+    _combiner_config = config  # Store for tool filtering
+    RUNTIME.config = config
+
+    # Launch-path gates (--input-validation / MCP_COMBINER_INPUT_VALIDATION and
+    # the output twin) override the config file's "validation" block, which
+    # falls back to the SDK defaults (None). Precedence: flag > env > config
+    # > default — the same ladder the bind host uses.
+    if input_validation is None and config.validation.input is not None:
+        input_validation = config.validation.input
+    if output_validation is None and config.validation.output is not None:
+        output_validation = config.validation.output
+
     # Replace the MCP SDK's per-call jsonschema.validate (which rebuilds the
     # validator + re-checks the meta-schema on every tool call) with a cached
     # validator. Idempotent; cache is cleared on reload via invalidate_tool_cache.
@@ -262,10 +275,10 @@ def create_combiner(
     # output, so forcing it off removes redundant per-call work at the proxy.
     # Input validation is driven natively via strict_input_validation below.
     fastvalidate.set_output_validation(output_validation)
-
-    config = CombinerConfig.load(config_path)
-    _combiner_config = config  # Store for tool filtering
-    RUNTIME.config = config
+    if input_validation is not None:
+        logger.info("Input validation forced %s", "on" if input_validation else "off")
+    if output_validation is not None:
+        logger.info("Output validation forced %s", "on" if output_validation else "off")
     # ``--normalize-schema`` is a back-compat alias for the anyof_type_hoist fix.
     RUNTIME.schema_fixes = frozenset(schema_fixes or ()) | (
         frozenset({"anyof_type_hoist"}) if normalize_schemas else frozenset()
