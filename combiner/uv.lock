@@ -744,7 +744,7 @@ wheels = [
 
 [[package]]
 name = "mcp-combiner"
-version = "0.17.4"
+version = "0.17.5"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
