@@ -87,7 +87,7 @@ class TestParkAndForget:
         assert client.disconnected
         assert client.transport.terminate_on_close is False
         parked = registry.pop_parked("srv", "tok")
-        assert parked is not None
+        assert isinstance(parked, ParkedSession)
         assert parked.session_id == "sid-abc"
         assert parked.protocol_version == "2025-06-18"
 
@@ -126,7 +126,9 @@ class TestParkAndForget:
         await registry.close_all(terminate=False)
         assert client.disconnected
         assert client.transport.terminate_on_close is False
-        assert registry.parked[("srv", "tok")].session_id == "sid-h"
+        parked_entry = registry.parked.get(("srv", "tok"))
+        assert isinstance(parked_entry, ParkedSession)
+        assert parked_entry.session_id == "sid-h"
 
     async def test_close_all_default_terminates(self, registry: IsolatedSessionRegistry) -> None:
         client: Any = _resumable_client("sid-t")

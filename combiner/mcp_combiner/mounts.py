@@ -223,6 +223,13 @@ def mount_server_provider(combiner: FastMCP, proxy: Any, server_name: str) -> No
     _registry(combiner).setdefault(server_name, []).extend(added)
 
 
+def mounted_server_names(combiner: FastMCP) -> set[str]:
+    """Servers with providers currently recorded in the mount registry
+    (read-only view; the per-server providers come from
+    ``get_server_providers``)."""
+    return {name for name, providers in _registry(combiner).items() if providers}
+
+
 def get_server_providers(combiner: FastMCP, server_name: str) -> list[Any]:
     """The providers currently mounted for *server_name* (read-only view).
 

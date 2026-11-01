@@ -69,16 +69,16 @@ class _DownstreamCapture(MessageHandler):
 
 def _chat(
     combiner: CombinerHandle, token: str = TOKEN, cap: _DownstreamCapture | None = None
-) -> Client:
+) -> Client[Any]:
     transport = StreamableHttpTransport(
         combiner.mcp_url,
         headers={"X-MCP-Combiner-Session": token},
         sse_read_timeout=120.0,  # the capture needs a LIVE read stream, not an idle-close
     )
-    return Client(transport, message_handler=cap)  # type: ignore[arg-type]
+    return Client(transport, message_handler=cap)
 
 
-async def _names(client: Client) -> set[str]:
+async def _names(client: Client[Any]) -> set[str]:
     return {t.name for t in await client.list_tools()}
 
 

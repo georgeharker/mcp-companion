@@ -34,7 +34,11 @@ import logging
 from typing import Any
 
 import jsonschema as _jsonschema
+from jsonschema.exceptions import best_match
 from jsonschema.validators import validator_for
+
+# What the SDK hands jsonschema.validate: a tool's JSON-object schema dict.
+_Schema = dict[str, Any]
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -71,7 +75,7 @@ def set_output_validation(value: bool | None) -> None:
             logger.info("fastvalidate: output-schema validation disabled (proxy passthrough)")
 
 
-def _get_validator(schema: object) -> Any:
+def _get_validator(schema: _Schema) -> Any:
     """Return a reusable validator for *schema*, building it at most once.
 
     Raises ``jsonschema.SchemaError`` if the schema itself is invalid — same
@@ -90,14 +94,14 @@ def _get_validator(schema: object) -> Any:
     return validator
 
 
-def validate(instance: object, schema: object, *args: Any, **kwargs: Any) -> None:
+def validate(instance: object, schema: _Schema, *args: Any, **kwargs: Any) -> None:
     """Drop-in replacement for ``jsonschema.validate`` using a cached validator.
 
     Mirrors the semantics of ``jsonschema.validate``: raises the best-match
     ``jsonschema.ValidationError`` if *instance* is invalid, nothing otherwise.
     """
     validator = _get_validator(schema)
-    error = _jsonschema.exceptions.best_match(validator.iter_errors(instance))
+    error = best_match(validator.iter_errors(instance))
     if error is not None:
         raise error
 
@@ -164,7 +168,10 @@ def install() -> None:
         _nulled_tool_cache[key] = (tool, nulled)
         return nulled
 
-    _srv.Server._get_cached_tool_definition = _get_cached_tool_definition  # type: ignore[method-assign]
+    # A runtime monkeypatch of an SDK method (same idiom as the module-global
+    # swap above): explicit setattr, since direct method assignment is not
+    # something the type system models.
+    setattr(_srv.Server, "_get_cached_tool_definition", _get_cached_tool_definition)
 
     _installed = True
     logger.info("fastvalidate: cached JSON-schema validation installed")

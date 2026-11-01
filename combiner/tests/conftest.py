@@ -17,10 +17,12 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 import pytest
+
+_T = TypeVar("_T")
 
 COMBINER_DIR = Path(__file__).resolve().parents[1]
 
@@ -153,12 +155,12 @@ def write_tools_spec(path: Path, spec: list[dict[str, Any]]) -> Path:
 
 
 async def poll_until(
-    fn: Callable[[], Awaitable[Any]],
+    fn: Callable[[], Awaitable[_T | None]],
     timeout: float = 30.0,
     interval: float = 0.25,
     desc: str = "condition",
-) -> Any:
-    """Poll an async predicate until it returns a truthy value."""
+) -> _T:
+    """Poll an async predicate until it returns a truthy value, and return it."""
     deadline = asyncio.get_running_loop().time() + timeout
     last_exc: Exception | None = None
     while asyncio.get_running_loop().time() < deadline:

@@ -10,20 +10,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
+from fakes import content_text
 from fastmcp import Client
 
 from mcp_combiner.mockserver import MockServer, ToolSpec, parse_tool_specs
 
 
-def _spec(entries: list[dict]) -> list[ToolSpec]:
+def _spec(entries: list[dict[str, Any]]) -> list[ToolSpec]:
     return parse_tool_specs(json.dumps(entries))
 
 
-async def _text(client: Client, tool: str, args: dict) -> str:
+async def _text(client: Client[Any], tool: str, args: dict[str, Any]) -> str:
     result = await client.call_tool(tool, args)
-    return result.content[0].text
+    return content_text(result)
 
 
 class TestSpecParsing:

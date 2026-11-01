@@ -6,7 +6,8 @@ from server.py:
 - ``_create_server_proxy``: persistent-connection factory (HTTP/SSE via the
   ConnectionManager), auth-injected Client, or the config-dict path (stdio).
 - ``_create_isolated_proxy``: per-chat upstream sessions for ``isolate: true``
-  servers (StatefulProxyClient), incl. the OAuth-primer sharing/gating.
+  servers (StatefulProxyClient), incl. the OAuth-primer sharing/gating — and
+  per-chat SUBPROCESSS isolation for stdio servers (``_create_isolated_stdio_proxy``).
 - ``_effective_isolate`` / ``_needs_oauth``: the tri-state isolate resolution
   and auth-mode probe.
 """
@@ -34,18 +35,14 @@ logger = logging.getLogger("mcp-combiner")
 
 
 def _effective_isolate(srv: ServerConfig) -> bool:
-    """Resolve the tri-state ``isolate`` into the actual per-chat-session decision.
+    """Resolve the tri-state ``isolate`` into the actual per-chat isolation decision.
 
     ``isolate`` is ``None`` (absent → off), ``True`` (forced on) or ``False``
-    (forced off). Per-chat isolation only applies to HTTP/SSE servers; stdio is
-    never isolated (an explicit ``true`` there can't be honoured — it would need
-    a subprocess per chat — so the caller logs a warning).
+    (forced off). HTTP/SSE servers isolate per-chat **sessions** over one
+    shared server instance; stdio servers isolate per-chat **subprocesses**
+    (one ``command`` child per chat — a stdio subprocess IS a session).
     """
-    if not srv.isolate:
-        return False
-    if not ConnectionManager.is_http_server(srv):
-        return False  # stdio: cannot isolate (caller warns)
-    return True
+    return bool(srv.isolate)
 
 
 def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -> FastMCP:
@@ -107,8 +104,13 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
 
 
 def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -> FastMCP:
-    """Build a per-chat-isolated proxy for an HTTP/SSE server (``isolate: true``).
+    """Build a per-chat-isolated proxy for *srv* (``isolate: true``).
 
+    HTTP/SSE: per-chat upstream sessions over one shared server instance
+    (``TokenKeyedStatefulClient``). stdio: per-chat SUBPROCESSSes
+    (``_create_isolated_stdio_proxy``).
+
+    HTTP/SSE semantics (unchanged from when this function was HTTP-only):
     Uses FastMCP's ``StatefulProxyClient``: a single base client (one transport,
     one server instance) whose ``new_stateful`` factory opens — and caches — a
     *separate upstream session per downstream chat*. The upstream server thus
@@ -127,6 +129,9 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
     race into parallel auth flows, and surfaces the primer's auth failure as a
     retryable ``AuthenticationError``.
     """
+    if not ConnectionManager.is_http_server(srv):
+        return _create_isolated_stdio_proxy(config, name, srv)
+
     from fastmcp.client.transports import StreamableHttpTransport
 
     from mcp_combiner.isolated import TokenKeyedStatefulClient
@@ -204,6 +209,41 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
     # Wrap the (async) acquire so each per-chat clone gets our handler
     # re-attached, bound to the requesting chat's session (per_chat=True).
     # Passed via the public param.
+    return FastMCPProxy(
+        client_factory=forwarding_factory(stateful.acquire_stateful, name, per_chat=True),
+        name=name,
+    )
+
+
+def _create_isolated_stdio_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -> FastMCP:
+    """Build a per-chat SUBPROCESSS-isolated proxy for a stdio server
+    (``isolate: true``).
+
+    Each chat (token-keyed via the same ``x-mcp-combiner-session`` identity
+    the HTTP layer uses) gets its OWN ``command`` subprocess — a stdio
+    subprocess IS a session, so state partitioning is total. The lifecycle in
+    ``mcp_combiner.isolated`` keeps a chat's child running through its grace
+    window (in-memory state preserved) and terminates it at the park-ttl
+    forget; a token re-appearing inside the window reattaches to the same
+    child. No OAuth plumbing: stdio auth is the child's own environment.
+
+    Cost warning: N chats spawn N subprocesses of the server — sized like
+    running N copies of the server's runtime.
+    """
+    from mcp_combiner.isolated import TokenKeyedStdioClient
+
+    # Same interpolation path stdio always uses (command/args/env ${VAR}).
+    entry = config.to_fastmcp_config(name).mcpServers["default"]
+    if entry.command is None:  # pragma: no cover — stdio servers always have one
+        raise ValueError(f"Server '{name}' has stdio transport but no command")
+
+    stateful: TokenKeyedStdioClient = TokenKeyedStdioClient(
+        server_name=name,
+        command=entry.command,
+        args=list(entry.args or []),
+        env=dict(entry.env or {}),
+    )
+    logger.info("Server '%s': per-chat SUBPROCESSS isolation enabled (isolate=true, stdio)", name)
     return FastMCPProxy(
         client_factory=forwarding_factory(stateful.acquire_stateful, name, per_chat=True),
         name=name,

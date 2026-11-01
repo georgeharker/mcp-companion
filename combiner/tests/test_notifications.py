@@ -112,7 +112,7 @@ class TestAttach:
     def test_installs_our_handler(self) -> None:
         client = _FakeClient()
         attach_resource_forwarding(client, "svg-mcp")
-        assert isinstance(client._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
     def test_reattach_over_cloned_plain_handler(self) -> None:
         """Client.new() downgrades to a plain TaskNotificationHandler on clone —
@@ -121,14 +121,14 @@ class TestAttach:
         # the downgrade FastMCP's Client.new() would leave
         client._session_kwargs["message_handler"] = TaskNotificationHandler(cast(Any, client))
         attach_resource_forwarding(client, "svg-mcp")
-        assert isinstance(client._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
     def test_idempotent_on_cache_hit(self) -> None:
         client = _FakeClient()
         attach_resource_forwarding(client, "svg-mcp")
-        first = client._session_kwargs["message_handler"]
+        first = client._session_kwargs.get("message_handler")
         attach_resource_forwarding(client, "svg-mcp")
-        assert client._session_kwargs["message_handler"] is first  # not re-created
+        assert client._session_kwargs.get("message_handler") is first  # not re-created
 
     def test_survives_real_client_clone(self) -> None:
         """Drive FastMCP's actual Client.new() (the isolate per-chat clone): it
@@ -139,15 +139,15 @@ class TestAttach:
 
         client = Client("http://127.0.0.1:9999/mcp")  # disconnected; no network
         attach_resource_forwarding(client, "svg-mcp")
-        assert isinstance(client._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
         clone = client.new()  # the real FastMCP clone
-        downgraded = clone._session_kwargs["message_handler"]
+        downgraded = clone._session_kwargs.get("message_handler")
         assert isinstance(downgraded, TaskNotificationHandler)
         assert not isinstance(downgraded, _ResourceNotifyHandler)  # subclass lost
 
         attach_resource_forwarding(clone, "svg-mcp")  # factory re-attach
-        assert isinstance(clone._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(clone._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
     def test_fail_loud_when_session_kwargs_missing(self) -> None:
         """If FastMCP restructures _session_kwargs, attach warns and no-ops rather
@@ -186,7 +186,7 @@ class TestForwardingFactory:
     async def test_wrapped_factory_output_is_attached(self) -> None:
         wrapped = forwarding_factory(_fresh_client, "svg-mcp", per_chat=False)
         client = await _resolve(wrapped)
-        assert isinstance(client._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
     async def test_fresh_clone_each_call_is_attached(self) -> None:
         """A per-request fresh client (paths 3/4) — each must be attached
@@ -203,14 +203,14 @@ class TestForwardingFactory:
 
         wrapped = forwarding_factory(afactory, "svg-mcp", per_chat=False)
         client = await _resolve(wrapped)  # wrapper preserves the async factory
-        assert isinstance(client._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
     async def test_per_chat_without_context_falls_back_to_broadcast(self) -> None:
         """per_chat=True but no request context → target=None (broadcast); the
         factory must not raise."""
         wrapped = forwarding_factory(_fresh_client, "svg-mcp", per_chat=True)
         client = await _resolve(wrapped)  # must not raise
-        assert isinstance(client._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
     async def test_real_fastmcp_proxy_via_public_constructor(self) -> None:
         """The whole point of moving to construction-time wrapping: pass the wrapped
@@ -226,11 +226,11 @@ class TestForwardingFactory:
         )
 
         client = await _resolve(proxy.client_factory)
-        assert isinstance(client._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
         provider = next(p for p in proxy.providers if callable(getattr(p, "client_factory", None)))
         pclient = await _resolve(getattr(provider, "client_factory"))  # noqa: B009
-        assert isinstance(pclient._session_kwargs["message_handler"], _ResourceNotifyHandler)
+        assert isinstance(pclient._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
 
 # ── compose: task routing preserved (the regression guard) ─────────
@@ -242,7 +242,8 @@ class TestTaskRoutingPreserved:
         even though we installed a resource-forwarding handler."""
         client = _FakeClient()
         attach_resource_forwarding(client, "svg-mcp")
-        handler = client._session_kwargs["message_handler"]
+        handler = client._session_kwargs.get("message_handler")
+        assert handler is not None  # attach always installed it
 
         await handler(_task_status())  # full dispatch chain
         assert len(client.task_notifs) == 1  # default not lost

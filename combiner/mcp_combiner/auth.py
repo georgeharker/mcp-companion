@@ -197,6 +197,20 @@ def create_encrypted_store(storage_dir: Path) -> AsyncKeyValue:
 _GOOGLE_ACCOUNTS_HOST = "accounts.google.com"
 
 
+def _shared_flow_outcome(result: OAuthCallbackResult) -> tuple[str, str | None]:
+    """Resolve a flow we waited on (another caller owned the callback server).
+
+    The owner sets ``error`` or ``code`` before signalling; a signalled result
+    with neither is a broken flow, not an empty success — raise rather than
+    hand a ``None`` code to the token exchange.
+    """
+    if result.error:
+        raise result.error
+    if result.code is None:
+        raise RuntimeError("OAuth callback finished without an authorization code")
+    return result.code, result.state
+
+
 class _RefreshTokenOAuth(OAuth):
     """OAuth subclass that ensures a ``refresh_token`` is issued where possible.
 
@@ -248,9 +262,7 @@ class _RefreshTokenOAuth(OAuth):
                 port,
             )
             await event.wait()
-            if result.error:
-                raise result.error
-            return result.code, result.state  # type: ignore[return-value]
+            return _shared_flow_outcome(result)
 
         # We are the first caller — set up tracking, then run the real handler.
         result = OAuthCallbackResult()
@@ -271,9 +283,7 @@ class _RefreshTokenOAuth(OAuth):
                 port,
             )
             await ev.wait()
-            if res.error:
-                raise res.error
-            return res.code, res.state  # type: ignore[return-value]
+            return _shared_flow_outcome(res)
 
         try:
             code, state = await super().callback_handler()

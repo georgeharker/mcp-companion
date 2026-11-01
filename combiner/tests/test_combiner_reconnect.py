@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -29,6 +30,7 @@ from conftest import (
     write_servers_config,
     write_tools_spec,
 )
+from fakes import content_text
 from fastmcp import Client
 
 pytestmark = pytest.mark.e2e
@@ -38,9 +40,9 @@ _SPEC = [
 ]
 
 
-async def _text(client: Client, tool: str, args: dict) -> str:
+async def _text(client: Client[Any], tool: str, args: dict[str, Any]) -> str:
     result = await client.call_tool(tool, args)
-    return result.content[0].text
+    return content_text(result)
 
 
 class TestCombinerRestartReattach:

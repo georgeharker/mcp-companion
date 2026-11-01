@@ -19,8 +19,8 @@ Uses FAST_TIMING_ENV so monitor/backoff paths run in seconds.
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import (
@@ -38,6 +38,7 @@ from conftest import (
     write_servers_config,
     write_tools_spec,
 )
+from fakes import content_text, json_object
 from fastmcp import Client
 
 pytestmark = pytest.mark.e2e
@@ -47,13 +48,13 @@ _SPEC = [
 ]
 
 
-async def _text(client: Client, tool: str, args: dict) -> str:
+async def _text(client: Client[Any], tool: str, args: dict[str, Any]) -> str:
     result = await client.call_tool(tool, args)
-    return result.content[0].text
+    return content_text(result)
 
 
-async def _whoami(client: Client, server: str = "mockup") -> dict:
-    return json.loads(await _text(client, f"{server}_mock__whoami", {}))
+async def _whoami(client: Client[Any], server: str = "mockup") -> dict[str, Any]:
+    return json_object(await _text(client, f"{server}_mock__whoami", {}))
 
 
 async def _restart(combiner: CombinerHandle, server: str = "mockup") -> str:
@@ -77,7 +78,7 @@ async def _wait_pid_gone(pid: int, timeout: float = 15.0) -> None:
 
 
 async def _call_until_ok(
-    combiner: CombinerHandle, tool: str, args: dict, timeout: float = 45.0
+    combiner: CombinerHandle, tool: str, args: dict[str, Any], timeout: float = 45.0
 ) -> str:
     """Call a tool through the combiner until it succeeds (recovery probe)."""
 
@@ -156,7 +157,7 @@ class TestRestartMetaTool:
 
         token = "11111111-2222-3333-4444-555555555555"
 
-        def _chat() -> Client:
+        def _chat() -> Client[Any]:
             return Client(
                 StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token})
             )

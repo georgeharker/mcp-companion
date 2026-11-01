@@ -13,7 +13,8 @@ All hermetic — no subprocesses, no real MCP client.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -185,17 +186,27 @@ class TestSessionGrants:
 # ── middleware: the gate ───────────────────────────────────────────
 
 
-def _elicit_ctx(session_id: str | None, *, result: Any = None, exc: Exception | None = None):
-    """A fake FastMCP request context with a scripted `elicit`."""
-    calls: list[str] = []
+@dataclass
+class _ElicitCtx:
+    """A fake FastMCP request context with a scripted ``elicit``; records the
+    prompts it was asked in ``_calls``."""
 
-    async def elicit(message: str, response_type: Any = None) -> Any:
-        calls.append(message)
-        if exc is not None:
-            raise exc
-        return result
+    session_id: str | None
+    result: Any = None
+    exc: Exception | None = None
+    _calls: list[str] = field(default_factory=list)
 
-    return SimpleNamespace(session_id=session_id, elicit=elicit, _calls=calls)
+    async def elicit(self, message: str, response_type: Any = None) -> Any:
+        self._calls.append(message)
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+
+def _elicit_ctx(
+    session_id: str | None, *, result: Any = None, exc: Exception | None = None
+) -> _ElicitCtx:
+    return _ElicitCtx(session_id=session_id, result=result, exc=exc)
 
 
 def _rp(**kw: Any) -> ResolvedPolicy:
@@ -210,7 +221,7 @@ def _rp(**kw: Any) -> ResolvedPolicy:
 
 class TestEnforcePermission:
     @pytest.fixture(autouse=True)
-    def _clean_grants(self):
+    def _clean_grants(self) -> Iterator[None]:
         from mcp_combiner.runtime import RUNTIME
 
         RUNTIME.sessions.clear_granted("sess")

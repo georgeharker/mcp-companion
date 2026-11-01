@@ -30,15 +30,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 import uvicorn
 from conftest import free_port, poll_until
+from fakes import content_text
 from fastmcp import Client
 from fastmcp.client.transports.http import StreamableHttpTransport
 from mcp.shared.auth import OAuthToken
@@ -74,12 +76,12 @@ class _NoSignalServer(uvicorn.Server):
     """
 
     @contextlib.contextmanager
-    def capture_signals(self):  # noqa: ANN201 - matches uvicorn's signature
+    def capture_signals(self) -> Iterator[None]:
         yield
 
 
 @pytest.fixture(autouse=True)
-def _reset_sse_appstatus():
+def _reset_sse_appstatus() -> Iterator[None]:
     """Reset sse-starlette's process-global shutdown latch around every test.
 
     ``AppStatus.should_exit`` is module-global and never reset once True (see
@@ -107,8 +109,14 @@ class ServedOAuthMock:
         return f"{self.base_url}/mcp"
 
 
+class OAuthMockFactory(Protocol):
+    """``oauth_mock``'s factory: boots one served mock per call."""
+
+    def __call__(self, config: MockOAuthConfig | None = None) -> Awaitable[ServedOAuthMock]: ...
+
+
 @pytest.fixture
-async def oauth_mock() -> AsyncIterator[Callable[..., object]]:
+async def oauth_mock() -> AsyncIterator[OAuthMockFactory]:
     """Yield a factory that boots a bearer-guarded mock OAuth MCP server.
 
     Each call serves a fresh mock on its own port via uvicorn in a background
@@ -162,11 +170,13 @@ def headless_consent(monkeypatch: pytest.MonkeyPatch) -> None:
     runs against the mock.
     """
 
+    authorize_urls: dict[int, str] = {}  # per OAuth instance, like the redirect it replaces
+
     async def fake_redirect(self: _RefreshTokenOAuth, authorization_url: str) -> None:
-        self._test_authorize_url = authorization_url
+        authorize_urls[id(self)] = authorization_url
 
     async def fake_callback(self: _RefreshTokenOAuth) -> tuple[str, str | None]:
-        url = self._test_authorize_url
+        url = authorize_urls[id(self)]
         async with httpx.AsyncClient() as c:
             resp = await c.get(url, follow_redirects=False)
         assert resp.status_code == 302, f"authorize did not redirect: {resp.text}"
@@ -178,10 +188,8 @@ def headless_consent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_RefreshTokenOAuth, "callback_handler", fake_callback)
 
 
-def _oauth_for(mock: ServedOAuthMock, token_dir: Path, **kw: object) -> _RefreshTokenOAuth:
-    auth = build_auth(
-        "mock", auth_config="oauth", server_url=mock.mcp_url, token_dir=token_dir, **kw
-    )
+def _oauth_for(mock: ServedOAuthMock, token_dir: Path) -> _RefreshTokenOAuth:
+    auth = build_auth("mock", auth_config="oauth", server_url=mock.mcp_url, token_dir=token_dir)
     assert isinstance(auth, _RefreshTokenOAuth)
     return auth
 
@@ -190,7 +198,7 @@ async def _call_echo(mock: ServedOAuthMock, oauth: _RefreshTokenOAuth, msg: str)
     transport = StreamableHttpTransport(url=mock.mcp_url)
     async with Client(transport, auth=oauth) as client:
         result = await client.call_tool("echo", {"message": msg})
-    return str(result.content[0].text)
+    return content_text(result)
 
 
 # ── the consent (perms) leg ────────────────────────────────────────
@@ -201,9 +209,9 @@ class TestConsentFlow:
     flow and attaches the issued access token to the MCP call."""
 
     async def test_full_flow_issues_and_attaches_tokens(
-        self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, headless_consent: None, tmp_path: Path
     ) -> None:
-        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+        mock: ServedOAuthMock = await oauth_mock()
         oauth = _oauth_for(mock, tmp_path)
 
         assert await _call_echo(mock, oauth, "hello") == "Echo: hello"
@@ -236,11 +244,11 @@ class TestConsentFlow:
         assert oauth.context.current_tokens.refresh_token == issued.refresh_token
 
     async def test_unauthenticated_call_is_rejected_then_recovers(
-        self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, headless_consent: None, tmp_path: Path
     ) -> None:
         """The mock 401s the first (tokenless) MCP request — that 401 is what
         drives the whole flow — and the retried call with a bearer succeeds."""
-        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+        mock: ServedOAuthMock = await oauth_mock()
         oauth = _oauth_for(mock, tmp_path)
 
         assert await _call_echo(mock, oauth, "x") == "Echo: x"
@@ -281,11 +289,11 @@ class TestRefresh:
         ctx.client_info = ci
 
     async def test_refresh_sends_right_token_and_stores_rotated(
-        self, oauth_mock: Callable[..., object], tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, tmp_path: Path
     ) -> None:
         from mcp_combiner.auth import _RefreshOutcome
 
-        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+        mock: ServedOAuthMock = await oauth_mock()
         oauth = _oauth_for(mock, tmp_path)
         self._seed_refreshable(oauth, mock, "rt-seed")
 
@@ -308,15 +316,13 @@ class TestRefresh:
         assert issued.refresh_token != "rt-seed"  # rotated
 
     async def test_refresh_token_preserved_when_provider_omits_it(
-        self, oauth_mock: Callable[..., object], tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, tmp_path: Path
     ) -> None:
         """Google-style: the refresh response omits refresh_token — the combiner
         must keep the original so it can keep refreshing silently."""
         from mcp_combiner.auth import _RefreshOutcome
 
-        mock: ServedOAuthMock = await oauth_mock(  # type: ignore[misc]
-            MockOAuthConfig(include_refresh_on_refresh=False)
-        )
+        mock: ServedOAuthMock = await oauth_mock(MockOAuthConfig(include_refresh_on_refresh=False))
         oauth = _oauth_for(mock, tmp_path)
         self._seed_refreshable(oauth, mock, "rt-keep")
 
@@ -330,13 +336,13 @@ class TestRefresh:
         assert oauth.context.current_tokens.refresh_token == "rt-keep"
 
     async def test_refresh_with_unknown_token_is_auth_error(
-        self, oauth_mock: Callable[..., object], tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, tmp_path: Path
     ) -> None:
         """A refresh_token the server doesn't recognise → 4xx → AUTH_ERROR, and
         the combiner does NOT fabricate tokens."""
         from mcp_combiner.auth import _RefreshOutcome
 
-        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+        mock: ServedOAuthMock = await oauth_mock()
         oauth = _oauth_for(mock, tmp_path)
         # Seed a refresh token but do NOT register it as valid on the server.
         self._seed_refreshable(oauth, mock, "rt-bogus")
@@ -355,9 +361,9 @@ class TestRefresh:
 
 class TestBearerLifecycle:
     async def test_expired_token_refreshed_and_new_bearer_attached(
-        self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, headless_consent: None, tmp_path: Path
     ) -> None:
-        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+        mock: ServedOAuthMock = await oauth_mock()
         oauth = _oauth_for(mock, tmp_path)
 
         # First call runs the consent flow and mints the initial pair.
@@ -421,9 +427,9 @@ class TestPersistence:
         )
 
     async def test_valid_cached_token_reused_without_new_consent(
-        self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, headless_consent: None, tmp_path: Path
     ) -> None:
-        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+        mock: ServedOAuthMock = await oauth_mock()
 
         # Session 1: full consent flow, tokens persisted to tmp_path.
         oauth1 = _oauth_for(mock, tmp_path)
@@ -442,9 +448,9 @@ class TestPersistence:
         assert first_access in mock.provider.audit.authenticated_mcp_calls()
 
     async def test_expired_cached_token_refreshed_silently_on_restart(
-        self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, headless_consent: None, tmp_path: Path
     ) -> None:
-        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+        mock: ServedOAuthMock = await oauth_mock()
 
         # Session 1: full consent flow.
         oauth1 = _oauth_for(mock, tmp_path)
@@ -474,13 +480,13 @@ class TestPersistence:
     # introspection. Fixed by _NoSignalServer + the _reset_sse_appstatus
     # autouse fixture, so it runs everywhere again.
     async def test_cache_without_persisted_expiry_bootstraps_one_refresh(
-        self, oauth_mock: Callable[..., object], headless_consent: None, tmp_path: Path
+        self, oauth_mock: OAuthMockFactory, headless_consent: None, tmp_path: Path
     ) -> None:
         """Migration path: a legacy cache with no persisted absolute expiry
         triggers exactly ONE silent bootstrap refresh on the next start (the
         combiner refreshes when ``get_token_expiry()`` is None) — not a browser
         reauth, and not a loop."""
-        mock: ServedOAuthMock = await oauth_mock()  # type: ignore[misc]
+        mock: ServedOAuthMock = await oauth_mock()
 
         # Session 1: consent flow persists tokens + FastMCP's expiry key.
         oauth1 = _oauth_for(mock, tmp_path)

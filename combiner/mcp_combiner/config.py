@@ -126,6 +126,134 @@ class SharedServerConfig(BaseModel):
         )
 
 
+class ExternalServerConfig(BaseModel):
+    """Configuration for a non-owned backing process, launched by a plain CLI
+    tool (e.g. ``docker run``) instead of sharedserver.
+
+    Lives under the top-level ``externalServers`` dict in the config file.
+    Server entries reference one by name via ``"externalServer": "<name>"``
+    (mutually exclusive with ``sharedServer`` — a load-time warning is logged
+    if both are set and ``sharedServer`` wins).
+
+    Unlike ``SharedServerConfig``, there is no refcount and no grace period:
+    the combiner launches the process (if ``launch`` is set), waits for the
+    server entry's ``url`` to answer, and does exactly the shutdown behavior
+    the config states — nothing more.  Lifecycle semantics are *derived from
+    the fields* rather than a mode enum:
+
+    - ``launch`` only                 — launch + attach; left running on shutdown
+    - ``launch`` + ``stop``           — launch + attach; ``stop`` run on shutdown
+    - ``launch`` + ``foreground``     — combiner owns the child process; on
+                                        shutdown a configured ``stop`` runs
+                                        first, then a still-alive child is
+                                        SIGTERMed as a fallback (``docker run``
+                                        without ``-d`` forwards the signal to
+                                        the container — add ``--sig-proxy=true``
+                                        /``--init`` on the launch line if your
+                                        image needs it)
+    - no ``launch``                   — attach-only; just polls ``url`` (parity
+                                        with plain url-only servers)
+
+    Example JSON (a detached docker container)::
+
+        "externalServers": {
+            "postgres_mcp": {
+                "launch": ["docker", "run", "--rm", "-d", "--name", "postgres-mcp",
+                           "-p", "8002:8000", "ghcr.io/org/postgres-mcp"],
+                "stop": ["docker", "stop", "postgres-mcp"],
+                "env": {"DOCKER_HOST": "${env:DOCKER_HOST}"},
+                "health_timeout": 30
+            }
+        }
+
+    Server entry::
+
+        "postgres": {
+            "url": "http://localhost:8002/mcp",
+            "externalServer": "postgres_mcp"
+        }
+
+    .. note::
+        Launch is **not** made idempotent by the combiner — re-booting the
+        combiner re-runs ``launch`` verbatim. ``docker run -d --name x`` fails
+        when a container of that name already exists (a loud, self-explanatory
+        failure); prefer idempotent launchers (``docker compose up -d``) or
+        attach-only entries for processes you manage outside the combiner.
+
+    .. note::
+        Ownership fields that belong to sharedserver (``grace_period``,
+        ``command``/``args``, ``use``-style keys) are deliberately **not**
+        accepted here: they are warned about as unknown keys and ignored, per
+        the warn-and-continue posture used elsewhere in config parsing.
+    """
+
+    name: str
+    """externalServers entry name — key in the top-level ``externalServers`` dict."""
+
+    launch: list[str] | None = None
+    """argv to launch the backing process (e.g. ``["docker", "run", "-d", ...]``).
+    Supports ``${VAR}`` interpolation. ``None`` = attach-only: no process is
+    launched, the entry only gates the reachability poll of the server's ``url``.
+    """
+
+    stop: list[str] | None = None
+    """Optional argv to stop the backing process on disable/shutdown (e.g.
+    ``["docker", "stop", "name"]``). Absent = leave the process running.
+    Ignored (with no effect on shutdown) when ``launch`` is absent.
+    """
+
+    foreground: bool = False
+    """Treat ``launch`` as a foreground child the combiner owns: the PID is
+    kept and SIGTERMed on shutdown (``docker run`` without ``-d`` forwards the
+    signal to the container — add ``--sig-proxy=true``/``--init`` on the
+    launch line if your image needs it). ``False`` = launch detached and leave
+    running (the CLI tool owns the lifetime, e.g. ``docker run -d``).
+    """
+
+    env: dict[str, str] = Field(default_factory=dict)
+    """Extra environment variables for the *launcher* process (e.g.
+    ``DOCKER_HOST``). Supports ``${VAR}``, ``${env:VAR}``, ``${VAR:-default}``
+    interpolation; layered over the combiner's own environment."""
+
+    health_timeout: int = 30
+    """Seconds to poll the server URL after launch before giving up.
+    Same meaning as ``SharedServerConfig.health_timeout``.
+    """
+
+    @classmethod
+    def from_dict(cls, name: str, data: dict[str, Any]) -> ExternalServerConfig:
+        """Parse an ``externalServers`` entry dict, keyed by *name*."""
+        _warn_unknown_keys(
+            "externalServer",
+            name,
+            data,
+            {
+                "launch",
+                "stop",
+                "foreground",
+                "env",
+                "health_timeout",
+                "healthTimeout",
+            },
+        )
+        raw_env = data.get("env", {})
+        env = {k: str(v) for k, v in raw_env.items()} if raw_env else {}
+        if data.get("stop") is not None and data.get("launch") is None:
+            logger.warning(
+                "externalServer '%s': 'stop' set without 'launch' — ignored "
+                "(the combiner never launches anything, so it never stops anything)",
+                name,
+            )
+        return cls(
+            name=name,
+            launch=data.get("launch"),
+            stop=data.get("stop"),
+            foreground=bool(data.get("foreground", False)),
+            env=env,
+            health_timeout=int(data.get("health_timeout", data.get("healthTimeout", 30))),
+        )
+
+
 class PermissionAction(str, Enum):
     """What to do with a tool call: allow it, deny it, or ask the user."""
 
@@ -280,6 +408,12 @@ class ServerConfig(BaseModel):
     shared_server: str | None = None
     """Name of a top-level ``sharedServers`` entry to start before connecting."""
 
+    external_server: str | None = None
+    """Name of a top-level ``externalServers`` entry (non-owned process, e.g. a
+    ``docker run`` container) to launch/attach before connecting. Mutually
+    exclusive with ``shared_server`` — a warning is logged at load time and
+    ``shared_server`` wins if both are set."""
+
     tool_filter: list[str] = Field(default_factory=list)
     """Glob patterns to filter which tools are exposed from this server.
 
@@ -310,10 +444,16 @@ class ServerConfig(BaseModel):
     Tri-state (rather than a plain bool) so "absent" stays distinct from an
     explicit ``false`` for any layered override.
 
-    Only applies to HTTP/SSE servers. stdio has one session per process, so it
-    is never isolated (an explicit ``true`` is ignored with a warning) — per-chat
-    isolation there would require a subprocess per chat, which the combiner does
-    not do. See ``server._effective_isolate``.
+    Applies to both transports, with transport-shaped semantics:
+
+    - HTTP/SSE: per-chat upstream **sessions** over one shared server instance
+      (``TokenKeyedStatefulClient``) — see ``mcp_combiner.isolated``.
+    - stdio: per-chat **subprocesses** (``TokenKeyedStdioClient``) — one
+      ``command`` child per chat, kept running through the grace window
+      (state lives in the child), terminated at the park-ttl forget. Cost:
+      N chats spawn N copies of the server's runtime.
+
+    See ``proxyfactory._effective_isolate``.
     """
 
     @classmethod
@@ -335,6 +475,8 @@ class ServerConfig(BaseModel):
                 "auth",
                 "sharedServer",
                 "shared_server",
+                "externalServer",
+                "external_server",
                 "toolFilter",
                 "tool_filter",
                 "permissions",
@@ -358,6 +500,7 @@ class ServerConfig(BaseModel):
 
         # camelCase or snake_case key
         shared_server = data.get("sharedServer") or data.get("shared_server")
+        external_server = data.get("externalServer") or data.get("external_server")
         tool_filter = data.get("toolFilter") or data.get("tool_filter") or []
 
         return cls(
@@ -372,6 +515,7 @@ class ServerConfig(BaseModel):
             auto_approve=auto_approve,
             auth=data.get("auth"),
             shared_server=shared_server,
+            external_server=external_server,
             tool_filter=tool_filter,
             permissions=PermissionPolicy.from_dict(data.get("permissions")),
             isolate=(None if data.get("isolate") is None else bool(data["isolate"])),
@@ -407,6 +551,8 @@ class ServerStatusInfo(BaseModel):
     """Authentication type: ``"oauth"``, ``"bearer"``, or ``None``."""
     shared_server: str | None = None
     """sharedServers key if this server has a managed process, else ``None``."""
+    external_server: str | None = None
+    """externalServers key if this server has a non-owned backing process, else ``None``."""
     state: str = "unknown"
     """Runtime lifecycle state: ``"ready"``, ``"connected"`` (session up, tools
     warming), ``"disconnected"``, ``"auth_failed"``, or ``"disabled"``. Overlaid
@@ -552,6 +698,7 @@ class CombinerConfig(BaseModel):
 
     servers: dict[str, ServerConfig] = Field(default_factory=dict)
     shared_servers: dict[str, SharedServerConfig] = Field(default_factory=dict)
+    external_servers: dict[str, ExternalServerConfig] = Field(default_factory=dict)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
@@ -585,6 +732,36 @@ class CombinerConfig(BaseModel):
             name: SharedServerConfig.from_dict(name, data) for name, data in raw_shared.items()
         }
 
+        raw_external: dict[str, Any] = raw.get("externalServers", {})
+        external_servers = {
+            name: ExternalServerConfig.from_dict(name, data) for name, data in raw_external.items()
+        }
+
+        # A server entry can only have one backing process. sharedServer wins;
+        # warn so the misconfiguration isn't silently dropped. Also warn about
+        # dangling references now instead of at first lifecycle call.
+        for name, srv in servers.items():
+            if srv.shared_server and srv.external_server:
+                logger.warning(
+                    "Server '%s': both sharedServer and externalServer set — "
+                    "using sharedServer '%s', ignoring externalServer '%s'",
+                    name,
+                    srv.shared_server,
+                    srv.external_server,
+                )
+            for field, table, label in (
+                (srv.shared_server, shared_servers, "sharedServers"),
+                (srv.external_server, external_servers, "externalServers"),
+            ):
+                if field and field not in table:
+                    logger.warning(
+                        "Server '%s': references missing %s entry '%s' — "
+                        "server will have no backing-process lifecycle",
+                        name,
+                        label,
+                        field,
+                    )
+
         raw_oauth: dict[str, Any] = raw.get("oauth", {})
         oauth = OAuthConfig.from_dict(raw_oauth) if raw_oauth else OAuthConfig()
 
@@ -603,6 +780,7 @@ class CombinerConfig(BaseModel):
         return cls(
             servers=servers,
             shared_servers=shared_servers,
+            external_servers=external_servers,
             bind=bind,
             oauth=oauth,
             isolation=isolation,
@@ -640,6 +818,26 @@ class CombinerConfig(BaseModel):
                 f"Server '{server_name}' references unknown sharedServer '{srv.shared_server}'"
             )
         return ss
+
+    def resolve_external_server(self, server_name: str) -> ExternalServerConfig | None:
+        """Return the ExternalServerConfig for a server, if it has one.
+
+        ``None`` for url-only servers with no externalServer reference. Mirrors
+        :meth:`resolve_shared_server` for the server's *own* reference — which
+        section handles a server is decided by ``BackingProcessManager``'s
+        manager order, not here; a server that sets both ``sharedServer`` and
+        ``externalServer`` resolves under both, and the facade's claim order
+        picks sharedserver (the load-time warning tells the author).
+        """
+        srv = self.servers.get(server_name)
+        if srv is None or srv.external_server is None:
+            return None
+        ext = self.external_servers.get(srv.external_server)
+        if ext is None:
+            raise KeyError(
+                f"Server '{server_name}' references unknown externalServer '{srv.external_server}'"
+            )
+        return ext
 
     def to_fastmcp_config(self, name: str) -> FastMCPConfig:
         """Convert a single server config to a typed FastMCP proxy config.
@@ -690,6 +888,7 @@ class CombinerConfig(BaseModel):
             auto_approve=srv.auto_approve,
             auth_type=auth_type,
             shared_server=srv.shared_server,
+            external_server=srv.external_server,
         )
 
 

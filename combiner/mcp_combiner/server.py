@@ -18,6 +18,7 @@ from fastmcp.tools import Tool
 from mcp.server.session import ServerSession
 
 from mcp_combiner import nvim_proxy
+from mcp_combiner.backing import BackingProcessManager
 from mcp_combiner.config import (
     CombinerConfig,  # noqa: PLC2701
 )
@@ -29,7 +30,6 @@ from mcp_combiner.proxyfactory import (
 )
 from mcp_combiner.routes import register_routes
 from mcp_combiner.runtime import RUNTIME
-from mcp_combiner.sharedserver import SharedServerManager
 from mcp_combiner.status import build_server_status as build_server_status  # noqa: PLC0414
 from mcp_combiner.toolcache import (  # noqa: F401 (re-exports for meta_tools/tests)
     UPSTREAM_TOOL_LIST_TIMEOUT,
@@ -167,8 +167,8 @@ def create_combiner(
     input_validation: bool | None = ...,
     output_validation: bool | None = ...,
     stale_tool_grace: float | None = ...,
-    return_ss_manager: Literal[True],
-) -> tuple[FastMCP, SharedServerManager]: ...
+    return_proc_manager: Literal[True],
+) -> tuple[FastMCP, BackingProcessManager]: ...
 
 
 @overload
@@ -182,7 +182,7 @@ def create_combiner(
     input_validation: bool | None = ...,
     output_validation: bool | None = ...,
     stale_tool_grace: float | None = ...,
-    return_ss_manager: Literal[False] = ...,
+    return_proc_manager: Literal[False] = ...,
 ) -> FastMCP: ...
 
 
@@ -196,8 +196,8 @@ def create_combiner(
     input_validation: bool | None = None,
     output_validation: bool | None = None,
     stale_tool_grace: float | None = None,
-    return_ss_manager: bool = False,
-) -> FastMCP | tuple[FastMCP, SharedServerManager]:
+    return_proc_manager: bool = False,
+) -> FastMCP | tuple[FastMCP, BackingProcessManager]:
     """Create the combiner FastMCP server from a config file.
 
     Reads servers.json, creates a proxy for each enabled server,
@@ -238,8 +238,9 @@ def create_combiner(
     - *oauth_cache_tokens*: ``False`` disables disk token caching globally.
     - *oauth_token_dir*: path override for the OAuth token directory.
 
-    If *return_ss_manager* is True, returns a tuple of (combiner, ss_manager)
-    so the caller can explicitly call stop_all() on shutdown.
+    If *return_proc_manager* is True, returns a tuple of (combiner,
+    BackingProcessManager) so the caller can explicitly call stop_all()
+    on shutdown.
     """
     global _combiner_config
     global _conn_manager
@@ -292,7 +293,11 @@ def create_combiner(
     if oauth_token_dir is not None:
         config.oauth.token_dir = oauth_token_dir
 
-    ss_manager = SharedServerManager(config)
+    # One backing-process handle for every kind: sharedserver-owned (facade
+    # dispatches to SharedServerManager), external non-owned (stop/relaunch
+    # per ExternalServerManager), and plain url-only servers (background
+    # reachability probe only). See externalservers.BackingProcessManager.
+    proc_manager = BackingProcessManager(config)
     conn_manager = ConnectionManager(
         # Connection-open is a lifecycle signal only — it does NOT mean the
         # upstream can list tools yet, so it must not invalidate the cache.
@@ -305,12 +310,17 @@ def create_combiner(
         # A sharedserver-backed upstream whose process died has nobody to
         # respawn it — re-dialing alone spins forever. After repeated failed
         # reconnects the monitor escalates to this hard restart (the same
-        # path combiner__restart_server takes manually).
-        restart_backing=ss_manager.restart,
+        # path combiner__restart_server takes manually). NOTE: connections.py
+        # gates this escalation on ``srv.shared_server`` — it fires for
+        # sharedserver-backed servers only, never for external-backed ones
+        # (a down container is not auto-relaunched by reconnect churn; use
+        # combiner__restart_server) and never for plain url-only servers
+        # (nothing is owned; the caller reconnects).
+        restart_backing=proc_manager.restart,
     )
     _conn_manager = conn_manager
     RUNTIME.conn_manager = conn_manager
-    RUNTIME.ss_manager = ss_manager
+    RUNTIME.proc_manager = proc_manager
 
     # Lifecycle knobs for token-keyed isolated upstream sessions.
     from mcp_combiner.isolated import REGISTRY as _isolated_registry
@@ -322,7 +332,7 @@ def create_combiner(
 
     @asynccontextmanager
     async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
-        await ss_manager.start_all()
+        await proc_manager.start_all()
 
         # Mount every enabled server.  OAuth servers are mounted even if
         # they don't have a cached token — the persistent connection attempt
@@ -332,17 +342,11 @@ def create_combiner(
         enabled = config.get_enabled_servers()
         local_servers: list[str] = []
         for name, srv in enabled.items():
-            # isolate is HTTP/SSE-only; an explicit true on a stdio server can't
-            # be honoured (it would need a subprocess per chat, a deliberate
-            # non-goal). All chats share the one stdio session — surface that a
-            # stateful stdio server will bleed state across chats.
-            if srv.isolate and not conn_manager.is_http_server(srv):
-                logger.warning(
-                    "Server '%s': isolate=true ignored — stdio has one session per "
-                    "process, so all chats share it (a stateful server leaks state "
-                    "across chats). Run it over HTTP/SSE for per-chat sessions.",
-                    name,
-                )
+            # isolate now applies to BOTH transports: HTTP/SSE isolates
+            # per-chat upstream sessions (TokenKeyedStatefulClient); stdio is
+            # isolated per-chat SUBPROCESS (TokenKeyedStdioClient — one
+            # `command` child per chat). Both resolve in _create_server_proxy
+            # via _effective_isolate; nothing to special-case here anymore.
 
             # Pre-register EVERY HTTP/SSE server for a persistent connection —
             # including isolated ones. For an isolated server the persistent
@@ -407,7 +411,7 @@ def create_combiner(
             else:
                 await _isolated_registry.close_all()
             await conn_manager.close_all()
-            await ss_manager.stop_all()
+            await proc_manager.stop_all()
 
     combiner = FastMCP(
         name="mcp-combiner",
@@ -460,7 +464,7 @@ def create_combiner(
     # Register meta-tools (available immediately; server proxies mount in lifespan)
     from mcp_combiner.meta_tools import register_meta_tools
 
-    register_meta_tools(combiner, config, conn_manager, ss_manager)
+    register_meta_tools(combiner, config, conn_manager, proc_manager)
     _combiner_instance = combiner
     RUNTIME.combiner = combiner
 
@@ -470,8 +474,8 @@ def create_combiner(
     # Neovim back-channel REST API (/neovim/instances, /neovim/bind).
     nvim_proxy.register_routes(combiner, _notify_tool_list_changed)
 
-    if return_ss_manager:
-        return combiner, ss_manager
+    if return_proc_manager:
+        return combiner, proc_manager
     return combiner
 
 

@@ -39,8 +39,9 @@ from __future__ import annotations
 import contextlib
 import datetime
 import logging
+import ssl
 from collections.abc import AsyncIterator
-from typing import cast
+from typing import Any, Literal, Protocol, cast
 
 import httpx
 import mcp.types as mt
@@ -48,11 +49,25 @@ from fastmcp.client.dependencies import get_http_headers
 from fastmcp.client.transports.base import SessionKwargs
 from fastmcp.client.transports.http import StreamableHttpTransport
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-from mcp.shared._httpx_utils import create_mcp_http_client
+from mcp.client.streamable_http import StreamableHTTPTransport, streamable_http_client
+from mcp.shared._httpx_utils import McpHttpClientFactory, create_mcp_http_client
+from pydantic import AnyUrl
 from typing_extensions import Unpack
 
 logger = logging.getLogger("mcp-combiner")
+
+
+class _SeedableSession(Protocol):
+    """The session-identity attributes the SDK transport stamps onto requests.
+
+    The SDK initialises both as a bare ``= None`` (no annotation), so mypy
+    pins their type to ``None``; at runtime they hold the negotiated strings
+    (``StreamableHTTPTransport`` assigns them after initialize). This is the
+    contract we seed against.
+    """
+
+    session_id: str | None
+    protocol_version: str | None
 
 
 class ResumableStreamableHttpTransport(StreamableHttpTransport):
@@ -69,13 +84,25 @@ class ResumableStreamableHttpTransport(StreamableHttpTransport):
 
     def __init__(
         self,
-        *args: object,
+        url: str | AnyUrl,
+        headers: dict[str, str] | None = None,
+        auth: httpx.Auth | Literal["oauth"] | str | None = None,
+        sse_read_timeout: datetime.timedelta | float | int | None = None,
+        httpx_client_factory: McpHttpClientFactory | None = None,
+        verify: ssl.SSLContext | bool | str | None = None,
+        *,
         resume_session_id: str | None = None,
         resume_protocol_version: str | None = None,
         terminate_on_close: bool = True,
-        **kwargs: object,
     ) -> None:
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        super().__init__(
+            url,
+            headers=headers,
+            auth=auth,
+            sse_read_timeout=sse_read_timeout,
+            httpx_client_factory=httpx_client_factory,
+            verify=verify,
+        )
         self.resume_session_id = resume_session_id
         self.resume_protocol_version = resume_protocol_version
         self.terminate_on_close = terminate_on_close
@@ -99,12 +126,19 @@ class ResumableStreamableHttpTransport(StreamableHttpTransport):
 
         verify_factory = self._make_verify_factory()
         if self.httpx_client_factory is not None:
-            http_client = self.httpx_client_factory(
-                headers=headers,
-                auth=self.auth,
-                follow_redirects=True,  # type: ignore[call-arg]
-                **({"timeout": timeout} if timeout else {}),
-            )
+            # fastmcp's factory contract is WIDER than the SDK's
+            # McpHttpClientFactory Protocol: factories "must accept headers,
+            # auth, follow_redirects, and optionally timeout" (see the
+            # StreamableHttpTransport docstring). Pass them as a mapping so we
+            # honour that documented contract without misdeclaring the SDK's.
+            factory_kwargs: dict[str, Any] = {
+                "headers": headers,
+                "auth": self.auth,
+                "follow_redirects": True,
+            }
+            if timeout:
+                factory_kwargs["timeout"] = timeout
+            http_client = self.httpx_client_factory(**factory_kwargs)
         elif verify_factory is not None:
             http_client = verify_factory(headers=headers, timeout=timeout, auth=self.auth)
         else:
@@ -126,14 +160,21 @@ class ResumableStreamableHttpTransport(StreamableHttpTransport):
             self._get_session_id_cb = get_session_id
             # The SDK transport is the bound method's receiver; session
             # identity lives in two plain attributes it stamps onto every
-            # request's headers.
-            sdk_transport = get_session_id.__self__  # type: ignore[attr-defined]
+            # request's headers. Checked, not assumed: an SDK change that
+            # stops yielding a bound method must fail loudly here.
+            sdk_transport = getattr(get_session_id, "__self__", None)
+            if not isinstance(sdk_transport, StreamableHTTPTransport):
+                raise RuntimeError(
+                    "mcp SDK drift: get_session_id is no longer bound to a "
+                    "StreamableHTTPTransport; resume_transport needs updating"
+                )
 
             if self.resume_session_id is not None:
                 # Seed BEFORE anything is sent.
-                sdk_transport.session_id = self.resume_session_id
+                seeded = cast(_SeedableSession, sdk_transport)
+                seeded.session_id = self.resume_session_id
                 if self.resume_protocol_version is not None:
-                    sdk_transport.protocol_version = self.resume_protocol_version
+                    seeded.protocol_version = self.resume_protocol_version
                 logger.debug(
                     "resume: attached to upstream session %s…",
                     self.resume_session_id[:8],

@@ -15,9 +15,11 @@ This is the drift alarm for the fastmcp/SDK internals the transport mirrors
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import ProcFactory, write_tools_spec
+from fakes import content_text
 from fastmcp import Client
 
 from mcp_combiner.resume_transport import ResumableStreamableHttpTransport
@@ -29,9 +31,9 @@ _SPEC = [
 ]
 
 
-async def _greet(client: Client, who: str) -> str:
+async def _greet(client: Client[Any], who: str) -> str:
     result = await client.call_tool("greet", {"who": who})
-    return result.content[0].text
+    return content_text(result)
 
 
 class TestResumeRoundTrip:

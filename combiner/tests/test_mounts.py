@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeConnManager, FakeSSManager
+from fakes import FakeConnManager, FakeSSManager, content_text
 from fastmcp import Client, FastMCP
 
 import mcp_combiner.proxyfactory as proxyfactory_mod
@@ -121,7 +121,7 @@ async def test_restart_leaves_one_live_provider(
     try:
         async with Client(combiner) as client:
             result = await client.call_tool("combiner__restart_server", {"server_name": "crib"})
-            text = result.content[0].text
+            text = content_text(result)
             assert "restarted" in text
             assert "1 provider(s) replaced" in text
 
@@ -133,7 +133,7 @@ async def test_restart_leaves_one_live_provider(
 
             # The proxied call resolves through the NEW proxy, not a stale one.
             pong = await client.call_tool("crib_ping", {})
-            assert pong.content[0].text == "pong"
+            assert content_text(pong) == "pong"
         assert len(proxies) == 2  # startup proxy + restart's fresh proxy
     finally:
         server_mod._server_tool_cache.pop("crib", None)

@@ -33,6 +33,7 @@ from conftest import (
     write_servers_config,
     write_tools_spec,
 )
+from fakes import content_text
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
@@ -45,12 +46,12 @@ _SPEC = [
 TOKEN = "beefbeef-1111-2222-3333-444444444444"
 
 
-async def _text(client: Client, tool: str, args: dict) -> str:
+async def _text(client: Client[Any], tool: str, args: dict[str, Any]) -> str:
     result = await client.call_tool(tool, args)
-    return result.content[0].text
+    return content_text(result)
 
 
-def _chat(combiner: CombinerHandle, token: str = TOKEN) -> Client:
+def _chat(combiner: CombinerHandle, token: str = TOKEN) -> Client[Any]:
     return Client(
         StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token})
     )

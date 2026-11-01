@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -31,6 +32,7 @@ from conftest import (
     write_servers_config,
     write_tools_spec,
 )
+from fakes import content_text, json_object
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
@@ -53,26 +55,28 @@ def _token() -> str:
     return str(uuid.uuid4())
 
 
-def _header_client(combiner: CombinerHandle, token: str) -> Client:
+def _header_client(combiner: CombinerHandle, token: str) -> Client[Any]:
     return Client(
         StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token})
     )
 
 
-def _url_client(combiner: CombinerHandle, token: str) -> Client:
+def _url_client(combiner: CombinerHandle, token: str) -> Client[Any]:
     return Client(f"{combiner.mcp_url}/{token}")
 
 
-async def _text(client: Client, tool: str, args: dict) -> str:
+async def _text(client: Client[Any], tool: str, args: dict[str, Any]) -> str:
     result = await client.call_tool(tool, args)
-    return result.content[0].text
+    return content_text(result)
 
 
-async def _rest(combiner: CombinerHandle, method: str, path: str, body: dict | None = None) -> dict:
+async def _rest(
+    combiner: CombinerHandle, method: str, path: str, body: dict[str, Any] | None = None
+) -> dict[str, Any]:
     async with httpx.AsyncClient() as http:
         r = await http.request(method, f"{combiner.base_url}{path}", json=body, timeout=5.0)
         r.raise_for_status()
-        return r.json()
+        return json_object(r.text)
 
 
 async def _start_stdio_combiner(procs: ProcFactory, tmp_path: Path) -> CombinerHandle:

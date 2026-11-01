@@ -13,13 +13,14 @@ from typing import Any
 
 import pytest
 from fakes import FakeCombiner, FakeConnManager, FakeProvider, FakeSSManager
+from fastmcp.tools.function_tool import FunctionTool
 
 import mcp_combiner.proxyfactory as proxyfactory_mod
 import mcp_combiner.server as server_mod
 import mcp_combiner.toolcache as toolcache_mod
 from mcp_combiner.config import CombinerConfig, ServerConfig
 from mcp_combiner.meta_tools import register_meta_tools
-from mcp_combiner.mounts import mount_server_provider
+from mcp_combiner.mounts import mount_server_provider, mounted_server_names
 
 
 def _write(path: Path, servers: dict[str, Any]) -> None:
@@ -31,7 +32,7 @@ def _http(url: str) -> dict[str, Any]:
 
 
 @pytest.fixture
-def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     cfg_path = tmp_path / "servers.json"
     _write(cfg_path, {"alpha": _http("http://localhost:1111/mcp")})
     config = CombinerConfig.load(str(cfg_path))
@@ -82,7 +83,18 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _namespaces(combiner: FakeCombiner) -> set[str]:
-    return {p._namespace for p in combiner.providers}
+    return mounted_server_names(combiner)
+
+
+def _ping_tool() -> FunctionTool:
+    """A real tool the scripted provider serves as ``ping`` (fastmcp's
+    namespace transform lists it as ``<server>_ping``)."""
+    return FunctionTool(
+        fn=lambda: None,
+        name="ping",
+        description="",
+        parameters={"type": "object", "properties": {}},
+    )
 
 
 async def test_no_changes(harness: dict[str, Any]) -> None:
@@ -259,21 +271,8 @@ async def test_restart_stdio_primes_before_broadcast(
     # the raw proxy — record the invocation there. Answer a REAL tool: the
     # publication is gated on a non-empty list (and this one differs from the
     # pre-restart slice, so it is a replacement → broadcast).
-    from fastmcp.tools.function_tool import FunctionTool
-
-    async def _list_tools(self: Any) -> list[Any]:
-        order.append("list_tools")
-        return [
-            FunctionTool(
-                fn=lambda: None,
-                name="crib_ping",
-                description="",
-                parameters={"type": "object", "properties": {}},
-            )
-        ]
-
-    monkeypatch.setattr(FakeProvider, "list_tools", _list_tools)
-    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
+    remounted = FakeProvider([_ping_tool()], on_list=lambda: order.append("list_tools"))
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: remounted)
     monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
     monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
     monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
@@ -321,12 +320,8 @@ async def test_restart_stdio_empty_answer_keeps_slice_silent(
 
     order: list[str] = []
 
-    async def _list_tools(self: Any) -> list[Any]:
-        order.append("list_tools")
-        return []
-
-    monkeypatch.setattr(FakeProvider, "list_tools", _list_tools)
-    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
+    remounted = FakeProvider([], on_list=lambda: order.append("list_tools"))
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: remounted)
     monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
     monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
     monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
@@ -336,12 +331,12 @@ async def test_restart_stdio_empty_answer_keeps_slice_silent(
     # answered-empty list until its (default 30s) deadline.
     real_prime = toolcache_mod.prime_server_tools
 
-    async def fast_prime(combiner_, name_, timeout=None, interval=None):
+    async def fast_prime(
+        combiner_: Any, name_: Any, timeout: float | None = None, interval: float | None = None
+    ) -> Any:
         return await real_prime(combiner_, name_, timeout=0.05, interval=0.0)
 
     monkeypatch.setattr(toolcache_mod, "prime_server_tools", fast_prime)
-
-    from fastmcp.tools.function_tool import FunctionTool
 
     good = FunctionTool(
         fn=lambda: None,
@@ -393,21 +388,8 @@ async def test_reload_added_stdio_primes_before_broadcast(
 
     order: list[str] = []
 
-    from fastmcp.tools.function_tool import FunctionTool
-
-    async def _list_tools(self: Any) -> list[Any]:
-        order.append("list_tools")
-        return [
-            FunctionTool(
-                fn=lambda: None,
-                name="crib_ping",
-                description="",
-                parameters={"type": "object", "properties": {}},
-            )
-        ]
-
-    monkeypatch.setattr(FakeProvider, "list_tools", _list_tools)
-    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
+    added = FakeProvider([_ping_tool()], on_list=lambda: order.append("list_tools"))
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: added)
     monkeypatch.setattr(server_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
     monkeypatch.setattr(server_mod, "clear_tool_cache", lambda: order.append("clear"))
     monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: order.append("invalidate"))
@@ -438,3 +420,214 @@ async def test_reload_added_stdio_primes_before_broadcast(
     finally:
         srv._server_tool_cache.pop("crib", None)
         srv._server_tool_seen.pop("crib", None)
+
+
+async def test_reload_picks_up_external_backing_rewrites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: an edit confined to `externalServers` (launch/stop argv)
+    must NOT be reported as "No config changes detected" — backing-entry
+    diffs count as server changes, so the referencing server is torn down
+    (stop via the entry snapshot) and remounted (relaunched with the new
+    argv)."""
+    cfg_path = tmp_path / "servers.json"
+    base: dict[str, Any] = {
+        "mcpServers": {
+            "beta": {
+                "url": "http://localhost:2222/mcp",
+                "transport": "http",
+                "externalServer": "ext",
+            },
+        },
+        "externalServers": {
+            "ext": {
+                "launch": ["docker", "run", "-d", "x"],
+                "stop": ["docker", "stop", "OLD"],
+                "health_timeout": 5,
+            },
+        },
+    }
+    cfg_path.write_text(json.dumps(base))
+    config = CombinerConfig.load(str(cfg_path))
+
+    combiner = FakeCombiner()
+    conn = FakeConnManager()
+    ss = FakeSSManager()
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
+    monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: None)
+    monkeypatch.setattr(toolcache_mod, "clear_tool_cache", lambda: None)
+
+    register_meta_tools(combiner, config, conn, ss)
+    reload = combiner.tools["combiner__reload_config"]
+    mount_server_provider(combiner, object(), "beta")
+    conn.connected.add("beta")
+
+    # Reload with ONLY the externalServers entry changed (new stop argv).
+    rewrite = json.loads(json.dumps(base))
+    rewrite["externalServers"]["ext"]["stop"] = ["docker", "stop", "NEW"]
+    cfg_path.write_text(json.dumps(rewrite))
+
+    result = await reload()
+    assert "changed=['beta']" in result
+    assert config.external_servers["ext"].stop == ["docker", "stop", "NEW"]
+    # Teardown stopped the backend, remount re-started it (fake manager bookkeeping).
+    assert ("stop", "beta") in ss.calls
+    assert ("start", "beta") in ss.calls
+
+
+async def test_reload_removing_server_and_entry_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: deleting a server AND its externalServers entry in the same
+    edit used to KeyError mid-reload (the backing-diff scan included removed
+    servers in `changed`, but the remount step indexes new_servers). The
+    removal path alone must handle it."""
+    cfg_path = tmp_path / "servers.json"
+    base: dict[str, Any] = {
+        "mcpServers": {
+            "alpha": {"url": "http://localhost:1111/mcp", "transport": "http"},
+            "beta": {
+                "url": "http://localhost:2222/mcp",
+                "transport": "http",
+                "externalServer": "ext",
+            },
+        },
+        "externalServers": {
+            "ext": {
+                "launch": ["docker", "run", "-d", "x"],
+                "stop": ["docker", "stop", "OLD"],
+                "health_timeout": 5,
+            },
+        },
+    }
+    cfg_path.write_text(json.dumps(base))
+    config = CombinerConfig.load(str(cfg_path))
+
+    combiner = FakeCombiner()
+    conn = FakeConnManager()
+    ss = FakeSSManager()
+    monkeypatch.setattr(proxyfactory_mod, "_create_server_proxy", lambda *a, **k: object())
+    monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: None)
+    monkeypatch.setattr(toolcache_mod, "clear_tool_cache", lambda: None)
+
+    register_meta_tools(combiner, config, conn, ss)
+    reload = combiner.tools["combiner__reload_config"]
+    mount_server_provider(combiner, object(), "alpha")
+    mount_server_provider(combiner, object(), "beta")
+    conn.connected.update({"alpha", "beta"})
+
+    # Remove beta AND its backing entry in one edit.
+    cfg_path.write_text(json.dumps({"mcpServers": {"alpha": base["mcpServers"]["alpha"]}}))
+
+    result = await reload()
+    assert "removed=['beta']" in result
+    assert "changed" not in result.replace("changed=[]", "")  # beta not misreported as changed
+    assert "beta" not in config.servers
+    assert ("disconnect", "beta") in conn.calls
+
+
+async def test_disable_evicts_isolated_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (round-6 B-1): disable must evict per-chat isolated
+    sessions/processes — the round-5 fix covered reload/restart teardowns but
+    disable has its own inline teardown, and re-enable handed chats their OLD
+    children (same PID, stale state) until this landed."""
+    cfg_path = tmp_path / "servers.json"
+    _write(cfg_path, {"alpha": _http("http://localhost:1111/mcp")})
+    config = CombinerConfig.load(str(cfg_path))
+
+    combiner = FakeCombiner()
+    conn = FakeConnManager()
+    ss = FakeSSManager()
+
+    import mcp_combiner.isolated as iso
+
+    called: list[str] = []
+
+    async def _spy(server: str) -> int:
+        called.append(server)
+        return 2
+
+    monkeypatch.setattr(iso.REGISTRY, "evict_server", _spy)
+
+    register_meta_tools(combiner, config, conn, ss)
+    mount_server_provider(combiner, object(), "alpha")
+
+    result = await combiner.tools["combiner__disable_server"]("alpha")
+    assert "disabled and unmounted" in result
+    assert called == ["alpha"]
+
+
+async def test_disable_without_evict_still_fires_and_reports_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (round-9): when provider dropping fails, the evict must
+    STILL run (it lives in the finally now — pre-fix it lived inside the try
+    and a drop exception skipped it, leaving per-chat children alive behind a
+    disabled server), and the failure message is preserved."""
+    cfg_path = tmp_path / "servers.json"
+    _write(cfg_path, {"alpha": _http("http://localhost:1111/mcp")})
+    config = CombinerConfig.load(str(cfg_path))
+
+    combiner = FakeCombiner()
+    conn = FakeConnManager()
+    ss = FakeSSManager()
+
+    import mcp_combiner.isolated as iso
+
+    called: list[str] = []
+
+    async def _spy(server: str) -> int:
+        called.append(server)
+        return 1
+
+    monkeypatch.setattr(iso.REGISTRY, "evict_server", _spy)
+
+    def _explode(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr("mcp_combiner.meta_tools.drop_server_providers", _explode)
+
+    register_meta_tools(combiner, config, conn, ss)
+    mount_server_provider(combiner, object(), "alpha")
+
+    result = await combiner.tools["combiner__disable_server"]("alpha")
+    assert "disabled but failed to unmount: kaboom" in result
+    assert called == ["alpha"]  # the evict survived the drop failure
+
+
+async def test_disable_drops_providers_before_it_evicts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Order pin (round-9): disable tears the mount down BEFORE evicting —
+    a call still in flight through the old proxy cannot re-register a stale
+    entry after the evict."""
+    cfg_path = tmp_path / "servers.json"
+    _write(cfg_path, {"alpha": _http("http://localhost:1111/mcp")})
+    config = CombinerConfig.load(str(cfg_path))
+
+    combiner = FakeCombiner()
+    conn = FakeConnManager()
+    ss = FakeSSManager()
+
+    import mcp_combiner.isolated as iso
+
+    order: list[str] = []
+
+    async def _evict_spy(server: str) -> int:
+        order.append("evict")
+        return 1
+
+    def _drop_spy(*args: Any, **kwargs: Any) -> int:
+        order.append("drop")
+        return 1
+
+    monkeypatch.setattr(iso.REGISTRY, "evict_server", _evict_spy)
+    monkeypatch.setattr("mcp_combiner.meta_tools.drop_server_providers", _drop_spy)
+
+    register_meta_tools(combiner, config, conn, ss)
+    mount_server_provider(combiner, object(), "alpha")
+
+    await combiner.tools["combiner__disable_server"]("alpha")
+    assert order == ["drop", "evict"]

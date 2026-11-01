@@ -248,11 +248,12 @@ class NvimChannelManager:
 
     async def _exec(self, inst: _Instance, job: _Job) -> Any:
         """Ensure a connection, then run the job's Lua over the channel."""
-        nvim = inst.nvim
-        if nvim is None:
-            nvim = await asyncio.to_thread(pynvim.attach, "socket", path=inst.socket, decode=True)
+        if inst.nvim is not None:
+            nvim = inst.nvim
+        else:
+            # decode is pynvim's default (typed Literal[True]); not re-passed.
+            nvim = await asyncio.to_thread(pynvim.attach, "socket", path=inst.socket)
             inst.nvim = nvim
-        assert nvim is not None  # narrow for the type checker; reconnect guarantees it
         return await asyncio.to_thread(nvim.exec_lua, job.lua, *job.lua_args)
 
     @staticmethod

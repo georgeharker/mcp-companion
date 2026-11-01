@@ -15,13 +15,13 @@ warnings until the process was bounced. Regression coverage for the two fixes
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Sequence
+from collections.abc import Sequence
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 from fastmcp import Client, FastMCP
-from fastmcp.server.middleware import MiddlewareContext
+from fastmcp.server.middleware import CallNext, MiddlewareContext
 from fastmcp.tools import Tool
 
 import mcp_combiner.server as srv
@@ -35,7 +35,7 @@ _LIST_TIMEOUT = 0.05
 class _HangChild(FastMCP):
     """A mounted upstream whose list_tools waits forever — the wedged state."""
 
-    async def list_tools(self) -> Sequence[Tool]:  # type: ignore[override]
+    async def list_tools(self, *, run_middleware: bool = True) -> Sequence[Tool]:
         await asyncio.Event().wait()  # never set
         return []
 
@@ -61,9 +61,14 @@ def _context() -> MagicMock:
     return ctx
 
 
-async def _hung_fetch(context: MiddlewareContext[Any]) -> Sequence[Tool]:
-    gate = getattr(_hung_fetch, "_gate")
-    return await cast(Awaitable[Sequence[Tool]], gate.wait())
+def _hung_fetch(gate: asyncio.Event) -> CallNext[Any, Sequence[Tool]]:
+    """A ``call_next`` that hangs on *gate* (never set) — the wedged fetch."""
+
+    async def fetch(context: MiddlewareContext[Any]) -> Sequence[Tool]:
+        await gate.wait()
+        return []
+
+    return fetch
 
 
 async def _never_fetch(context: MiddlewareContext[Any]) -> Sequence[Tool]:
@@ -177,9 +182,7 @@ class TestFetchOwnerBound:
         """Owner times out on a hung upstream → serves last-known-good, clears slot."""
         mw = srv.ToolProcessingMiddleware()
         gate = asyncio.Event()  # the owner's fetch hangs on this forever
-        _hung_fetch._gate = gate  # type: ignore[attr-defined]
-
-        task = asyncio.create_task(mw.on_list_tools(_context(), _hung_fetch))
+        task = asyncio.create_task(mw.on_list_tools(_context(), _hung_fetch(gate)))
         for _ in range(20):
             await asyncio.sleep(0)  # the owner reaches the hung fetch
         result = await asyncio.wait_for(task, timeout=5.0)
@@ -193,12 +196,11 @@ class TestFetchOwnerBound:
         """An owner cancelled mid-fetch (client went away) releases its joiners."""
         mw = srv.ToolProcessingMiddleware()
         gate = asyncio.Event()
-        _hung_fetch._gate = gate  # type: ignore[attr-defined]
-
-        owner = asyncio.create_task(mw.on_list_tools(_context(), _hung_fetch))
+        hung = _hung_fetch(gate)
+        owner = asyncio.create_task(mw.on_list_tools(_context(), hung))
         for _ in range(20):
             await asyncio.sleep(0)
-        joiner = asyncio.create_task(mw.on_list_tools(_context(), _hung_fetch))
+        joiner = asyncio.create_task(mw.on_list_tools(_context(), hung))
         for _ in range(20):
             await asyncio.sleep(0)  # the joiner piles onto the pending future
         owner.cancel()

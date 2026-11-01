@@ -151,7 +151,7 @@ def test_forwarding_factory_wraps_a_real_proxy() -> None:
 
     client = proxy.client_factory()  # the wrapped, real factory
     assert isinstance(client, Client)  # the factory is sync (narrows the union)
-    assert isinstance(client._session_kwargs["message_handler"], _ResourceNotifyHandler)
+    assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
 
 async def test_resource_updated_delivered_namespaced(capture: _CaptureSession) -> None:

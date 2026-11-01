@@ -76,10 +76,10 @@ def _overlay_backing_state(name: str, state: str) -> str:
     """
     if state not in ("starting", "disconnected"):
         return state
-    ss_manager = RUNTIME.ss_manager
-    if ss_manager is None:
+    proc_manager = RUNTIME.proc_manager
+    if proc_manager is None:
         return state
-    backing = ss_manager.backing_state(name)
+    backing = proc_manager.backing_state(name)
     if backing in ("spawning", "probing"):
         return "starting"
     if backing in ("spawn_failed", "unreachable"):

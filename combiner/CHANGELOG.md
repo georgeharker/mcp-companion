@@ -4,6 +4,95 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [0.18.0] — 2026-11-01
+
+### Added
+
+- **`isolate: true` now works on stdio servers — per-chat SUBPROCESS isolation**
+  (was HTTP/SSE-only; stdio entries ignored the flag with a startup warning).
+  Each chat (the same token-keyed identity the HTTP layer uses) gets its own
+  `command` subprocess — a stdio subprocess IS a session, so state partitioning
+  is total. Lifecycle reuses the token-keyed registry: grace expiry leaves the
+  child running (in-memory state preserved — the analog of keeping an HTTP
+  server-side session), the park-ttl forget terminates it, and a token
+  re-appearing inside the window reattaches to the same child. On combiner
+  shutdown children are always terminated (they cannot transfer to a successor)
+  and disable/reload evicts them too (remount hands chats fresh children).
+  A crashed child is detected and replaced transparently on that chat's
+  next call — a fresh subprocess with fresh state; in-memory state is lost
+  and only the call that was in flight when the child died errors. Per-chat
+  clients are `StatefulProxyClient` clones, so fastmcp's proxy forwarding
+  (log/progress/sampling/roots) still works under isolation; the plain
+  (non-handover) shutdown now releases parked HTTP sessions concurrently
+  with a best-effort DELETE (an N×5s sequential stall becomes one 5s bound)
+  since no successor could resume them anyway; and the
+  startup tools/list prime rides an ephemeral probe child that dies with
+  its context (no startup leaks). Cost: N concurrent chats spawn N copies
+  of the server's runtime.
+- **`externalServers` — non-owned backing processes** (e.g. docker)
+  - New top-level `externalServers` config section alongside `sharedServers`.
+    Where a `sharedServer` entry is a process the combiner *owns* (spawned and
+    refcounted by sharedserver, kept warm for `grace_period`), an
+    `externalServer` entry is a process whose lifetime some other tool decides
+    (`docker run`, `docker compose up -d`): the combiner optionally launches
+    it, waits for the server's `url` within `health_timeout`, and on shutdown
+    does exactly what the config states — run a `stop` command, terminate a
+    `foreground` child, or leave it running.
+  - Lifecycle semantics derive from three fields (`launch`, `stop`,
+    `foreground`) rather than a mode enum; omitting `launch` makes the entry
+    attach-only (reachability probe with no process management), giving plain
+    `url`-only HTTP servers the same status reporting as backed ones — as a
+    background probe that never delays combiner readiness.
+  - `BackingManagerBase` (new `mcp_combiner/backing.py`) owns every lifecycle
+    frame — `backing_state`/`start_all`/`ensure_started`/`ensure_stopped`/
+    `restart`/`stop_all`, entry dedup, concurrent gather, and the shared
+    backing-state vocabulary — so there is no kind-switch anywhere. The three
+    kinds only implement their claim resolution and behaviour hooks.
+    `BackingProcessManager` (same module) is an ordered registry facade: the
+    first manager claiming a server wins, which is the single place backing
+    precedence is decided; a trailing `PlainUrlProbeManager` claims everything
+    no other kind manages (plain url-only servers) and background-probes it
+    for status parity. `_overlay_backing_state` needed no fork.
+  - `sharedServer` wins over `externalServer` when a server entry sets both
+    (load-time warning; the facade's claim order is the single precedence
+    source — a dangling `sharedServer` reference falls through to the
+    external one). Dangling section references also warn at load. Ownership
+    keys (`grace_period`, `command`/`args`) on an `externalServers` entry are
+    warned about as unknown and ignored, as is a `stop` on an entry with no
+    `launch` (nothing was launched, so nothing gets stopped).
+  - Shutdown bounds: the `stop` command and the foreground-child termination
+    **share** a 3s budget on the shutdown path (the ~5s SIGTERM→SIGKILL window
+    sharedserver gives the combiner; `unuse`'s bound is 2s) — not 3s + 5s. A
+    `docker stop` CLI killed at the budget still completes daemon-side, so
+    containers stop. Off-shutdown (disable/restart) stops get a wider 10s
+    budget. Reload (`combiner__reload_config`) now treats backing-entry
+    rewrites as server changes too (teardown stops the old backend via the
+    launch-time entry snapshot; remount relaunches with the new one), so
+    added servers launch and changed launch/stop argv take effect (a rewritten
+    `sharedServers` entry reattaches within its grace period instead — its new
+    `command`/`args` need a real process restart, not a remount). Shutdown
+    stops always use the launch-time snapshot; disable/restart use the live
+    config. `restartable` requires a real stop path (`stop` configured or
+    `foreground`) — attach-only and detached-without-stop entries fall back
+    to the caller's reconnect path instead of relaunching into a name
+    conflict — and a disable/enable that races an in-flight launch or restart
+    is last-wins (an enable cancels a deferred stop; a disable skips the
+    relaunch and the remount). Plain url-only probes are re-run on every
+    (re-)enable, so a stale `stopped` verdict never outlives a disable. One
+    narrow exception to last-wins: a reload whose teardown/remount races a
+    still-running launch (≤ health_timeout + launch) keeps the in-flight
+    old-argv backend; the next restart applies the new argv.
+- **The package ships type information** (`py.typed`, PEP 561), so code
+  importing `mcp_combiner` is type-checked against its annotations. The
+  package and its tests are clean under pyright and mypy `--strict` with no
+  `type: ignore` suppressions.
+
+### Fixed
+
+- A caller waiting on another caller's in-flight OAuth flow now gets an error
+  when that flow finishes without an authorization code, instead of handing
+  `None` to the token exchange as the code.
+
 ## [0.17.4] — 2026-10-20
 
 ### Fixed

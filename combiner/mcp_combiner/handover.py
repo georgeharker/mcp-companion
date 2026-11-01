@@ -85,7 +85,11 @@ async def write_handover(path: str) -> None:
                 "url": parked.url,
                 "headers": parked.headers,
             }
+            # Only HTTP/SSE parked entries transfer: stdio `ParkedProc`
+            # subprocesses are terminated at close_all (they cannot transfer
+            # to a successor), so they never reach the payload.
             for (server, token), parked in REGISTRY.parked.items()
+            if isinstance(parked, ParkedSession)
         ],
     }
 

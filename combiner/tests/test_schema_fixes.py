@@ -10,51 +10,51 @@ ALL = frozenset(SCHEMA_FIXES)
 NONE: frozenset[str] = frozenset()
 
 
-def test_no_fixes_is_a_noop():
+def test_no_fixes_is_a_noop() -> None:
     schema = {"foo": "bar", "type": None}
     assert _apply_schema_fixes(dict(schema), NONE) == schema
 
 
-def test_empty_object_fills_missing_type_and_properties():
+def test_empty_object_fills_missing_type_and_properties() -> None:
     out = _apply_object_fixes({}, frozenset({"empty_object"}))
     assert out == {"type": "object", "properties": {}}
 
 
-def test_empty_object_fills_properties_on_object():
+def test_empty_object_fills_properties_on_object() -> None:
     out = _apply_object_fixes({"type": "object"}, frozenset({"empty_object"}))
     assert out["properties"] == {}
 
 
-def test_empty_object_coerces_list_properties_to_dict():
+def test_empty_object_coerces_list_properties_to_dict() -> None:
     # issue #7: an empty dict can arrive encoded as [] where {} is required.
     out = _apply_object_fixes({"type": "object", "properties": []}, frozenset({"empty_object"}))
     assert out["properties"] == {}
 
 
-def test_empty_object_leaves_non_object_type_alone():
+def test_empty_object_leaves_non_object_type_alone() -> None:
     out = _apply_object_fixes({"type": "string"}, frozenset({"empty_object"}))
     assert out == {"type": "string"}
 
 
-def test_empty_object_off_by_default():
+def test_empty_object_off_by_default() -> None:
     assert _apply_object_fixes({}, NONE) == {}
 
 
-def test_drop_invalid_required_drops_non_list():
+def test_drop_invalid_required_drops_non_list() -> None:
     out = _apply_object_fixes(
         {"type": "object", "required": "name"}, frozenset({"drop_invalid_required"})
     )
     assert "required" not in out
 
 
-def test_drop_invalid_required_keeps_list():
+def test_drop_invalid_required_keeps_list() -> None:
     out = _apply_object_fixes(
         {"type": "object", "required": ["name"]}, frozenset({"drop_invalid_required"})
     )
     assert out["required"] == ["name"]
 
 
-def test_anyof_type_hoist_distributes_parent_type():
+def test_anyof_type_hoist_distributes_parent_type() -> None:
     schema = {"type": "array", "anyOf": [{"items": {"type": "string"}}, {"type": "null"}]}
     out = _apply_schema_fixes(schema, frozenset({"anyof_type_hoist"}))
     assert isinstance(out, dict)
@@ -63,13 +63,13 @@ def test_anyof_type_hoist_distributes_parent_type():
     assert out["anyOf"][1] == {"type": "null"}
 
 
-def test_anyof_hoist_does_not_force_object():
+def test_anyof_hoist_does_not_force_object() -> None:
     # empty_object is NOT enabled, so a typeless leaf stays typeless.
     out = _apply_schema_fixes({"description": "x"}, frozenset({"anyof_type_hoist"}))
     assert out == {"description": "x"}
 
 
-def test_all_fixes_combine():
+def test_all_fixes_combine() -> None:
     schema = {"required": "x"}  # no type, invalid required
     out = _apply_schema_fixes(schema, ALL)
     assert isinstance(out, dict)
@@ -78,6 +78,6 @@ def test_all_fixes_combine():
     assert "required" not in out
 
 
-def test_non_dict_schema_returned_unchanged():
+def test_non_dict_schema_returned_unchanged() -> None:
     assert _apply_schema_fixes("not-a-dict", ALL) == "not-a-dict"
     assert _apply_schema_fixes([1, 2], frozenset({"anyof_type_hoist"})) == [1, 2]

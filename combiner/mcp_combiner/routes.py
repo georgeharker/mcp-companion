@@ -67,6 +67,7 @@ def register_routes(
     async def session_map(request: Request) -> JSONResponse:
         from mcp_combiner import nvim_proxy
         from mcp_combiner.isolated import REGISTRY as isolated_registry
+        from mcp_combiner.isolated import ParkedSession
 
         token_instances, _instances = nvim_proxy.snapshot_routing()
         tokens = sorted(set(RUNTIME.sessions.token_sessions) | set(token_instances))
@@ -100,7 +101,11 @@ def register_routes(
                         "upstream_session_id": parked.session_id,
                         "protocol_version": parked.protocol_version,
                     }
+                    # Only HTTP/SSE parked entries carry a resumable session
+                    # id; stdio ParkedProc entries are running
+                    # subprocesses (terminated, not resumed, at forget).
                     for (server, token), parked in isolated_registry.parked.items()
+                    if isinstance(parked, ParkedSession)
                 ],
                 "grace_seconds": isolated_registry.grace,
                 "park_ttl_seconds": isolated_registry.ttl,

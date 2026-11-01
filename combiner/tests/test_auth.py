@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from fastmcp.client.auth.oauth import OAuth
+from key_value.aio.protocols import AsyncKeyValue
 
 from mcp_combiner.auth import (
     _NETWORK_ERROR_GRACE_SECONDS,
@@ -16,6 +20,7 @@ from mcp_combiner.auth import (
     _is_network_error,
     _ProbeOutcome,
     _RefreshOutcome,
+    _RefreshTokenOAuth,
     build_auth,
     create_encrypted_store,
 )
@@ -27,40 +32,40 @@ class TestEncryptedStore:
     """Unit tests for encrypted file-based key-value persistence."""
 
     @pytest.fixture
-    def store(self, tmp_path: Path):
+    def store(self, tmp_path: Path) -> AsyncKeyValue:
         return create_encrypted_store(tmp_path / "test-server")
 
     @pytest.mark.anyio
-    async def test_get_missing_key(self, store) -> None:
+    async def test_get_missing_key(self, store: AsyncKeyValue) -> None:
         assert await store.get(key="missing", collection="col") is None
 
     @pytest.mark.anyio
-    async def test_roundtrip(self, store) -> None:
+    async def test_roundtrip(self, store: AsyncKeyValue) -> None:
         await store.put(key="k", value={"a": 1, "b": "two"}, collection="col")
         result = await store.get(key="k", collection="col")
         assert result == {"a": 1, "b": "two"}
 
     @pytest.mark.anyio
-    async def test_delete_existing(self, store) -> None:
+    async def test_delete_existing(self, store: AsyncKeyValue) -> None:
         await store.put(key="k", value={"x": 1}, collection="col")
         deleted = await store.delete(key="k", collection="col")
         assert deleted is True
         assert await store.get(key="k", collection="col") is None
 
     @pytest.mark.anyio
-    async def test_delete_missing(self, store) -> None:
+    async def test_delete_missing(self, store: AsyncKeyValue) -> None:
         deleted = await store.delete(key="missing", collection="col")
         assert deleted is False
 
     @pytest.mark.anyio
-    async def test_multiple_collections_independent(self, store) -> None:
+    async def test_multiple_collections_independent(self, store: AsyncKeyValue) -> None:
         await store.put(key="k", value={"v": 1}, collection="col1")
         await store.put(key="k", value={"v": 2}, collection="col2")
         assert (await store.get(key="k", collection="col1")) == {"v": 1}
         assert (await store.get(key="k", collection="col2")) == {"v": 2}
 
     @pytest.mark.anyio
-    async def test_key_with_special_chars(self, store) -> None:
+    async def test_key_with_special_chars(self, store: AsyncKeyValue) -> None:
         """Keys containing slashes/colons work via sanitization."""
         key = "http://localhost:8002/mcp/tokens"
         await store.put(key=key, value={"tok": "abc"}, collection="mcp-oauth-token")
@@ -122,8 +127,9 @@ class TestBuildAuth:
             build_auth("srv", auth_config={"unknown": True})
 
     def test_invalid_type(self) -> None:
+        not_an_auth_config: Any = 42  # deliberately outside the declared type
         with pytest.raises(ValueError, match="auth must be"):
-            build_auth("srv", auth_config=42)  # type: ignore[arg-type]
+            build_auth("srv", auth_config=not_an_auth_config)
 
     def test_oauth_string_requires_url(self) -> None:
         with pytest.raises(ValueError, match="requires a URL"):
@@ -251,7 +257,7 @@ class TestIsNetworkError:
 class TestProactiveRefreshNetworkHandling:
     """Tests that network errors during proactive refresh don't cause full re-auth."""
 
-    def _make_oauth(self, tmp_path: Path):
+    def _make_oauth(self, tmp_path: Path) -> _RefreshTokenOAuth:
         """Build a minimal _RefreshTokenOAuth bound to a fake server URL."""
         from mcp_combiner.auth import _build_oauth
 
@@ -340,7 +346,7 @@ class TestProactiveRefreshNetworkHandling:
             expires_in=-1,
         )
 
-        async def _fake_super_init(self_inner):
+        async def _fake_super_init(self_inner: _RefreshTokenOAuth) -> None:
             self_inner.context.current_tokens = fake_token
             fake_ci = MagicMock()
             fake_ci.client_id = "client-123"
@@ -383,7 +389,7 @@ class TestPreflightRefresh:
       * A NETWORK_ERROR outcome leaves tokens intact and bumps the grace window.
     """
 
-    def _make_oauth(self, tmp_path: Path):
+    def _make_oauth(self, tmp_path: Path) -> _RefreshTokenOAuth:
         from mcp_combiner.auth import _build_oauth
 
         return _build_oauth(
@@ -393,7 +399,7 @@ class TestPreflightRefresh:
             cache_tokens=False,
         )
 
-    def _seed(self, oauth, *, expires_in: float = 3600.0):
+    def _seed(self, oauth: _RefreshTokenOAuth, *, expires_in: float = 3600.0) -> None:
         """Wire the context with refreshable tokens, client info, metadata."""
         import time
 
@@ -510,10 +516,13 @@ class TestPreflightRefresh:
         assert ctx.token_expiry_time is not None
         lo = before + _NETWORK_ERROR_GRACE_SECONDS - 1
         hi = after + _NETWORK_ERROR_GRACE_SECONDS + 1
+        assert ctx.token_expiry_time is not None
         assert lo <= ctx.token_expiry_time <= hi
         # Tokens themselves untouched
-        assert ctx.current_tokens.access_token == "A"
-        assert ctx.current_tokens.refresh_token == "R"
+        tokens = ctx.current_tokens
+        assert tokens is not None
+        assert tokens.access_token == "A"
+        assert tokens.refresh_token == "R"
 
     @pytest.mark.anyio
     async def test_auth_error_leaves_tokens_for_sdk_to_handle(self, tmp_path: Path) -> None:
@@ -603,6 +612,7 @@ class TestPreflightRefresh:
         ctx = oauth.context
         lo = before + _NETWORK_ERROR_GRACE_SECONDS - 1
         hi = after + _NETWORK_ERROR_GRACE_SECONDS + 1
+        assert ctx.token_expiry_time is not None
         assert lo <= ctx.token_expiry_time <= hi
 
 
@@ -616,7 +626,7 @@ class TestUpstream401Suppression:
     failures recover via :MCPToggleServer.
     """
 
-    def _make_oauth(self, tmp_path: Path):
+    def _make_oauth(self, tmp_path: Path) -> _RefreshTokenOAuth:
         from mcp_combiner.auth import _build_oauth
 
         return _build_oauth(
@@ -628,12 +638,12 @@ class TestUpstream401Suppression:
 
     def _seed_valid_tokens(
         self,
-        oauth,
+        oauth: _RefreshTokenOAuth,
         *,
         expires_in: float = 3600.0,
         token_endpoint: str = "https://oauth2.googleapis.com/token",
         authorization_server: str | None = None,
-    ):
+    ) -> None:
         """Seed the OAuth instance with valid-looking tokens + discovery metadata.
 
         The fixture's server URL is ``https://mcp.example.com/mcp`` (set by
@@ -677,12 +687,12 @@ class TestUpstream401Suppression:
 
     async def _drive_401(
         self,
-        oauth,
+        oauth: _RefreshTokenOAuth,
         probe_outcome: _ProbeOutcome,
         *,
         refresh_outcome: _RefreshOutcome | None = None,
         retry_status: int | None = None,
-    ) -> tuple[list[str], httpx.Response | None]:
+    ) -> tuple[list[str], httpx.Request | None]:
         """Run async_auth_flow against a 401 with controlled probe/refresh.
 
         :param probe_outcome: what ``_probe_token_at`` returns.
@@ -692,16 +702,19 @@ class TestUpstream401Suppression:
         :param retry_status: status code of the retry response when refresh
             succeeds (and we yield a second request).  Default 200.
 
-        Returns ``(sdk_yields, final_response_or_none)``.  ``final_response``
-        is the value returned by ``gen.asend`` when the generator yields a
-        request beyond the initial — typically used to test that the retry
-        path yields the request and the SDK is *not* invoked further.
+        Returns ``(sdk_yields, next_request_or_none)``.  ``next_request`` is
+        the request ``gen.asend`` yields after the initial one (``asend``
+        returns the generator's next yielded value) — typically used to test
+        that the retry path yields the request and the SDK is *not* invoked
+        further.
         """
         import fastmcp.client.auth.oauth as fastmcp_oauth_mod
 
         sdk_yields: list[str] = []
 
-        async def fake_super_flow(self_inner, request):
+        async def fake_super_flow(
+            self_inner: OAuth, request: httpx.Request
+        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"continued-after-{response.status_code}")
@@ -882,7 +895,9 @@ class TestUpstream401Suppression:
 
         sdk_yields: list[str] = []
 
-        async def fake_super_flow(self_inner, request):
+        async def fake_super_flow(
+            self_inner: OAuth, request: httpx.Request
+        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"got-{response.status_code}")
@@ -971,7 +986,9 @@ class TestUpstream401Suppression:
 
         sdk_yields: list[str] = []
 
-        async def fake_super_flow(self_inner, request):
+        async def fake_super_flow(
+            self_inner: OAuth, request: httpx.Request
+        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"continued-after-{response.status_code}")
@@ -1008,7 +1025,9 @@ class TestUpstream401Suppression:
 
         sdk_yields: list[str] = []
 
-        async def fake_super_flow(self_inner, request):
+        async def fake_super_flow(
+            self_inner: OAuth, request: httpx.Request
+        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"continued-after-{response.status_code}")
@@ -1085,8 +1104,9 @@ class TestUpstream401Suppression:
     ) -> None:
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth, authorization_server="https://accounts.google.com")
-        assert oauth._third_party_probe_url() is not None
-        assert "googleapis.com" in oauth._third_party_probe_url()
+        probe_url = oauth._third_party_probe_url()
+        assert probe_url is not None
+        assert "googleapis.com" in probe_url
 
     @pytest.mark.anyio
     async def test_third_party_probe_url_returns_none_for_unknown_provider(
@@ -1140,7 +1160,9 @@ class TestUpstream401Suppression:
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
 
-        async def fake_super_flow(self_inner, request):
+        async def fake_super_flow(
+            self_inner: OAuth, request: httpx.Request
+        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
             yield request  # one yield only — returns after asend()
 
         initial = httpx.Request("POST", "https://mcp.example.com/mcp")

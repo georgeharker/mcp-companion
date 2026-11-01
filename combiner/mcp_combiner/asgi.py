@@ -361,7 +361,7 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
     if options is None:
         options = ServeOptions.from_env()
 
-    combiner, ss_manager = create_combiner(
+    combiner, proc_manager = create_combiner(
         options.config,
         oauth_cache_tokens=options.oauth_cache,
         oauth_token_dir=options.oauth_token_dir,
@@ -370,7 +370,7 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
         input_validation=options.input_validation,
         output_validation=options.output_validation,
         stale_tool_grace=options.stale_tool_grace,
-        return_ss_manager=True,
+        return_proc_manager=True,
     )
 
     # Interactive resource host (mcp-app widgets): /ui/<token>/... on this app.
@@ -389,8 +389,9 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
         hold_timeout=_env_hold_timeout(),
     )
 
-    # Register manager for cleanup on exit
-    register_for_cleanup(ss_manager)
+    # Register manager for cleanup on exit — the facade (sharedserver +
+    # external + plain-url probes); cleanup() only needs its stop_all().
+    register_for_cleanup(proc_manager)
 
     # Sanctioned-restart handover: consume the predecessor's one-shot payload
     # (token filters, nvim binds/instances, parked upstream sessions) before

@@ -11,11 +11,11 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 
+from mcp_combiner.backing import BackingProcessLike
 from mcp_combiner.config import CombinerConfig, ServerConfig
 from mcp_combiner.connections import ConnectionManager
 from mcp_combiner.mounts import drop_server_providers, mount_server_provider
 from mcp_combiner.runtime import RUNTIME
-from mcp_combiner.sharedserver import SharedServerManager
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -41,7 +41,7 @@ def _uri_text(resource_result: Any) -> str:
                     parts.append(content.decode("utf-8"))
                     continue
                 except UnicodeDecodeError:
-                    pass
+                    logger.debug("non-utf8 %s content — showing binary note instead", mime)
             parts.append(f"[binary {mime}, {len(content)} bytes]")
             continue
         text = getattr(item, "text", None)
@@ -54,7 +54,7 @@ def _uri_text(resource_result: Any) -> str:
                 parts.append(base64.b64decode(blob).decode("utf-8"))
                 continue
             except Exception:  # noqa: BLE001 — fall through to the size note
-                pass
+                logger.debug("failed to decode %s blob — showing size note", mime)
         if isinstance(blob, str):
             parts.append(f"[binary {mime}, ~{len(blob) * 3 // 4} bytes]")
             continue
@@ -72,9 +72,16 @@ def register_meta_tools(
     combiner: FastMCP,
     config: CombinerConfig,
     conn_manager: ConnectionManager,
-    ss_manager: SharedServerManager,
+    proc_manager: BackingProcessLike,
 ) -> None:
-    """Register combiner management tools on the FastMCP server."""
+    """Register combiner management tools on the FastMCP server.
+
+    *proc_manager* is the backing-process handle (sharedserver-owned, external
+    non-owned, or the facade combining them — see
+    ``backing.BackingProcessManager``). The protocol contract is exactly
+    the three methods meta-tools drive: ``ensure_started``, ``ensure_stopped``,
+    ``restart``.
+    """
 
     @combiner.tool()
     async def open_widget(
@@ -236,7 +243,7 @@ def register_meta_tools(
             # Start the backing sharedserver first (use + health-poll), so the
             # connection below has something to reach. No-op for non-sharedserver
             # servers or ones already up. "Enabled" is the start trigger.
-            await ss_manager.ensure_started(server_name)
+            await proc_manager.ensure_started(server_name)
 
             # Open persistent connection for HTTP/SSE servers
             if conn_manager.is_http_server(srv):
@@ -288,42 +295,73 @@ def register_meta_tools(
         # Drop our reference on the backing sharedserver (unuse). It stops after
         # its grace period if no other client still references it. No-op for
         # non-sharedserver servers.
-        await ss_manager.ensure_stopped(server_name)
+        await proc_manager.ensure_stopped(server_name)
 
         # Remove the providers this server's mount added (tracked by identity
         # in the mount registry — see mcp_combiner.mounts).
+        from mcp_combiner.isolated import REGISTRY as isolated_registry
+
+        removed = 0
+        unmount_error: str | None = None
         try:
             from mcp_combiner.toolcache import invalidate_tool_cache
 
             removed = drop_server_providers(combiner, server_name)
-
             invalidate_tool_cache()
-            logger.info("Removed %d provider(s) for server '%s'", removed, server_name)
-
-            if removed > 0:
-                return (
-                    f"Server '{server_name}' disabled and unmounted ({removed} provider(s) removed)"
-                )
-            else:
-                return (
-                    f"Server '{server_name}' disabled (no active providers found to remove — "
-                    "it may not have been mounted)"
-                )
         except Exception as e:
             logger.exception("Failed to unmount server '%s' on disable", server_name)
-            return f"Server '{server_name}' disabled but failed to unmount: {e}"
+            unmount_error = str(e)
+        finally:
+            # Evict ALWAYS runs — even when provider dropping failed — so
+            # per-chat children never outlive a disabled server. Sits AFTER
+            # the provider drop (ordering parity with restart_server/_unmount: a
+            # call in flight through the old proxy cannot re-register a stale
+            # entry after evict).
+            evicted_sessions = await isolated_registry.evict_server(server_name)
+            logger.info("Removed %d provider(s) for server '%s'", removed, server_name)
+            if evicted_sessions:
+                logger.info(
+                    "disable: dropped %d isolated session(s)/process(es) for '%s'",
+                    evicted_sessions,
+                    server_name,
+                )
+
+        if unmount_error:
+            return f"Server '{server_name}' disabled but failed to unmount: {unmount_error}"
+        if removed > 0:
+            return f"Server '{server_name}' disabled and unmounted ({removed} provider(s) removed)"
+        else:
+            return (
+                f"Server '{server_name}' disabled (no active providers found to remove — "
+                "it may not have been mounted)"
+            )
 
     async def _unmount_server(server_name: str) -> None:
         """Tear down a server's connection, backing process, and providers.
 
-        Mirrors combiner__disable_server's teardown but does not touch the
+        Mirrors combiner__disable_server's teardown order (providers dropped
+        first, isolated state evicted after) but does not touch the
         ``disabled`` flag — the caller decides whether the server stays gone
         (removed) or is re-mounted with a fresh definition (changed).
         """
         if conn_manager.has_connection(server_name):
             await conn_manager.disconnect(server_name)
-        await ss_manager.ensure_stopped(server_name)
+        await proc_manager.ensure_stopped(server_name)
         drop_server_providers(combiner, server_name)
+        # Per-chat isolated sessions/processes die AFTER the provider drop
+        # (same ordering rationale as disable/restart: a call still in flight
+        # through the old proxy cannot re-register a stale entry after evict).
+        # Applies to both disable and reload: a re-enabled or remounted server
+        # must hand chats FRESH children, never an old definition's.
+        from mcp_combiner.isolated import REGISTRY as isolated_registry
+
+        evicted = await isolated_registry.evict_server(server_name)
+        if evicted:
+            logger.info(
+                "unmount: dropped %d isolated session(s)/process(es) for '%s'",
+                evicted,
+                server_name,
+            )
 
     async def _mount_server(server_name: str, srv: ServerConfig) -> FastMCP:
         """Start, connect, and mount a server. Mirrors combiner__enable_server.
@@ -333,7 +371,7 @@ def register_meta_tools(
         """
         from mcp_combiner.proxyfactory import _create_server_proxy
 
-        await ss_manager.ensure_started(server_name)
+        await proc_manager.ensure_started(server_name)
         if conn_manager.is_http_server(srv):
             if conn_manager.is_auth_failed(server_name):
                 conn_manager.reset_auth_failure(server_name)
@@ -386,7 +424,7 @@ def register_meta_tools(
         )
 
         # 1. Tear down the combiner-side connection + mounted providers. We do NOT
-        #    call ss_manager.ensure_stopped here — that decrements the refcount
+        #    call proc_manager.ensure_stopped here — that decrements the refcount
         #    (grace-period reattach). The hard process stop happens in step 2.
         if conn_manager.is_http_server(srv) and conn_manager.has_connection(server_name):
             try:
@@ -420,7 +458,7 @@ def register_meta_tools(
         # 2. Hard-restart the backing process (no-op for non-sharedserver servers).
         restarted_proc = False
         try:
-            restarted_proc = await ss_manager.restart(server_name)
+            restarted_proc = await proc_manager.restart(server_name)
         except Exception as e:
             logger.exception("restart: failed to restart backing process for '%s'", server_name)
             return f"Server '{server_name}': failed to restart backing process: {e}"
@@ -431,8 +469,19 @@ def register_meta_tools(
         #    re-prime (no mid-restart flicker); the fresh set is published only
         #    once the server is tools-ready (below), which swaps it in. If the
         #    tool set changed, tools-ready carries the new set.
+        srv_now = config.servers.get(server_name)
+        if srv_now is None or srv_now.disabled:
+            # A disable raced the restart: the caller's LAST intent is
+            # "disabled" — remounting now would resurrect a disabled server.
+            # The backing teardown already happened in step 1, and the
+            # restart above honoured the disable too (see
+            # BackingManagerBase.restart's stop-after-launch handling).
+            logger.info(
+                "restart: '%s' disabled or removed mid-restart — remount skipped", server_name
+            )
+            return f"Server '{server_name}' disabled or removed mid-restart — remount skipped."
         try:
-            await _mount_server(server_name, srv)
+            await _mount_server(server_name, srv_now)
         except Exception as e:
             # The remount itself blew up — make sure no half-mounted, dead proxy
             # is left advertising tools, then notify clients to drop them.
@@ -444,7 +493,7 @@ def register_meta_tools(
         # 4. Announce the refreshed tool list — but ONLY once the restarted server
         #    can actually list its (possibly changed) tools. We never assume a
         #    freshly mounted proxy is "ready".
-        if conn_manager.is_http_server(srv):
+        if conn_manager.is_http_server(srv_now):
             # HTTP has a connection lifecycle + health-check monitor, so we NEVER
             # proactively broadcast on mere is_connected (connected != tools-ready).
             # _mount_server's connect() re-primed tools/list and fired
@@ -503,9 +552,9 @@ def register_meta_tools(
         (including a toggled ``disabled`` flag) are remounted. Servers that are
         byte-for-byte unchanged keep their existing connection untouched.
 
-        Reloads ``servers``, ``sharedServers``, and ``oauth`` from disk by
-        mutating the live config object in place, so all holders (tool filter,
-        health endpoint, meta-tools) see the new values.
+        Reloads ``servers``, ``sharedServers``, ``externalServers``, and
+        ``oauth`` from disk by mutating the live config object in place, so all
+        holders (tool filter, health endpoint, meta-tools) see the new values.
 
         Returns:
             A summary of what changed.
@@ -529,6 +578,33 @@ def register_meta_tools(
             if old_servers[name] != new_servers[name]
         }
 
+        # Backing-entry diffs count as server changes too: rewriting the
+        # sharedServers/externalServers entry a server references changes how
+        # its backend runs (new launch argv, new stop) even though the server
+        # block is byte-identical. Affected servers get the teardown/remount
+        # treatment — _unmount_server stops the backing, _mount_server's
+        # ensure_started relaunches with the new entry.
+        for section, ref_field in (
+            ("shared_servers", "shared_server"),
+            ("external_servers", "external_server"),
+        ):
+            old_section = getattr(config, section)
+            new_section = getattr(new_cfg, section)
+            for entry_name in set(old_section) | set(new_section):
+                if old_section.get(entry_name) == new_section.get(entry_name):
+                    continue
+                # Only servers present in BOTH configs can be "changed" —
+                # removed/added servers are already covered by removed/added,
+                # and scanning the union raised KeyError in the remount step
+                # when a server and its backing entry were removed together.
+                for srv_name in set(old_servers) & set(new_servers):
+                    refs = (
+                        getattr(old_servers[srv_name], ref_field),
+                        getattr(new_servers[srv_name], ref_field),
+                    )
+                    if entry_name in refs:
+                        changed.add(srv_name)
+
         if not (added or removed or changed):
             return "No config changes detected."
 
@@ -545,6 +621,7 @@ def register_meta_tools(
         #    _combiner_config global used for tool filtering).
         config.servers = new_cfg.servers
         config.shared_servers = new_cfg.shared_servers
+        config.external_servers = new_cfg.external_servers
         config.oauth = new_cfg.oauth
 
         # 3) Mount added + changed servers that are enabled, now reading the

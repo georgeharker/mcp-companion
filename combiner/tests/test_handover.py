@@ -13,18 +13,23 @@ from __future__ import annotations
 import json
 import stat
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 from conftest import (
+    CombinerHandle,
     ProcFactory,
     free_port,
     http_mock_entry,
     write_servers_config,
     write_tools_spec,
 )
+from fakes import content_text
 from fastmcp import Client
+from fastmcp.client.client import CallToolResult
 from fastmcp.client.transports import StreamableHttpTransport
 
 from mcp_combiner import runtime
@@ -39,7 +44,7 @@ _SPEC = [
 
 
 @pytest.fixture(autouse=True)
-def _clean_runtime():
+def _clean_runtime() -> Iterator[None]:
     runtime.reset()
     yield
     runtime.reset()
@@ -72,7 +77,7 @@ class TestRoundTrip:
         assert not path.exists(), "consumed file must be deleted"
         assert RUNTIME.sessions.pending_token_filters == {"tok-1": {"github", "svg-mcp"}}
         parked = REGISTRY.pop_parked("svg-mcp", "tok-1")
-        assert parked is not None
+        assert isinstance(parked, ParkedSession)
         assert parked.session_id == "sid-xyz"
         assert parked.protocol_version == "2025-06-18"
         assert parked.headers == {"x": "y"}
@@ -126,7 +131,7 @@ class TestHandoverE2E:
 
         token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
-        def _chat(c) -> Client:
+        def _chat(c: CombinerHandle) -> Client[Any]:
             return Client(
                 StreamableHttpTransport(c.mcp_url, headers={"X-MCP-Combiner-Session": token})
             )
@@ -211,7 +216,7 @@ class TestHandoverE2E:
 
         token = "cafecafe-1111-2222-3333-444444444444"
 
-        def _chat(c) -> Client:
+        def _chat(c: CombinerHandle) -> Client[Any]:
             return Client(
                 StreamableHttpTransport(c.mcp_url, headers={"X-MCP-Combiner-Session": token})
             )
@@ -286,5 +291,5 @@ class TestHandoverE2E:
                 await c2.call_tool("mockup_mock__recall", {})
 
 
-async def _text_of(result) -> str:
-    return result.content[0].text
+async def _text_of(result: CallToolResult) -> str:
+    return content_text(result)

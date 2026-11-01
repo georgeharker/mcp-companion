@@ -9,14 +9,26 @@ Tests the following combiner features:
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
+import mcp.types as mt
 import pytest
+from fakes import ScriptedProvider
+from fastmcp import FastMCP
+from fastmcp.server.middleware import MiddlewareContext
+from fastmcp.tools import Tool
+from fastmcp.tools.function_tool import FunctionTool
 from starlette.testclient import TestClient
 
+from mcp_combiner.config import CombinerConfig
 from mcp_combiner.runtime import RUNTIME
 from mcp_combiner.toolcache import PrimeOutcome
+
+# What the middleware's ``call_next`` stubs receive.
+_ListCtx = MiddlewareContext[mt.ListToolsRequest]
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -24,13 +36,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # ── Helpers ────────────────────────────────────────────────────────
 
 
-def _make_combiner_app():
+def _make_combiner_app() -> tuple[FastMCP[Any], CombinerConfig]:
     """Create a combiner FastMCP app with test config for REST endpoint testing.
 
     Returns (app, config) where app is the Starlette-compatible ASGI app
     and config is the CombinerConfig used.
     """
-    from mcp_combiner.config import CombinerConfig
     from mcp_combiner.server import create_combiner
 
     config_path = str(FIXTURES / "servers.json")
@@ -39,7 +50,7 @@ def _make_combiner_app():
     return combiner, config
 
 
-def _reset_session_state():
+def _reset_session_state() -> None:
     """Reset module-level session state between tests."""
     import mcp_combiner.server as srv
 
@@ -55,36 +66,36 @@ def _reset_session_state():
 class TestSessionDisabledDict:
     """Unit tests for the _session_disabled module-level dict."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         _reset_session_state()
 
-    def teardown_method(self):
+    def teardown_method(self) -> None:
         _reset_session_state()
 
-    def test_empty_by_default(self):
+    def test_empty_by_default(self) -> None:
         import mcp_combiner.server as srv
 
         assert srv._session_disabled == {}
 
-    def test_set_and_get(self):
+    def test_set_and_get(self) -> None:
         import mcp_combiner.server as srv
 
         srv._session_disabled["session-1"] = {"everything"}
         assert srv._session_disabled.get("session-1") == {"everything"}
 
-    def test_missing_session_returns_none(self):
+    def test_missing_session_returns_none(self) -> None:
         import mcp_combiner.server as srv
 
         assert srv._session_disabled.get("nonexistent") is None
 
-    def test_clear_session(self):
+    def test_clear_session(self) -> None:
         import mcp_combiner.server as srv
 
         srv._session_disabled["session-1"] = {"everything"}
         del srv._session_disabled["session-1"]
         assert srv._session_disabled.get("session-1") is None
 
-    def test_multiple_sessions_independent(self):
+    def test_multiple_sessions_independent(self) -> None:
         import mcp_combiner.server as srv
 
         srv._session_disabled["session-1"] = {"everything"}
@@ -99,29 +110,29 @@ class TestSessionDisabledDict:
 class TestTokenSessions:
     """Unit tests for the _token_sessions ACP token registry."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         _reset_session_state()
 
-    def teardown_method(self):
+    def teardown_method(self) -> None:
         _reset_session_state()
 
-    def test_empty_by_default(self):
+    def test_empty_by_default(self) -> None:
         import mcp_combiner.server as srv
 
         assert srv._token_sessions == {}
 
-    def test_set_and_get(self):
+    def test_set_and_get(self) -> None:
         import mcp_combiner.server as srv
 
         srv._token_sessions["token-abc"] = "combiner-session-xyz"
         assert srv._token_sessions["token-abc"] == "combiner-session-xyz"
 
-    def test_missing_token_returns_none(self):
+    def test_missing_token_returns_none(self) -> None:
         import mcp_combiner.server as srv
 
         assert srv._token_sessions.get("nonexistent") is None
 
-    def test_multiple_tokens_independent(self):
+    def test_multiple_tokens_independent(self) -> None:
         import mcp_combiner.server as srv
 
         srv._token_sessions["token-1"] = "session-a"
@@ -129,7 +140,7 @@ class TestTokenSessions:
         assert srv._token_sessions["token-1"] == "session-a"
         assert srv._token_sessions["token-2"] == "session-b"
 
-    def test_clear_token(self):
+    def test_clear_token(self) -> None:
         import mcp_combiner.server as srv
 
         srv._token_sessions["token-1"] = "session-a"
@@ -147,20 +158,20 @@ class TestSessionRESTEndpoints:
     """
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self) -> Iterator[None]:
         _reset_session_state()
         yield
         _reset_session_state()
 
     @pytest.fixture
-    def client(self):
+    def client(self) -> TestClient:
         combiner, _config = _make_combiner_app()
         app = combiner.http_app()
         return TestClient(app, raise_server_exceptions=False)
 
     # -- GET /sessions --
 
-    def test_list_sessions_empty(self, client):
+    def test_list_sessions_empty(self, client: TestClient) -> None:
         resp = client.get("/sessions")
         assert resp.status_code == 200
         data = resp.json()
@@ -169,7 +180,7 @@ class TestSessionRESTEndpoints:
 
     # -- GET /sessions/token/{token} --
 
-    def test_token_lookup_found(self, client):
+    def test_token_lookup_found(self, client: TestClient) -> None:
         import mcp_combiner.server as srv
 
         token = "aaaabbbb-cccc-4ddd-8eee-ffffffffffff"
@@ -180,12 +191,12 @@ class TestSessionRESTEndpoints:
         assert data["token"] == token
         assert data["session_id"] == "combiner-session-xyz"
 
-    def test_token_lookup_not_found(self, client):
+    def test_token_lookup_not_found(self, client: TestClient) -> None:
         resp = client.get("/sessions/token/00000000-0000-4000-8000-000000000000")
         assert resp.status_code == 404
         assert "error" in resp.json()
 
-    def test_token_lookup_does_not_remove_entry(self, client):
+    def test_token_lookup_does_not_remove_entry(self, client: TestClient) -> None:
         import mcp_combiner.server as srv
 
         token = "aaaabbbb-cccc-4ddd-8eee-ffffffffffff"
@@ -196,7 +207,7 @@ class TestSessionRESTEndpoints:
 
     # -- POST /sessions/{id}/filter --
 
-    def test_post_session_filter(self, client):
+    def test_post_session_filter(self, client: TestClient) -> None:
         resp = client.post(
             "/sessions/test-session-123/filter",
             json={"disabled_servers": ["everything"]},
@@ -206,14 +217,14 @@ class TestSessionRESTEndpoints:
         assert data["session_id"] == "test-session-123"
         assert "everything" in data["disabled_servers"]
 
-    def test_post_session_filter_unknown_server(self, client):
+    def test_post_session_filter_unknown_server(self, client: TestClient) -> None:
         resp = client.post(
             "/sessions/test-session-123/filter",
             json={"disabled_servers": ["nonexistent"]},
         )
         assert resp.status_code == 400
 
-    def test_post_session_filter_empty_clears(self, client):
+    def test_post_session_filter_empty_clears(self, client: TestClient) -> None:
         # Set filter
         client.post(
             "/sessions/test-session-123/filter",
@@ -229,7 +240,7 @@ class TestSessionRESTEndpoints:
 
     # -- DELETE /sessions/{id}/filter --
 
-    def test_delete_session_filter(self, client):
+    def test_delete_session_filter(self, client: TestClient) -> None:
         # Set then delete
         client.post(
             "/sessions/test-session-123/filter",
@@ -241,7 +252,7 @@ class TestSessionRESTEndpoints:
         assert data["action"] == "cleared"
         assert "everything" in data["previously_disabled"]
 
-    def test_delete_session_filter_nonexistent(self, client):
+    def test_delete_session_filter_nonexistent(self, client: TestClient) -> None:
         resp = client.delete("/sessions/nonexistent/filter")
         assert resp.status_code == 200
         assert resp.json()["previously_disabled"] == []
@@ -253,13 +264,13 @@ class TestSessionRESTEndpoints:
 class TestMiddlewareFiltering:
     """Unit tests for session filtering in on_list_tools and on_call_tool."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         _reset_session_state()
 
-    def teardown_method(self):
+    def teardown_method(self) -> None:
         _reset_session_state()
 
-    def test_session_disabled_blocks_tools_lookup(self):
+    def test_session_disabled_blocks_tools_lookup(self) -> None:
         """Verify that _session_disabled entries are keyed by session_id string."""
         import mcp_combiner.server as srv
 
@@ -279,7 +290,7 @@ class TestToolsListSingleFlight:
     upstream, which races the SDK's auth-context lock.
     """
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         import mcp_combiner.server as srv
 
         _reset_session_state()
@@ -287,7 +298,7 @@ class TestToolsListSingleFlight:
         RUNTIME.tools.cache_time = 0
         srv.ToolProcessingMiddleware._inflight = None
 
-    def teardown_method(self):
+    def teardown_method(self) -> None:
         import mcp_combiner.server as srv
 
         RUNTIME.tools.cache = None
@@ -296,7 +307,7 @@ class TestToolsListSingleFlight:
         _reset_session_state()
 
     @pytest.mark.asyncio
-    async def test_concurrent_misses_coalesce(self):
+    async def test_concurrent_misses_coalesce(self) -> None:
         import asyncio
 
         from mcp_combiner.server import ToolProcessingMiddleware
@@ -306,7 +317,7 @@ class TestToolsListSingleFlight:
         call_count = 0
         gate = asyncio.Event()
 
-        async def fake_call_next(_ctx):
+        async def fake_call_next(context: _ListCtx) -> Sequence[Tool]:
             nonlocal call_count
             call_count += 1
             await gate.wait()  # hold the first fetch open while others queue up
@@ -326,7 +337,7 @@ class TestToolsListSingleFlight:
         assert all(r == [] for r in results)
 
     @pytest.mark.asyncio
-    async def test_failure_does_not_wedge_inflight(self):
+    async def test_failure_does_not_wedge_inflight(self) -> None:
         """A failed fetch must clear the in-flight slot so the next call retries."""
         from mcp_combiner.server import ToolProcessingMiddleware
 
@@ -334,7 +345,7 @@ class TestToolsListSingleFlight:
         ctx = MagicMock()
         ctx.fastmcp_context = None
 
-        async def failing_fetch(_ctx):
+        async def failing_fetch(context: _ListCtx) -> Sequence[Tool]:
             raise RuntimeError("upstream boom")
 
         # _do_fetch swallows upstream errors and returns []; the in-flight
@@ -346,7 +357,7 @@ class TestToolsListSingleFlight:
         # A subsequent call must be free to issue a new fetch.
         called = 0
 
-        async def succeeding_fetch(_ctx):
+        async def succeeding_fetch(context: _ListCtx) -> Sequence[Tool]:
             nonlocal called
             called += 1
             return []
@@ -369,7 +380,7 @@ class TestStaleServerTools:
     Re-injecting its last-known slice within a grace window breaks that coupling.
     """
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         import mcp_combiner.server as srv
 
         self._srv = srv
@@ -377,16 +388,14 @@ class TestStaleServerTools:
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
 
-    def teardown_method(self):
+    def teardown_method(self) -> None:
         srv = self._srv
         RUNTIME.config, RUNTIME.conn_manager = self._saved
         srv._server_tool_cache.clear()
         srv._server_tool_seen.clear()
 
     @staticmethod
-    def _tool(name: str):
-        from fastmcp.tools.function_tool import FunctionTool
-
+    def _tool(name: str) -> Tool:
         return FunctionTool(
             fn=lambda: None,
             name=name,
@@ -394,25 +403,21 @@ class TestStaleServerTools:
             parameters={"type": "object", "properties": {}},
         )
 
-    def _config(self, **flags):
-        """A stand-in combiner config with servers alpha, beta.
-
-        flags: e.g. beta_disabled=True to mark beta disabled.
-        """
-        from types import SimpleNamespace
-
+    def _config(self, *, beta_disabled: bool = False) -> CombinerConfig:
+        """A combiner config with servers alpha and beta."""
         from mcp_combiner.config import ServerConfig
 
-        servers = {
-            "alpha": ServerConfig(name="alpha"),
-            "beta": ServerConfig(name="beta", disabled=flags.get("beta_disabled", False)),
-        }
-        return SimpleNamespace(servers=servers)
+        return CombinerConfig(
+            servers={
+                "alpha": ServerConfig(name="alpha"),
+                "beta": ServerConfig(name="beta", disabled=beta_disabled),
+            }
+        )
 
-    def _names(self, tools):
+    def _names(self, tools: Sequence[Tool]) -> list[str]:
         return sorted(str(t.name) for t in tools)
 
-    def test_reconnecting_peer_tools_survive(self):
+    def test_reconnecting_peer_tools_survive(self) -> None:
         """beta mid-reconnect (absent from fresh) keeps its tools after alpha reconnects."""
         srv = self._srv
         RUNTIME.config = self._config()
@@ -430,7 +435,7 @@ class TestStaleServerTools:
             "beta's tools should be re-injected from cache while it reconnects"
         )
 
-    def test_disabled_server_tools_dropped(self):
+    def test_disabled_server_tools_dropped(self) -> None:
         """A disabled server's stale tools are not re-served (and are evicted)."""
         srv = self._srv
         RUNTIME.config = self._config(beta_disabled=True)
@@ -442,7 +447,7 @@ class TestStaleServerTools:
         assert self._names(merged) == ["alpha_one"]
         assert "beta" not in srv._server_tool_cache
 
-    def test_grace_window_expiry_drops_tools(self):
+    def test_grace_window_expiry_drops_tools(self) -> None:
         """Past STALE_TOOL_GRACE the stale slice is dropped and evicted."""
         srv = self._srv
         RUNTIME.config = self._config()
@@ -455,7 +460,7 @@ class TestStaleServerTools:
         assert self._names(merged) == ["alpha_one"]
         assert "beta" not in srv._server_tool_cache
 
-    def test_auth_failed_server_tools_dropped(self):
+    def test_auth_failed_server_tools_dropped(self) -> None:
         """An auth-failed server's tools are not re-served even within grace."""
         from unittest.mock import MagicMock
 
@@ -471,7 +476,7 @@ class TestStaleServerTools:
         assert self._names(merged) == ["alpha_one"]
         assert "beta" not in srv._server_tool_cache
 
-    def test_failed_server_tools_dropped(self):
+    def test_failed_server_tools_dropped(self) -> None:
         """Remove on tool attempt: a server with a recorded call failure is not
         re-served, even inside the grace window (its stale slice is dropped)."""
         srv = self._srv
@@ -487,7 +492,7 @@ class TestStaleServerTools:
         finally:
             srv._failed_servers.pop("beta", None)
 
-    def test_present_server_gains_confirmed_slice(self):
+    def test_present_server_gains_confirmed_slice(self) -> None:
         """A server that returns tools in a fresh fetch gains a confirmed
         slice — presence in the store IS the tools-ready bit."""
         srv = self._srv
@@ -497,7 +502,7 @@ class TestStaleServerTools:
         srv._merge_stale_server_tools([self._tool("alpha_one")], now=1000.0)
         assert "alpha" in srv._server_tool_cache
 
-    def test_promotion_publishes_notify_only_once(self, monkeypatch):
+    def test_promotion_publishes_notify_only_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A server first observed with tools in a fetch (a new confirmation)
         is a publication: one notify-only broadcast. Re-observing the same
         list is broadcast-silent — repeated fetches cannot notify-loop."""
@@ -514,7 +519,7 @@ class TestStaleServerTools:
         srv._merge_stale_server_tools([self._tool("alpha_one")], now=1001.0)
         assert notifies == [1]  # unchanged list: silent
 
-    def test_replacement_publishes(self, monkeypatch):
+    def test_replacement_publishes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A confirmed slice replaced by a *different* list from a fetch is 'a
         new tool list back from the MCP' — publish again."""
         import mcp_combiner.toolcache as toolcache_mod
@@ -529,7 +534,7 @@ class TestStaleServerTools:
         srv._merge_stale_server_tools([self._tool("alpha_two")], now=1001.0)
         assert notifies == [1, 1]
 
-    def test_reordered_list_is_not_a_replacement(self):
+    def test_reordered_list_is_not_a_replacement(self) -> None:
         """store_slice compares content order-insensitively: a reordered but
         identical list is not a publication event."""
         assert RUNTIME.tools.store_slice(
@@ -539,13 +544,12 @@ class TestStaleServerTools:
             "alpha", [self._tool("a_two"), self._tool("a_one")], 1001.0
         )
 
-    def test_schema_only_change_is_a_replacement(self):
+    def test_schema_only_change_is_a_replacement(self) -> None:
         """A tool whose SCHEMA changes (names unchanged) is still 'a new tool
         list back from the MCP' — downstream clients cache schemas, so this
         must publish."""
-        from fastmcp.tools.function_tool import FunctionTool
 
-        def _with_params(params):
+        def _with_params(params: dict[str, Any]) -> Tool:
             return FunctionTool(fn=lambda: None, name="a_one", description="", parameters=params)
 
         assert RUNTIME.tools.store_slice(
@@ -570,14 +574,18 @@ class TestLocalToolsReady:
     stays 'started')."""
 
     @staticmethod
-    def _combiner_with_provider(name: str, list_tools) -> object:
-        """A minimal combiner whose mount registry maps *name* → one provider."""
-        from types import SimpleNamespace
+    def _combiner_with_provider(
+        name: str, list_tools: Callable[[], Awaitable[Sequence[Tool]]]
+    ) -> FastMCP[Any]:
+        """A combiner whose mount registry maps *name* → one scripted provider.
 
+        Recorded straight into the registry (no namespace transform), so the
+        scripted tool names are exactly what the prime stores.
+        """
         from mcp_combiner import mounts
 
-        combiner = SimpleNamespace(providers=[])
-        mounts._registry(combiner)[name] = [SimpleNamespace(list_tools=list_tools)]
+        combiner: FastMCP[Any] = FastMCP("prime-test")
+        mounts._registry(combiner)[name] = [ScriptedProvider(list_tools)]
         return combiner
 
     @staticmethod
@@ -587,7 +595,9 @@ class TestLocalToolsReady:
         srv._server_tool_cache.pop(server, None)
         srv._server_tool_seen.pop(server, None)
 
-    async def test_prime_retries_stores_then_invalidates(self, monkeypatch):
+    async def test_prime_retries_stores_then_invalidates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Retries a not-yet-serving server; stores the slice (confirming it
         ready) and invalidates only once tools/list answers."""
         import mcp_combiner.server as srv
@@ -597,7 +607,7 @@ class TestLocalToolsReady:
         state = {"n": 0}
         monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
-        async def list_tools():
+        async def list_tools() -> Sequence[Tool]:
             state["n"] += 1
             if state["n"] < 3:
                 raise ConnectionError("still starting")
@@ -614,7 +624,9 @@ class TestLocalToolsReady:
         finally:
             self._cleanup("beta")
 
-    async def test_prime_timeout_no_store_no_invalidate(self, monkeypatch):
+    async def test_prime_timeout_no_store_no_invalidate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """If the server never answers tools/list, nothing is stored, nothing is
         broadcast, and it stays 'started' (not ready)."""
         import mcp_combiner.server as srv
@@ -623,7 +635,7 @@ class TestLocalToolsReady:
         calls: list[int] = []
         monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
-        async def list_tools():
+        async def list_tools() -> Sequence[Tool]:
             raise ConnectionError("never up")
 
         combiner = self._combiner_with_provider("gamma", list_tools)
@@ -632,7 +644,9 @@ class TestLocalToolsReady:
         assert "gamma" not in srv._server_tool_cache
         assert calls == []
 
-    async def test_prime_empty_answers_retry_until_timeout(self, monkeypatch):
+    async def test_prime_empty_answers_retry_until_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A successful but EMPTY tools/list is not readiness: it joins the
         retry contract (another query after each interval). All-empty until
         the deadline → EMPTY: nothing stored, nothing published."""
@@ -643,7 +657,7 @@ class TestLocalToolsReady:
         listed = {"n": 0}
         monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
-        async def list_tools():
+        async def list_tools() -> Sequence[Tool]:
             listed["n"] += 1
             return []
 
@@ -657,7 +671,9 @@ class TestLocalToolsReady:
         finally:
             self._cleanup("delta")
 
-    async def test_prime_empty_then_populated_publishes_once(self, monkeypatch):
+    async def test_prime_empty_then_populated_publishes_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The warming case: empty answers followed by a real list — the
         eventual populated answer is stored and IS the (single) trailing
         publication."""
@@ -668,7 +684,7 @@ class TestLocalToolsReady:
         state = {"n": 0}
         monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
-        async def list_tools():
+        async def list_tools() -> Sequence[Tool]:
             state["n"] += 1
             if state["n"] < 3:
                 return []
@@ -683,7 +699,9 @@ class TestLocalToolsReady:
         finally:
             self._cleanup("delta")
 
-    async def test_prime_empty_answer_preserves_confirmed_slice(self, monkeypatch):
+    async def test_prime_empty_answer_preserves_confirmed_slice(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Empty answers against an already-confirmed server (e.g. mid-restart)
         leave the last-known-good slice untouched — the store only ever holds
         real lists, so there is nothing to clobber it with."""
@@ -694,7 +712,7 @@ class TestLocalToolsReady:
         calls: list[int] = []
         monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
-        async def list_tools():
+        async def list_tools() -> Sequence[Tool]:
             return []
 
         combiner = self._combiner_with_provider("beta", list_tools)
@@ -706,7 +724,7 @@ class TestLocalToolsReady:
         finally:
             self._cleanup("beta")
 
-    async def test_reprime_unchanged_list_is_silent(self, monkeypatch):
+    async def test_reprime_unchanged_list_is_silent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Re-priming a confirmed server that answers the same tool set stores
         the refresh but is NOT a publication event — no broadcast."""
         import mcp_combiner.server as srv
@@ -716,7 +734,7 @@ class TestLocalToolsReady:
         calls: list[int] = []
         monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
-        async def list_tools():
+        async def list_tools() -> Sequence[Tool]:
             return [TestStaleServerTools._tool("beta_one")]
 
         combiner = self._combiner_with_provider("beta", list_tools)
@@ -727,7 +745,7 @@ class TestLocalToolsReady:
         finally:
             self._cleanup("beta")
 
-    async def test_reprime_changed_list_publishes(self, monkeypatch):
+    async def test_reprime_changed_list_publishes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Re-priming a confirmed server that answers a DIFFERENT tool set is a
         replacement — 'a new tool list back from the MCP' — publish once."""
         import mcp_combiner.server as srv
@@ -737,7 +755,7 @@ class TestLocalToolsReady:
         calls: list[int] = []
         monkeypatch.setattr(toolcache_mod, "invalidate_tool_cache", lambda: calls.append(1))
 
-        async def list_tools():
+        async def list_tools() -> Sequence[Tool]:
             return [TestStaleServerTools._tool("beta_two")]
 
         combiner = self._combiner_with_provider("beta", list_tools)
@@ -750,7 +768,7 @@ class TestLocalToolsReady:
             self._cleanup("beta")
 
 
-def test_cache_fill_loses_to_mid_fetch_invalidation():
+def test_cache_fill_loses_to_mid_fetch_invalidation() -> None:
     """The invalidate-vs-inflight-fetch race: a clear that lands while a fetch
     is running bumps the generation, so the fetch's set_cache_if_current is
     refused — the cache stays cleared and the notified sessions' re-fetch
@@ -770,7 +788,7 @@ def test_cache_fill_loses_to_mid_fetch_invalidation():
         RUNTIME.tools.cache, RUNTIME.tools.cache_time, RUNTIME.tools.generation = saved
 
 
-def test_stale_tool_grace_configurable():
+def test_stale_tool_grace_configurable() -> None:
     """create_combiner(stale_tool_grace=…) overrides the grace; omitting it (None)
     leaves the module default (30s) untouched."""
     import mcp_combiner.server as srv
@@ -800,39 +818,38 @@ class TestCoerceObjectSchemas:
     """
 
     @staticmethod
-    def _tool(name: str, params):
-        from fastmcp.tools.function_tool import FunctionTool
-
+    def _tool(name: str, params: Any) -> FunctionTool:
         return FunctionTool(fn=lambda: None, name=name, description="", parameters=params)
 
-    def test_missing_type_and_properties_coerced(self):
+    def test_missing_type_and_properties_coerced(self) -> None:
         import mcp_combiner.schemafix as srv
 
         (out,) = srv._coerce_object_schemas([self._tool("neovim_get_cursor", {})])
         assert out.parameters == {"type": "object", "properties": {}}
 
-    def test_missing_properties_filled(self):
+    def test_missing_properties_filled(self) -> None:
         import mcp_combiner.schemafix as srv
 
         (out,) = srv._coerce_object_schemas([self._tool("t", {"type": "object"})])
         assert out.parameters == {"type": "object", "properties": {}}
 
-    def test_valid_schema_passed_through_unchanged(self):
+    def test_valid_schema_passed_through_unchanged(self) -> None:
         import mcp_combiner.schemafix as srv
 
         good = self._tool("t", {"type": "object", "properties": {"x": {"type": "string"}}})
         (out,) = srv._coerce_object_schemas([good])
         assert out is good  # not rebuilt
 
-    def test_dispatch_fn_preserved_on_rebuild(self):
+    def test_dispatch_fn_preserved_on_rebuild(self) -> None:
         """Rebuild must preserve fn so neovim virtual-tool dispatch still works."""
         import mcp_combiner.schemafix as srv
 
         t = self._tool("neovim_x", {})
         (out,) = srv._coerce_object_schemas([t])
+        assert isinstance(out, FunctionTool)
         assert out.fn is t.fn
 
-    def test_string_required_wrapped_in_array(self):
+    def test_string_required_wrapped_in_array(self) -> None:
         """A bare-string `required` is coerced to a single-element array."""
         import mcp_combiner.schemafix as srv
 
@@ -840,7 +857,7 @@ class TestCoerceObjectSchemas:
         (out,) = srv._coerce_object_schemas([t])
         assert out.parameters["required"] == ["buffer"]
 
-    def test_uncoercible_required_dropped(self):
+    def test_uncoercible_required_dropped(self) -> None:
         """A non-list, non-string `required` (e.g. a number) is dropped."""
         import mcp_combiner.schemafix as srv
 
@@ -848,7 +865,7 @@ class TestCoerceObjectSchemas:
         (out,) = srv._coerce_object_schemas([t])
         assert "required" not in out.parameters
 
-    def test_valid_required_preserved(self):
+    def test_valid_required_preserved(self) -> None:
         """A list `required` is valid and passes through untouched (not rebuilt)."""
         import mcp_combiner.schemafix as srv
 
@@ -867,12 +884,10 @@ class TestFinalizeSchemas:
     """
 
     @staticmethod
-    def _tool(name: str, params):
-        from fastmcp.tools.function_tool import FunctionTool
-
+    def _tool(name: str, params: Any) -> FunctionTool:
         return FunctionTool(fn=lambda: None, name=name, description="", parameters=params)
 
-    def test_schema_fixes_reach_a_neovim_named_tool(self):
+    def test_schema_fixes_reach_a_neovim_named_tool(self) -> None:
         """anyof_type_hoist (which coerce never does) is applied to a neovim tool."""
         import mcp_combiner.schemafix as srv
 
@@ -890,7 +905,7 @@ class TestFinalizeSchemas:
         finally:
             RUNTIME.schema_fixes = saved
 
-    def test_idempotent_across_repeat_calls(self):
+    def test_idempotent_across_repeat_calls(self) -> None:
         import mcp_combiner.schemafix as srv
 
         saved = RUNTIME.schema_fixes
@@ -902,7 +917,7 @@ class TestFinalizeSchemas:
         finally:
             RUNTIME.schema_fixes = saved
 
-    def test_coerce_still_runs_with_no_schema_fixes(self):
+    def test_coerce_still_runs_with_no_schema_fixes(self) -> None:
         import mcp_combiner.schemafix as srv
 
         saved = RUNTIME.schema_fixes
@@ -922,7 +937,7 @@ class TestBuildNvimTools:
     object-shaped tool. Complements the Lua `schema.normalize` unit test.
     """
 
-    def test_list_schema_yields_object_tool(self):
+    def test_list_schema_yields_object_tool(self) -> None:
         from mcp_combiner.nvim_proxy import _build_nvim_tools
 
         manifest = {"neovim": {"tools": [{"name": "get_cursor", "inputSchema": []}]}}
@@ -943,7 +958,7 @@ class TestOnListToolsIntegration:
     path must not be able to bypass schema cleanup.
     """
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         import mcp_combiner.nvim_proxy as nvim_proxy
         import mcp_combiner.server as srv
 
@@ -956,7 +971,7 @@ class TestOnListToolsIntegration:
         self._saved_channel = nvim_proxy._nvim_channel
         self._saved_fixes = RUNTIME.schema_fixes
 
-    def teardown_method(self):
+    def teardown_method(self) -> None:
         import mcp_combiner.nvim_proxy as nvim_proxy
         import mcp_combiner.server as srv
 
@@ -966,7 +981,7 @@ class TestOnListToolsIntegration:
         srv.ToolProcessingMiddleware._inflight = None
 
     @staticmethod
-    def _inject_manifest(tools):
+    def _inject_manifest(tools: list[dict[str, Any]]) -> None:
         import mcp_combiner.nvim_proxy as nvim_proxy
         from mcp_combiner.nvim_channel import NvimChannelManager
 
@@ -974,20 +989,20 @@ class TestOnListToolsIntegration:
         ch._manifest = {"neovim": {"tools": tools, "resources": []}}
         nvim_proxy._nvim_channel = ch
 
-    async def _list(self):
+    async def _list(self) -> dict[str, Tool]:
         import mcp_combiner.server as srv
 
         mw = srv.ToolProcessingMiddleware()
         ctx = MagicMock()
         ctx.fastmcp_context = None
 
-        async def call_next(_ctx):
+        async def call_next(context: _ListCtx) -> Sequence[Tool]:
             return []  # no upstream tools; isolate the neovim path
 
         tools = await mw.on_list_tools(ctx, call_next)
         return {str(t.name): t for t in tools}
 
-    async def test_neovim_string_required_wrapped_on_the_wire(self):
+    async def test_neovim_string_required_wrapped_on_the_wire(self) -> None:
         """A neovim tool's string `required` is only fixable at egress — proves
         _finalize_schemas runs on the appended neovim tools (the #7 wiring)."""
         self._inject_manifest(
@@ -1008,7 +1023,7 @@ class TestOnListToolsIntegration:
         # _build_nvim_tools does NOT touch `required`; only egress cleanup does.
         assert by_name["neovim_set_cursor"].parameters["required"] == ["line"]
 
-    async def test_neovim_list_schema_becomes_object_on_the_wire(self):
+    async def test_neovim_list_schema_becomes_object_on_the_wire(self) -> None:
         self._inject_manifest([{"name": "list_buffers", "description": "x", "inputSchema": []}])
         by_name = await self._list()
         params = by_name["neovim_list_buffers"].parameters
@@ -1021,14 +1036,14 @@ class TestOutputSchemaPlumbing:
     a params fix must not drop the declared output schema."""
 
     @staticmethod
-    def _out():
+    def _out() -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {"buffer": {"type": "integer"}},
             "required": ["buffer"],
         }
 
-    def test_build_nvim_tools_carries_output_schema(self):
+    def test_build_nvim_tools_carries_output_schema(self) -> None:
         from mcp_combiner.nvim_proxy import _build_nvim_tools
 
         manifest = {
@@ -1047,7 +1062,7 @@ class TestOutputSchemaPlumbing:
         assert by["neovim_get_cursor"].output_schema == self._out()
         assert by["neovim_read_buffer"].output_schema is None  # text-only tool
 
-    def test_dispatch_forwards_structured_content(self):
+    def test_dispatch_forwards_structured_content(self) -> None:
         from mcp_combiner.nvim_proxy import _dispatch_result_to_tool_result
 
         res = _dispatch_result_to_tool_result(
@@ -1059,7 +1074,7 @@ class TestOutputSchemaPlumbing:
         )
         assert res.structured_content == {"buffer": 3}
 
-    def test_dispatch_text_only_has_no_structured(self):
+    def test_dispatch_text_only_has_no_structured(self) -> None:
         from mcp_combiner.nvim_proxy import _dispatch_result_to_tool_result
 
         res = _dispatch_result_to_tool_result(
@@ -1067,10 +1082,8 @@ class TestOutputSchemaPlumbing:
         )
         assert res.structured_content is None
 
-    def test_normalize_preserves_output_schema_on_rebuild(self):
+    def test_normalize_preserves_output_schema_on_rebuild(self) -> None:
         """A schema_fix that rebuilds the tool must keep its output_schema."""
-        from fastmcp.tools.function_tool import FunctionTool
-
         import mcp_combiner.schemafix as srv
 
         # Missing `properties` → empty_object fix changes params → tool is rebuilt.
@@ -1098,36 +1111,36 @@ class TestPendingTokenFilters:
     TokenRewriteMiddleware applies the pending filter.
     """
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         _reset_session_state()
 
-    def teardown_method(self):
+    def teardown_method(self) -> None:
         _reset_session_state()
 
-    def test_empty_by_default(self):
+    def test_empty_by_default(self) -> None:
         import mcp_combiner.server as srv
 
         assert srv._pending_token_filters == {}
 
-    def test_set_and_get(self):
+    def test_set_and_get(self) -> None:
         import mcp_combiner.server as srv
 
         srv._pending_token_filters["token-abc"] = {"everything"}
         assert srv._pending_token_filters.get("token-abc") == {"everything"}
 
-    def test_missing_token_returns_none(self):
+    def test_missing_token_returns_none(self) -> None:
         import mcp_combiner.server as srv
 
         assert srv._pending_token_filters.get("nonexistent") is None
 
-    def test_clear_pending(self):
+    def test_clear_pending(self) -> None:
         import mcp_combiner.server as srv
 
         srv._pending_token_filters["token-abc"] = {"everything"}
         del srv._pending_token_filters["token-abc"]
         assert srv._pending_token_filters.get("token-abc") is None
 
-    def test_multiple_tokens_independent(self):
+    def test_multiple_tokens_independent(self) -> None:
         import mcp_combiner.server as srv
 
         srv._pending_token_filters["token-1"] = {"everything", "http-example"}
@@ -1147,20 +1160,20 @@ class TestTokenFilterRESTEndpoints:
     """
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self) -> Iterator[None]:
         _reset_session_state()
         yield
         _reset_session_state()
 
     @pytest.fixture
-    def client(self):
+    def client(self) -> TestClient:
         combiner, _config = _make_combiner_app()
         app = combiner.http_app()
         return TestClient(app, raise_server_exceptions=False)
 
     # -- GET /sessions/token/{token}/filter --
 
-    def test_get_filter_pending_empty(self, client):
+    def test_get_filter_pending_empty(self, client: TestClient) -> None:
         """GET on unconnected token reports the (empty) token store."""
         resp = client.get("/sessions/token/tok-aaa/filter")
         assert resp.status_code == 200
@@ -1170,7 +1183,7 @@ class TestTokenFilterRESTEndpoints:
         assert data["connected"] is False
         assert data["disabled_servers"] == []
 
-    def test_get_filter_pending_with_state(self, client):
+    def test_get_filter_pending_with_state(self, client: TestClient) -> None:
         """GET on unconnected token returns the token-keyed filter state."""
         import mcp_combiner.server as srv
 
@@ -1181,7 +1194,7 @@ class TestTokenFilterRESTEndpoints:
         assert data["connected"] is False
         assert "everything" in data["disabled_servers"]
 
-    def test_get_filter_connected(self, client):
+    def test_get_filter_connected(self, client: TestClient) -> None:
         """GET on a connected token reports the CANONICAL token store (the
         one enforcement reads through to), not the legacy session store."""
         import mcp_combiner.server as srv
@@ -1197,7 +1210,7 @@ class TestTokenFilterRESTEndpoints:
 
     # -- POST /sessions/token/{token}/filter (pending path) --
 
-    def test_post_filter_pending_disabled_servers(self, client):
+    def test_post_filter_pending_disabled_servers(self, client: TestClient) -> None:
         """POST with disabled_servers on unconnected token writes the store."""
         import mcp_combiner.server as srv
 
@@ -1212,7 +1225,7 @@ class TestTokenFilterRESTEndpoints:
         # Verify the token-keyed store was populated
         assert "everything" in srv._pending_token_filters.get("tok-ccc", set())
 
-    def test_post_filter_pending_allowed_servers(self, client):
+    def test_post_filter_pending_allowed_servers(self, client: TestClient) -> None:
         """POST with allowed_servers on unconnected token inverts to disabled."""
         resp = client.post(
             "/sessions/token/tok-ddd/filter",
@@ -1224,7 +1237,7 @@ class TestTokenFilterRESTEndpoints:
         # everything is allowed, so other enabled servers should be disabled
         assert "everything" not in data["disabled_servers"]
 
-    def test_post_filter_pending_empty_clears(self, client):
+    def test_post_filter_pending_empty_clears(self, client: TestClient) -> None:
         """POST with empty disabled_servers on pending token clears pending."""
         import mcp_combiner.server as srv
 
@@ -1239,7 +1252,7 @@ class TestTokenFilterRESTEndpoints:
 
     # -- POST /sessions/token/{token}/filter (connected path) --
 
-    def test_post_filter_connected_applies_immediately(self, client):
+    def test_post_filter_connected_applies_immediately(self, client: TestClient) -> None:
         """POST on connected token writes the canonical token store — the
         legacy session store is never touched (enforcement reads through)."""
         import mcp_combiner.server as srv
@@ -1257,7 +1270,7 @@ class TestTokenFilterRESTEndpoints:
         assert "everything" in srv._pending_token_filters.get("tok-fff", set())
         assert srv._session_disabled.get("session-456") is None
 
-    def test_post_filter_connected_enable_single(self, client):
+    def test_post_filter_connected_enable_single(self, client: TestClient) -> None:
         """POST enable on connected token removes server from the token store."""
         import mcp_combiner.server as srv
 
@@ -1272,7 +1285,7 @@ class TestTokenFilterRESTEndpoints:
         assert "everything" not in data["disabled_servers"]
         assert "http-example" in data["disabled_servers"]
 
-    def test_post_filter_connected_disable_single(self, client):
+    def test_post_filter_connected_disable_single(self, client: TestClient) -> None:
         """POST disable on connected token adds server to the token store."""
         import mcp_combiner.server as srv
 
@@ -1288,7 +1301,7 @@ class TestTokenFilterRESTEndpoints:
 
     # -- DELETE /sessions/token/{token}/filter --
 
-    def test_delete_filter_pending_clears(self, client):
+    def test_delete_filter_pending_clears(self, client: TestClient) -> None:
         """DELETE on unconnected token clears pending state."""
         import mcp_combiner.server as srv
 
@@ -1300,7 +1313,7 @@ class TestTokenFilterRESTEndpoints:
         assert data["session_id"] is None
         assert srv._pending_token_filters.get("tok-iii") is None
 
-    def test_delete_filter_connected_clears(self, client):
+    def test_delete_filter_connected_clears(self, client: TestClient) -> None:
         """DELETE on connected token clears the token-keyed filter."""
         import mcp_combiner.server as srv
 
@@ -1327,18 +1340,18 @@ class TestAllowedToDisabledConversion:
     """
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self) -> Iterator[None]:
         _reset_session_state()
         yield
         _reset_session_state()
 
     @pytest.fixture
-    def client(self):
+    def client(self) -> TestClient:
         combiner, _config = _make_combiner_app()
         app = combiner.http_app()
         return TestClient(app, raise_server_exceptions=False)
 
-    def test_allowed_inverts_to_disabled(self, client):
+    def test_allowed_inverts_to_disabled(self, client: TestClient) -> None:
         """allowed_servers=['everything'] disables all others."""
         resp = client.post(
             "/sessions/test-session/filter",
@@ -1352,7 +1365,7 @@ class TestAllowedToDisabledConversion:
         for name in ("disabled-server", "http-example", "sharedserver-example"):
             assert name in disabled
 
-    def test_allowed_empty_disables_all(self, client):
+    def test_allowed_empty_disables_all(self, client: TestClient) -> None:
         """allowed_servers=[] disables every server."""
         resp = client.post(
             "/sessions/test-session/filter",
@@ -1364,7 +1377,7 @@ class TestAllowedToDisabledConversion:
         for name in ("everything", "disabled-server", "http-example", "sharedserver-example"):
             assert name in disabled
 
-    def test_allowed_all_disables_none(self, client):
+    def test_allowed_all_disables_none(self, client: TestClient) -> None:
         """allowed_servers with all servers disables nothing."""
         all_servers = ["everything", "disabled-server", "http-example", "sharedserver-example"]
         resp = client.post(
@@ -1375,7 +1388,7 @@ class TestAllowedToDisabledConversion:
         data = resp.json()
         assert data["disabled_servers"] == []
 
-    def test_allowed_invalid_type(self, client):
+    def test_allowed_invalid_type(self, client: TestClient) -> None:
         """allowed_servers must be a list."""
         resp = client.post(
             "/sessions/test-session/filter",
@@ -1383,7 +1396,7 @@ class TestAllowedToDisabledConversion:
         )
         assert resp.status_code == 400
 
-    def test_disabled_unknown_server_rejected(self, client):
+    def test_disabled_unknown_server_rejected(self, client: TestClient) -> None:
         """disabled_servers with unknown server names returns 400."""
         resp = client.post(
             "/sessions/test-session/filter",

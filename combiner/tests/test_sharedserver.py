@@ -289,7 +289,7 @@ class TestOverlayBackingState:
         from mcp_combiner.runtime import RUNTIME
 
         fake = SimpleNamespace(backing_state=lambda name: backing)
-        monkeypatch.setattr(RUNTIME, "ss_manager", fake, raising=False)
+        monkeypatch.setattr(RUNTIME, "proc_manager", fake, raising=False)
 
     @pytest.mark.parametrize("state", ["ready", "connected", "disabled", "auth_failed"])
     def test_serving_states_never_adjusted(
@@ -328,9 +328,9 @@ class TestOverlayBackingState:
         self._set_mgr(monkeypatch, backing)
         assert _overlay_backing_state("s", state) == expected
 
-    def test_no_ss_manager_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_proc_manager_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mcp_combiner.runtime import RUNTIME
         from mcp_combiner.status import _overlay_backing_state
 
-        monkeypatch.setattr(RUNTIME, "ss_manager", None, raising=False)
+        monkeypatch.setattr(RUNTIME, "proc_manager", None, raising=False)
         assert _overlay_backing_state("s", "disconnected") == "disconnected"

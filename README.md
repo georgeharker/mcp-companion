@@ -266,7 +266,8 @@ format is supported:
 | `sharedServer` | `string`           | Name of a `sharedServers` entry to start before connecting (see below)                                                                             |
 | `toolFilter`   | `string[]`         | Glob patterns; only matching tool names are exposed (empty = all)                                                                                  |
 | `permissions`  | `object`           | Opt-in per-call allow/deny/elicit policy for this server's tools — see [Combiner-side tool-call permissions](#combiner-side-tool-call-permissions) |
-| `isolate`      | `boolean`          | Give each chat its own upstream MCP session — see [isolate](#isolate--per-chat-sessions)                                                           |
+| `isolate`      | `boolean`          | Give each chat its own upstream MCP session (HTTP/SSE) or subprocess (stdio) — see [isolate](#isolate--per-chat-sessions)                          |
+| `externalServer` | `string`         | Name of an `externalServers` entry — a non-owned process (e.g. a `docker run` container) — see [externalServer](#externalserver--non-owned-processes)                                                           |
 
 ### isolate — per-chat sessions
 
@@ -280,15 +281,20 @@ upstream session per chat** (still one upstream server _instance_, shared
 transport). The server is handed a distinct, stable `Mcp-Session-Id` per chat
 and partitions its per-session state automatically — no clash.
 
-> **stdio servers cannot be isolated.** `isolate` is **HTTP/SSE-only**: a stdio
-> server is one subprocess with a single MCP session, so `"isolate": true` on a
-> stdio entry is **ignored** (with a startup warning) and _all chats share its one
-> session_ — a stateful stdio server therefore leaks state across chats (one
-> global "current document" for everyone). True per-chat isolation would require
-> spawning **a subprocess per chat**, which the combiner deliberately does not do
-> (unbounded processes for a marginal case). If you need per-chat state, run the
-> server over **HTTP/SSE** and set `isolate: true` there — which is exactly why the
-> stateful sibling servers (svg-mcp, cribsheet) are HTTP, not stdio.
+> **stdio servers isolate per-chat SUBPROCESSES.** `"isolate": true` on a
+> stdio entry means each chat gets its **own** `command` subprocess — a stdio
+> subprocess IS a session, so state partitioning is total (no shared-global
+> "current document"). The lifecycle matches the HTTP tiers the same way:
+> a chat's child stays running through the grace window after it detaches
+> (its state lives in-memory — the direct analog of preserving an HTTP
+> server-side session), the park-ttl forget terminates it, and a token
+> re-appearing inside the window reattaches to the same child. On combiner
+> shutdown the children are always terminated (they cannot transfer to a
+> successor). Cost note: N concurrent chats spawn N copies of the server's
+> runtime — size accordingly. A crashed child is detected and healed on that
+> chat's next call — a fresh subprocess with fresh state replaces it (in-memory
+> state is lost; the call that was in flight when the child died is the one
+> that fails). No manual restart needed.
 
 #### Chat identity — grouping tokens
 
@@ -319,19 +325,24 @@ combiner and dies with it, so tokenless chats do not survive a restart.
 
 #### Session lifecycle
 
-A chat's isolated upstream session moves through three tiers, driven by pure
-timers (configure via a top-level `"isolation"` section):
+A chat's isolated upstream session (or, for stdio, its subprocess) moves through
+three tiers, driven by pure timers (configure via a top-level `"isolation"`
+section):
 
 - **live** — a downstream session bearing the token is connected, or the last
   one dropped less than `grace_seconds` (default 300) ago; quick reconnects
   reattach instantly. An explicit session DELETE from the client skips the
-  grace and parks immediately.
-- **parked** — disconnected _without terminating_ the upstream session; only
-  `token → (Mcp-Session-Id, protocolVersion)` is kept. The token's next
-  appearance resumes the same upstream session (state intact), falling back to
-  a fresh one if the server expired it.
-- **forgotten** — parked past `park_ttl_seconds` (default 3600): the entry is
-  dropped and a best-effort DELETE releases the server's session state.
+  grace and parks immediately. HTTP/SSE: the upstream session stays connected
+  and reattaches by session id. stdio: the chat's subprocess stays running.
+- **parked** — HTTP/SSE: disconnected _without terminating_ the upstream
+  session; only `token → (Mcp-Session-Id, protocolVersion)` is kept. The
+  token's next appearance resumes the same upstream session (state intact),
+  falling back to a fresh one if the server expired it. stdio: nothing is
+  disconnected — the subprocess keeps running holding the chat's state
+  in-memory (the direct analog of preserving the server-side session).
+- **forgotten** — parked past `park_ttl_seconds` (default 3600) — HTTP/SSE:
+  the entry is dropped and a best-effort DELETE releases the server's session
+  state. stdio: the subprocess is terminated.
 
 ```jsonc
 "isolation": { "grace_seconds": 300, "park_ttl_seconds": 3600 }
@@ -342,15 +353,13 @@ their downstream sessions, nvim binds, and the isolated live/parked tiers.
 
 `isolate` is tri-state:
 
-- **absent (default)** — off; all chats share one upstream session.
-- **`true`** — on; per-chat upstream sessions. If the server uses `auth`/OAuth,
-  the token is shared across the per-chat sessions, so it still authenticates
-  once (no extra browser windows).
+- **absent (default)** — off; all chats share one upstream session (or one
+  subprocess for stdio).
+- **`true`** — on; per-chat upstream sessions (HTTP/SSE) or subprocesses
+  (stdio). If the HTTP/SSE server uses `auth`/OAuth, the token is shared
+  across the per-chat sessions, so it still authenticates once (no extra
+  browser windows).
 - **`false`** — explicitly off (distinct from absent for layered overrides).
-
-Only applies to HTTP/SSE servers. An explicit `true` on a **stdio** server is
-ignored with a warning — stdio has one session per process, so per-chat
-isolation would need a subprocess per chat, which the combiner does not do.
 
 ```jsonc
 "svg-mcp": {
@@ -432,6 +441,85 @@ entries can reference the same `sharedServers` entry.
 | `env`            | `object`   | `{}`         | Extra environment variables (supports interpolation)                             |
 | `grace_period`   | `string`   | —            | How long to keep the process alive after the last client detaches (e.g. `"30m"`) |
 | `health_timeout` | `integer`  | `30`         | Seconds to poll the server URL after start before giving up                      |
+
+### externalServer — non-owned processes
+
+`sharedServer` gives the combiner *ownership* of the backing process: it
+refcounts clients and keeps the process warm for `grace_period`. That model
+doesn't fit backings whose lifetime some other tool decides — a `docker run`
+container, `docker compose up -d` service, or any CLI-launched server. The
+`externalServer` field covers that case. It links a server entry to a process
+definition in the top-level `externalServers` dict:
+
+```json
+{
+  "externalServers": {
+    "postgres-mcp-proc": {
+      "launch": ["docker", "run", "--rm", "-d", "--name", "postgres-mcp",
+                 "-p", "8002:8000", "ghcr.io/org/postgres-mcp"],
+      "stop": ["docker", "stop", "postgres-mcp"],
+      "env": { "DOCKER_HOST": "${env:DOCKER_HOST}" },
+      "health_timeout": 30
+    }
+  },
+  "mcpServers": {
+    "postgres": {
+      "url": "http://localhost:8002/mcp",
+      "externalServer": "postgres-mcp-proc"
+    }
+  }
+}
+```
+
+There is no refcount and no grace period here — the combiner launches the
+process (if `launch` is set), waits for the server's `url` to answer within
+`health_timeout`, and does exactly what the config states on shutdown:
+
+| Config                  | Boot                               | Shutdown                                   |
+| ----------------------- | ---------------------------------- | ------------------------------------------ |
+| `launch` only           | exec launch, poll `url`            | leave running                              |
+| `launch` + `stop`       | same                               | run the `stop` command                     |
+| `launch` + `foreground` | same; combiner keeps the child PID | SIGTERM the child (after `stop`, if both)  |
+| no `launch`             | poll `url` only                    | nothing                                    |
+
+**`externalServers` entry fields:**
+
+| Field            | Type       | Default      | Description                                                                     |
+| ---------------- | ---------- | ------------ | ------------------------------------------------------------------------------- |
+| `launch`         | `string[]` | —            | argv to launch the backing process (supports interpolation); absent = poll-only |
+| `stop`           | `string[]` | —            | argv to stop the process on disable/shutdown; absent = leave it running         |
+| `foreground`     | `boolean`  | `false`      | Own the child process: the combiner SIGTERMs it on shutdown (after `stop`)      |
+| `env`            | `object`   | `{}`         | Extra environment variables for the launcher process (supports interpolation)   |
+| `health_timeout` | `integer`  | `30`         | Seconds to poll the server URL after start before giving up                     |
+
+Notes and gotchas:
+
+- **Launch is not made idempotent by the combiner** — re-booting re-runs
+  `launch` verbatim. `docker run -d --name x` fails when the container already
+  exists; prefer idempotent launchers (`docker compose up -d`) or an
+  attach-only entry (no `launch`) for processes you manage elsewhere.
+- A `foreground: true` launch makes the combiner the child's owner: shutdown
+  SIGTERMs it (`docker run` without `-d` forwards the signal to the container;
+  add `--sig-proxy=true`/`--init` on the launch line if the image needs it).
+- A server entry can reference `sharedServer` **or** `externalServer` — if
+  both are set, `sharedServer` wins with a load-time warning (an entry that
+  names a *missing* `sharedServers` key falls back to the external one).
+- `sharedServers`-style ownership keys (`grace_period`, `command`/`args`) on
+  an `externalServers` entry are warned about as unknown keys and ignored —
+  likewise a `stop` on an entry with no `launch`: nothing was launched, so
+  nothing gets stopped.
+- **One `externalServers` entry, one owner.** Unlike `sharedServers` (which
+  refcounts), sharing an external entry between several server entries means
+  any of them disabling/restarting runs `stop`/relaunch for the shared
+  process — give each such server its own entry, or accept the coupling.
+- Launch/stop argv is logged **pre-interpolation** so `${env:TOKEN}`-style
+  references don't leak their resolved values into the log. The combiner
+  passes its own environment to the launcher, the same as for stdio servers.
+- Plain `url`-only server entries (no backing reference at all) also get a
+  best-effort background reachability probe at boot and on every re-enable —
+  an unauthenticated HTTP GET (via `curl`), retried for up to 30 seconds; this
+  includes plain remote/third-party URLs. Same status reporting as backed
+  entries, without delaying combiner readiness.
 
 ### Environment variable interpolation
 

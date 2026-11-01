@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -13,7 +15,7 @@ from mcp_combiner import ctl
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_state_dirs(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _hermetic_state_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Hermetic-tier guard: the nix build sandbox (and any read-only HOME) makes
     # `~/.local/state` and `~/.cache` unwritable — HOME is `/homeless-shelter`
     # there — and ctl's default log dir + cache dir resolve under HOME when the
@@ -87,7 +89,9 @@ def test_combiner_serve_argv_explicit_log_file_wins() -> None:
     assert argv[argv.index("--log-file") + 1] == "/mine.log"
 
 
-def test_resolve_capture_log_defaults_and_none(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_capture_log_defaults_and_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     resolved = ctl._resolve_capture_log(None)
     assert resolved == str(tmp_path / "mcp-combiner" / "mcp-combiner.log")
@@ -305,7 +309,7 @@ def test_owner_pid_walks_to_pi_ancestor(monkeypatch: pytest.MonkeyPatch) -> None
         101: (102, "bash -c mcp-combiner restart"),
         102: (999, "pi"),
     }
-    monkeypatch.setattr(ctl.os, "getppid", lambda: 100)
+    monkeypatch.setattr("mcp_combiner.ctl.os.getppid", lambda: 100)
     monkeypatch.setattr("mcp_combiner.ctl.subprocess.run", _FakePs(rows))
     assert ctl._owner_pid() == 102  # the pid whose command IS pi
 
@@ -318,7 +322,7 @@ def test_owner_pid_falls_back_to_calling_shell(monkeypatch: pytest.MonkeyPatch) 
         200: (201, "bash"),
         201: (1, "/Applications/Ghostty.app/Contents/MacOS/ghostty"),
     }
-    monkeypatch.setattr(ctl.os, "getppid", lambda: 200)
+    monkeypatch.setattr("mcp_combiner.ctl.os.getppid", lambda: 200)
     monkeypatch.setattr("mcp_combiner.ctl.subprocess.run", _FakePs(rows))
     assert ctl._owner_pid() == 200
 
@@ -328,11 +332,13 @@ def test_owner_pid_plain_cli_never_walks(monkeypatch: pytest.MonkeyPatch) -> Non
     # without any ancestry inspection at all.
     monkeypatch.delenv("PI_SESSION_ID", raising=False)
     monkeypatch.delenv("PI_CODING_AGENT", raising=False)
-    walked = []
-    monkeypatch.setattr(
-        "mcp_combiner.ctl.subprocess.run",
-        lambda *a, **k: walked.append(a) or subprocess.CompletedProcess(a[0], 0, stdout=""),
-    )
-    monkeypatch.setattr(ctl.os, "getppid", lambda: 31337)
+    walked: list[tuple[Any, ...]] = []
+
+    def _record_run(*a: Any, **k: Any) -> subprocess.CompletedProcess[str]:
+        walked.append(a)
+        return subprocess.CompletedProcess(a[0], 0, stdout="")
+
+    monkeypatch.setattr("mcp_combiner.ctl.subprocess.run", _record_run)
+    monkeypatch.setattr("mcp_combiner.ctl.os.getppid", lambda: 31337)
     assert ctl._owner_pid() == 31337
     assert not walked  # the ps walk never ran

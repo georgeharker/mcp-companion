@@ -31,9 +31,9 @@ if TYPE_CHECKING:
     from fastmcp.tools import Tool
     from mcp.server.session import ServerSession
 
+    from mcp_combiner.backing import BackingProcessManager
     from mcp_combiner.config import CombinerConfig
     from mcp_combiner.connections import ConnectionManager
-    from mcp_combiner.sharedserver import SharedServerManager
     from mcp_combiner.ui_host import UiHost
 
 
@@ -334,7 +334,7 @@ class CombinerRuntime:
     # treats loopback traffic exactly like any other client.
     inbound_auth_token: str | None = None
     conn_manager: ConnectionManager | None = None
-    ss_manager: SharedServerManager | None = None
+    proc_manager: BackingProcessManager | None = None
 
     # Enabled schema fixes (frozen at server creation).
     schema_fixes: frozenset[str] = frozenset()

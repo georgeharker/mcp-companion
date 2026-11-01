@@ -30,6 +30,12 @@ def _tool(name: str, meta: dict[str, Any] | None) -> Tool:
     return Tool.from_function(lambda x: x, name="_").model_copy(update={"name": name, "meta": meta})
 
 
+def _ui_uri(tool: Tool) -> Any:
+    """The tool's ``meta.ui.resourceUri`` (the meta must be present)."""
+    assert tool.meta is not None
+    return tool.meta["ui"]["resourceUri"]
+
+
 # ── namespace_uri parity with FastMCP's mount transform ────────────
 
 
@@ -113,21 +119,21 @@ class TestNamespaceAppMeta:
 
         # What resources/list would show for this resource:
         resource_listed_uri = Namespace("svg-mcp")._transform_uri(upstream_uri)
-        assert rewritten.meta["ui"]["resourceUri"] == resource_listed_uri
+        assert _ui_uri(rewritten) == resource_listed_uri
 
     def test_recovers_namespace_from_tool_name(self, _config: None) -> None:
         # gws-namespaced tool → gws prefix, not svg-mcp
         tool = _tool("gws_open_widget", {"ui": {"resourceUri": "ui://gws/w"}})
         (out,) = _namespace_app_meta([tool])
-        assert out.meta["ui"]["resourceUri"] == "ui://gws/gws/w"
+        assert _ui_uri(out) == "ui://gws/gws/w"
 
     def test_unowned_tools_pass_through(self, _config: None) -> None:
         # combiner meta-tools and virtual neovim_* have no owning server.
         combiner_tool = _tool("combiner__status", {"ui": {"resourceUri": "ui://x/y"}})
         nvim_tool = _tool("neovim_edit_buffer", {"ui": {"resourceUri": "ui://n/e"}})
         out = _namespace_app_meta([combiner_tool, nvim_tool])
-        assert out[0].meta["ui"]["resourceUri"] == "ui://x/y"  # untouched
-        assert out[1].meta["ui"]["resourceUri"] == "ui://n/e"  # untouched
+        assert _ui_uri(out[0]) == "ui://x/y"  # untouched
+        assert _ui_uri(out[1]) == "ui://n/e"  # untouched
 
     def test_tools_without_meta_pass_through(self, _config: None) -> None:
         tool = _tool("svg-mcp_plain", None)
@@ -139,9 +145,9 @@ class TestNamespaceAppMeta:
         pass must not double-namespace."""
         tool = _tool("svg-mcp_show_widget", {"ui": {"resourceUri": "ui://svg-mcp/preview"}})
         (once,) = _namespace_app_meta([tool])
-        assert once.meta["ui"]["resourceUri"] == "ui://svg-mcp/svg-mcp/preview"
+        assert _ui_uri(once) == "ui://svg-mcp/svg-mcp/preview"
         # The cache holds the original (un-rewritten) tool; the pass does not
         # mutate it in place, so re-running from the base yields the same result.
         (again,) = _namespace_app_meta([tool])
-        assert again.meta["ui"]["resourceUri"] == "ui://svg-mcp/svg-mcp/preview"
-        assert tool.meta["ui"]["resourceUri"] == "ui://svg-mcp/preview"  # base untouched
+        assert _ui_uri(again) == "ui://svg-mcp/svg-mcp/preview"
+        assert _ui_uri(tool) == "ui://svg-mcp/preview"  # base untouched

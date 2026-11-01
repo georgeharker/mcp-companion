@@ -29,13 +29,26 @@ import pytest
 from conftest import free_port
 from fastmcp import Client
 
+
+def _content_text(content: object) -> str:
+    """Join a ToolResult's text blocks — duck-typed so the mcp content union
+    (TextContent/ImageContent/EmbeddedResource/...) doesn't need narrowing."""
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        str(getattr(block, "text", ""))
+        for block in content
+        if getattr(block, "type", None) == "text"
+    )
+
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PLUGIN_ROOT = _REPO_ROOT  # rtp root (contains lua/)
 _COMBINER_DIR = _REPO_ROOT / "combiner"
 # A free port, not a fixed one — a hardcoded port collides with a leftover
 # process, a parallel run, or a live combiner and wedges the spawn/health poll.
 _PORT = free_port()
-_TOKEN = "abcdef01-2345-6789-abcd-ef0123456789"
+_TOKEN = "abcdef01-2345-6789-abcd-ef0123456789"  # gitleaks:allow — synthetic loopback fixture token
 
 # e2e: spawns a real combiner and reaches nvim over loopback — excluded from the
 # nix `flake check` hermetic tier (see flake.nix), runs in ci.yml's e2e tier.
@@ -195,7 +208,7 @@ async def test_tokenless_client_must_name_instance() -> None:
 
             # Discovery works without targeting.
             listed = await client.call_tool("neovim_list_instances", {})
-            ltext = "".join(b.text for b in listed.content if getattr(b, "type", None) == "text")
+            ltext = _content_text(listed.content)
             assert "solo" in ltext
 
             # No association + no nvim_instance → instructive error, not a guess.
@@ -207,7 +220,7 @@ async def test_tokenless_client_must_name_instance() -> None:
             result = await client.call_tool(
                 "neovim_read_buffer", {"buffer": 1, "nvim_instance": "solo"}
             )
-            text = "".join(b.text for b in result.content if getattr(b, "type", None) == "text")
+            text = _content_text(result.content)
             assert "alpha" in text
     finally:
         nvim.terminate()
@@ -244,7 +257,7 @@ async def test_agent_calls_neovim_tool_through_combiner(combiner_and_nvim: None)
         bound = None
         for _ in range(40):
             listed = await client.call_tool("neovim_list_instances", {})
-            ltext = "".join(b.text for b in listed.content if getattr(b, "type", None) == "text")
+            ltext = _content_text(listed.content)
             bound = json.loads(ltext).get("bound")
             if bound:
                 break
@@ -253,7 +266,5 @@ async def test_agent_calls_neovim_tool_through_combiner(combiner_and_nvim: None)
 
         # Call back into the live editor through the combiner.
         result = await client.call_tool("neovim_read_buffer", {"buffer": 1})
-        text = "".join(
-            block.text for block in result.content if getattr(block, "type", None) == "text"
-        )
+        text = _content_text(result.content)
         assert "alpha" in text and "gamma" in text

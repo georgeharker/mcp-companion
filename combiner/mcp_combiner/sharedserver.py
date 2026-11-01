@@ -22,9 +22,12 @@ import asyncio
 import logging
 import os
 import shutil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from mcp_combiner.backing import BackingManagerBase
 
 if TYPE_CHECKING:
+    from mcp_combiner.backing import BackingProcessManager
     from mcp_combiner.config import CombinerConfig, SharedServerConfig
 
 logger = logging.getLogger("mcp-combiner.sharedserver")
@@ -57,6 +60,9 @@ async def _poll_url(url: str, timeout: int) -> bool:
         try:
             proc = await asyncio.create_subprocess_exec(
                 "curl",
+                # -q FIRST: ignore ~/.curlrc — the probe must be credential-free
+                # and immune to a user's curlrc adding headers/proxies.
+                "-q",
                 "--silent",
                 "--max-time",
                 "1",
@@ -68,7 +74,12 @@ async def _poll_url(url: str, timeout: int) -> bool:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2)
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()  # reap — a killed curl is still a child
+                continue
             if proc.returncode == 0 or (stdout and stdout.strip() not in (b"000", b"")):
                 return True
         except (asyncio.TimeoutError, OSError):
@@ -116,8 +127,18 @@ def _build_use_cmd(
     return cmd
 
 
-class SharedServerManager:
+class SharedServerManager(BackingManagerBase):
     """Manages sharedserver lifecycle for all servers in a ``CombinerConfig``.
+
+    The sharedserver kind's specialization is deliberately narrow: a
+    ``use``-cmd launch with refcount bookkeeping (``_active`` is the list of
+    references *we* hold), an ``unuse`` decref as the stop, and a hard
+    ``admin stop --force`` for restarts. Every lifecycle frame
+    (``backing_state``/``start_all``/``ensure_started``/``ensure_stopped``/
+    ``restart``/``stop_all``) is inherited from
+    :class:`~mcp_combiner.backing.BackingManagerBase` — only the claim and
+    the four behaviour hooks below are sharedserver-shaped. Cross-kind
+    dispatch/precedence lives in ``BackingProcessManager``, not here.
 
     Usage::
 
@@ -127,98 +148,46 @@ class SharedServerManager:
         await mgr.stop_all()
     """
 
-    def __init__(
-        self,
-        config: "CombinerConfig",
-    ) -> None:
-        self._config = config
+    label = "sharedserver-managed"
+    # `unuse` is just a refcount decrement and should return fast. Bounded
+    # short so a concurrent stop_all() completes well inside the ~5s
+    # SIGTERM→SIGKILL window sharedserver gives us on shutdown.
+    stop_timeout = 2.0
+    drain_timeout = 2.0
+
+    def __init__(self, config: "CombinerConfig") -> None:
+        super().__init__(config)
         self._binary: str | None = None
-        # Track which server names we successfully `use`d so we can `unuse` them.
-        self._active: list[str] = []
-        # Observed lifecycle of each backing process (keyed by sharedServer name,
-        # like _active). Purely observational — ``build_server_status`` overlays
-        # it onto the connection-level state so status can distinguish "still
-        # starting" from "won't start"; nothing gates on it. Values:
-        #   "spawning"     — `sharedserver use` in flight
-        #   "spawn_failed" — `use` errored or timed out; no reference held
-        #   "probing"      — `use` succeeded; reachability poll in progress
-        #   "unreachable"  — reachability poll timed out (reference still held)
-        #   "reachable"    — answered HTTP (any status counts — see _poll_url)
-        #   "spawned"      — `use` succeeded; server has no URL to probe
-        #   "stopped"      — we dropped our reference
-        self._backing_state: dict[str, str] = {}
 
     def _get_binary(self) -> str:
         if self._binary is None:
             self._binary = _require_binary()
         return self._binary
 
-    def backing_state(self, server_name: str) -> str | None:
-        """Observed state of *server_name*'s backing sharedserver process.
+    def claims(self, server_name: str) -> "SharedServerConfig | None":
+        """Resolve this server's ``sharedServer`` reference, if it has one.
 
-        ``None`` when the server has no sharedserver backing, or when nothing
-        has been observed yet (status asked before start_all touched it).
-        Values are documented on ``_backing_state``.
+        A dangling reference (missing ``sharedServers`` entry — warned at load
+        time) claims nothing, so status/lifecycle paths never see the
+        ``KeyError`` ``resolve_shared_server`` raises for it.
         """
-        ss = self._config.resolve_shared_server(server_name)
-        if ss is None:
+        try:
+            return self._config.resolve_shared_server(server_name)
+        except KeyError:
             return None
-        return self._backing_state.get(ss.name)
 
-    async def start_all(self) -> None:
-        """Launch ``sharedserver use`` for every enabled server concurrently.
+    def _poll_fn(self) -> Any:
+        # Module global resolved at call time — tests patch
+        # ``mcp_combiner.sharedserver._poll_url``.
+        return _poll_url
 
-        Each server is started in parallel.  The ``sharedserver use`` command
-        itself is quick (just increments a refcount), but the subsequent
-        health-poll can take up to ``health_timeout`` seconds per server.
-        Running them concurrently keeps total wall-clock time close to the
-        single-longest timeout instead of the sum of all timeouts.
-
-        Servers that fail to start or become healthy are logged as warnings —
-        the combiner continues mounting other servers.
-        """
-        servers_with_ss = [
-            name
-            for name in self._config.get_enabled_servers()
-            if self._config.resolve_shared_server(name) is not None
-        ]
-        if servers_with_ss:
-            logger.warning(
-                "Starting sharedserver-managed servers: %s",
-                ", ".join(servers_with_ss),
-            )
-        else:
-            logger.warning("No sharedserver-managed servers configured")
-            return
-
-        tasks = []
-        seen_ss: set[str] = set()
-        for name, srv in self._config.get_enabled_servers().items():
-            ss = self._config.resolve_shared_server(name)
-            if ss is None:
-                continue
-            # Multiple server entries may reference the same sharedServer (e.g.
-            # several `gws` accounts pointing at one workspace-mcp process). Start
-            # that process once — sharedserver refcounts, but we avoid a duplicate
-            # `use` + health-poll per referring entry.
-            if ss.name in seen_ss:
-                continue
-            seen_ss.add(ss.name)
-            tasks.append(self._start_one(name, ss, srv.url))
-
-        # Run all sharedserver starts concurrently.
-        # return_exceptions=True ensures one failure doesn't cancel others.
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.warning("sharedserver start failed: %s", result)
-
-    async def _start_one(
+    async def _launch_and_poll(
         self,
         server_name: str,
-        ss: "SharedServerConfig",
+        entry: "SharedServerConfig",
         url: str | None,
     ) -> None:
+        ss = entry  # sharedserver's entries always read better as ss
         try:
             binary = self._get_binary()
         except FileNotFoundError as exc:
@@ -262,103 +231,34 @@ class SharedServerManager:
         self._active.append(ss.name)
         logger.info("sharedserver '%s' started (refcount incremented)", ss.name)
 
-        # Poll for health
-        if url:
-            self._backing_state[ss.name] = "probing"
-            health_url = url.rstrip("/")
-            logger.info(
-                "Waiting up to %ds for '%s' at %s",
-                ss.health_timeout,
-                server_name,
-                health_url,
-            )
-            ready = await _poll_url(health_url, ss.health_timeout)
-            if ready:
-                self._backing_state[ss.name] = "reachable"
-                logger.info("'%s' is healthy", server_name)
-            else:
-                self._backing_state[ss.name] = "unreachable"
-                logger.warning(
-                    "'%s' did not become healthy within %ds — "
-                    "proxy will be mounted but may fail until server is ready",
-                    server_name,
-                    ss.health_timeout,
-                )
-        else:
-            self._backing_state[ss.name] = "spawned"
+        # Poll for health (the shared frame — state transitions included).
+        await self._poll(server_name, ss, url)
 
-    async def ensure_started(self, server_name: str) -> None:
-        """Start (``sharedserver use`` + health-poll) the sharedserver backing
-        *server_name*, if it has one and isn't already started.
+    async def _stop(self, entry: "SharedServerConfig", timeout: float) -> None:
+        """Drop our reference: ``sharedserver unuse`` (decref).
 
-        Idempotent: a no-op for non-sharedserver servers or ones already up.
-        Called when a server becomes *enabled* — at boot (``start_all``) or
-        dynamically via ``combiner__enable_server`` — so "enabled" is the single
-        trigger; there is no separate run/lazy control.
+        ``timeout`` is informational here — the bound lives in ``_stop_one``
+        (the whole point of it being short is the shutdown race,
+        :attr:`drain_timeout`). A missing binary raises, which
+        ``BackingManagerBase.ensure_stopped`` treats as "no transition" so a
+        later unuse can still be attempted.
         """
-        ss = self._config.resolve_shared_server(server_name)
-        if ss is None:
-            return  # not a sharedserver-backed server
-        if ss.name in self._active:
-            return  # already started by us
-        srv = self._config.servers.get(server_name)
-        await self._start_one(server_name, ss, srv.url if srv else None)
+        binary = self._get_binary()
+        await self._stop_one(binary, entry.name)
 
-    async def ensure_stopped(self, server_name: str) -> None:
-        """Drop our reference (``sharedserver unuse``) on *server_name*'s backing
-        sharedserver, if we started it. Idempotent. Called when a server is
-        disabled dynamically via ``combiner__disable_server``."""
-        ss = self._config.resolve_shared_server(server_name)
-        if ss is None or ss.name not in self._active:
-            return
-        try:
-            binary = self._get_binary()
-        except FileNotFoundError:
-            return
-        await self._stop_one(binary, ss.name)
-        self._active.remove(ss.name)
-        self._backing_state[ss.name] = "stopped"
+    async def _stop_hard(self, entry: "SharedServerConfig") -> None:
+        """Destroy the backing process — ``admin stop --force``."""
+        await self._stop_force(entry)
 
-    async def restart(self, server_name: str) -> bool:
-        """Hard-restart the sharedserver backing *server_name*.
-
-        Unlike ``ensure_stopped`` + ``ensure_started`` (which decrement/increment
-        a refcount and therefore re-attach to the *same* still-running process
-        within its grace period), this stops the backing process via
-        ``sharedserver admin stop --force`` (graceful SIGTERM, then SIGKILL
-        fallback) — clearing all sharedserver state — then starts a fresh one
-        with ``use`` + health-poll.
-
-        Returns ``True`` if a sharedserver-backed process was restarted, ``False``
-        if *server_name* has no sharedserver (caller handles the plain case).
-        """
-        ss = self._config.resolve_shared_server(server_name)
-        if ss is None:
-            return False
-        try:
-            binary = self._get_binary()
-        except FileNotFoundError as exc:
-            logger.warning("Cannot restart '%s': %s", server_name, exc)
-            return False
-
-        # Stop the backing process (graceful, force fallback) and clear state.
-        await self._stop_force(binary, ss.name)
-        if ss.name in self._active:
-            self._active.remove(ss.name)
-
-        # Respawn from scratch (use + health-poll re-establishes our reference).
-        srv = self._config.servers.get(server_name)
-        await self._start_one(server_name, ss, srv.url if srv else None)
-        return True
-
-    async def _stop_force(self, binary: str, name: str) -> None:
+    async def _stop_force(self, ss: "SharedServerConfig") -> None:
         """``sharedserver admin stop --force`` — graceful, then SIGKILL fallback.
 
         A non-zero exit (e.g. "server is not running") is logged and ignored:
         the goal is simply to ensure the old process is gone before respawning.
         """
-        cmd = [binary, "admin", "stop", "--force", name]
-        logger.warning("sharedserver admin stop --force '%s'", name)
+        binary = self._get_binary()
+        cmd = [binary, "admin", "stop", "--force", ss.name]
+        logger.warning("sharedserver admin stop --force '%s'", ss.name)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -369,35 +269,18 @@ class SharedServerManager:
             if proc.returncode != 0:
                 logger.info(
                     "sharedserver admin stop '%s' exited %s (continuing): %s",
-                    name,
+                    ss.name,
                     proc.returncode,
                     stderr.decode().strip() if stderr else "",
                 )
         except (asyncio.TimeoutError, OSError) as exc:
-            logger.warning("sharedserver admin stop '%s' failed: %s", name, exc)
+            logger.warning("sharedserver admin stop '%s' failed: %s", ss.name, exc)
 
-    async def stop_all(self) -> None:
-        """Call ``sharedserver unuse`` (decref) for every server we started.
-
-        Runs all decrefs **concurrently**. This is invoked from the ASGI lifespan
-        shutdown when the combiner is itself being stopped by sharedserver, which
-        sends SIGTERM and escalates to SIGKILL after only ~5s. A sequential loop
-        (N servers × the per-call timeout) can overrun that window and get
-        SIGKILLed mid-cleanup, leaving the remaining downstreams orphaned — so we
-        fan out and bound each call short (see ``_stop_one``).
-        """
-        if not self._active:
-            return
-        try:
-            binary = self._get_binary()
-        except FileNotFoundError:
-            return
-
-        await asyncio.gather(
-            *(self._stop_one(binary, name) for name in list(self._active)),
-            return_exceptions=True,
-        )
-        self._active.clear()
+    def _shutdown_coros(self) -> list[Any]:
+        """One ``unuse`` coro per started entry; a missing binary raises so
+        ``stop_all`` keeps the references (as it always did)."""
+        binary = self._get_binary()
+        return [self._stop_one(binary, name) for name in list(self._active)]
 
     async def _stop_one(self, binary: str, name: str) -> None:
         cmd = [binary, "unuse", name]
@@ -417,11 +300,16 @@ class SharedServerManager:
 
 
 # Module-level manager reference for cleanup
-_manager: SharedServerManager | None = None
+_manager: SharedServerManager | BackingProcessManager | None = None
 
 
-def register_for_cleanup(manager: SharedServerManager) -> None:
-    """Register a SharedServerManager for cleanup on process exit."""
+def register_for_cleanup(manager: SharedServerManager | BackingProcessManager) -> None:
+    """Register the backing-process manager for cleanup on process exit.
+
+    Either the plain SharedServerManager or the BackingProcessManager facade
+    (sharedserver + external + plain-url probe states). ``cleanup()`` only
+    calls ``stop_all()`` on it, duck-typed.
+    """
     global _manager
     _manager = manager
 

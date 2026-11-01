@@ -13,8 +13,13 @@ the TTL expires. ``_signal_tools_ready`` is the bridge — it primes one bounded
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from typing import NoReturn
 
+import mcp.types as mt
+import pytest
+from fakes import ScriptedClient, managed_conn, tool
+
+from mcp_combiner.config import CombinerConfig, ServerConfig, Transport
 from mcp_combiner.connections import (
     _BACKING_RESTART_AFTER,
     _MAX_BACKOFF_LOCAL,
@@ -24,90 +29,87 @@ from mcp_combiner.connections import (
 )
 
 
-def _fake_conn(name: str, client: object) -> SimpleNamespace:
-    """Minimal stand-in for _ManagedConnection (only fields _signal_tools_ready reads)."""
-    return SimpleNamespace(name=name, client_ref=[client])
-
-
 class TestSignalToolsReady:
-    async def test_signals_ready_when_list_succeeds(self):
+    async def test_signals_ready_when_list_succeeds(self) -> None:
         """A priming tools/list that answers WITH tools fires on_tools_ready
         exactly once."""
         ready: list[str] = []
 
-        async def list_tools():
-            return [SimpleNamespace(name="alpha_one")]
+        async def list_tools() -> list[mt.Tool]:
+            return [tool("alpha_one")]
 
         mgr = ConnectionManager(on_tools_ready=lambda name: ready.append(name))
-        conn = _fake_conn("alpha", SimpleNamespace(list_tools=list_tools))
+        conn = managed_conn("alpha", ScriptedClient(list_tools=list_tools))
         await mgr._signal_tools_ready(conn)
 
         assert ready == ["alpha"]
         assert conn._tools_ready is True
 
-    async def test_empty_answer_defers_ready(self):
+    async def test_empty_answer_defers_ready(self) -> None:
         """An answered-but-EMPTY tools/list is a warming upstream, not
         readiness: _tools_ready stays unset so the health monitor's
         connected-but-not-ready branch keeps re-running this probe (another
         tools/list after each interval), and on_tools_ready does not fire."""
         ready: list[str] = []
 
-        async def list_tools():
+        async def list_tools() -> list[mt.Tool]:
             return []
 
         mgr = ConnectionManager(on_tools_ready=lambda name: ready.append(name))
-        conn = _fake_conn("alpha", SimpleNamespace(list_tools=list_tools))
+        conn = managed_conn("alpha", ScriptedClient(list_tools=list_tools))
         await mgr._signal_tools_ready(conn)
 
         assert ready == []
-        assert getattr(conn, "_tools_ready", False) is False
+        assert conn._tools_ready is False
 
-    async def test_does_not_signal_when_list_fails(self):
+    async def test_does_not_signal_when_list_fails(self) -> None:
         """If priming tools/list raises, readiness is NOT signalled (tools unconfirmed)."""
         ready: list[str] = []
 
-        async def list_tools():
+        async def list_tools() -> NoReturn:
             raise RuntimeError("upstream still warming up")
 
         mgr = ConnectionManager(on_tools_ready=lambda name: ready.append(name))
-        await mgr._signal_tools_ready(_fake_conn("beta", SimpleNamespace(list_tools=list_tools)))
+        await mgr._signal_tools_ready(managed_conn("beta", ScriptedClient(list_tools=list_tools)))
 
         assert ready == []
 
-    async def test_no_client_is_noop(self):
+    async def test_no_client_is_noop(self) -> None:
         """A missing client (connection gone) never signals readiness."""
         ready: list[str] = []
         mgr = ConnectionManager(on_tools_ready=lambda name: ready.append(name))
-        await mgr._signal_tools_ready(_fake_conn("gamma", None))
+        await mgr._signal_tools_ready(managed_conn("gamma", None))
         assert ready == []
 
-    async def test_no_callback_is_noop(self):
+    async def test_no_callback_is_noop(self) -> None:
         """With no on_tools_ready wired, priming is a harmless no-op."""
 
         called = False
 
-        async def list_tools():
+        async def list_tools() -> list[mt.Tool]:
             nonlocal called
             called = True
             return []
 
         mgr = ConnectionManager()  # no callbacks
-        await mgr._signal_tools_ready(_fake_conn("delta", SimpleNamespace(list_tools=list_tools)))
+        await mgr._signal_tools_ready(managed_conn("delta", ScriptedClient(list_tools=list_tools)))
         # Short-circuits before touching the client when there's nothing to signal.
         assert called is False
 
-    async def test_callback_exception_is_swallowed(self):
+    async def test_callback_exception_is_swallowed(self) -> None:
         """A raising on_tools_ready must not propagate out of _signal_tools_ready."""
 
-        async def list_tools():
+        async def list_tools() -> list[mt.Tool]:
             return []
 
-        def boom(_name):
+        def boom(_name: str) -> None:
             raise ValueError("cache invalidation blew up")
 
         mgr = ConnectionManager(on_tools_ready=boom)
         # Must not raise.
-        await mgr._signal_tools_ready(_fake_conn("epsilon", SimpleNamespace(list_tools=list_tools)))
+        await mgr._signal_tools_ready(
+            managed_conn("epsilon", ScriptedClient(list_tools=list_tools))
+        )
 
 
 class TestMonitorRePrime:
@@ -116,7 +118,9 @@ class TestMonitorRePrime:
     restart raced the respawn) eventually reaches 'ready' and fires
     on_tools_ready — instead of staying stuck until a disconnect."""
 
-    async def test_monitor_reprimes_connected_but_not_ready(self, monkeypatch):
+    async def test_monitor_reprimes_connected_but_not_ready(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import asyncio
 
         import mcp_combiner.connections as conns
@@ -132,19 +136,16 @@ class TestMonitorRePrime:
         # defers tools-ready) and confirm only on the populated one.
         state = {"n": 0}
 
-        async def list_tools():
+        async def list_tools() -> list[mt.Tool]:
             state["n"] += 1
             if state["n"] < 3:
                 return []
-            return [SimpleNamespace(name="a_one")]
+            return [tool("a_one")]
 
-        async def ping():
+        async def ping() -> None:
             return None
 
-        client = SimpleNamespace(is_connected=lambda: True, list_tools=list_tools, ping=ping)
-        conn = SimpleNamespace(
-            name="a", _auth_failed=False, client_ref=[client], _tools_ready=False
-        )
+        conn = managed_conn("a", ScriptedClient(list_tools=list_tools, ping=ping))
 
         task = asyncio.create_task(mgr._monitor(conn))
         try:
@@ -163,7 +164,7 @@ class TestMonitorRePrime:
         assert conn._tools_ready is True
         assert "a" in fired
 
-    async def test_monitor_probe_gives_up_eventually(self, monkeypatch):
+    async def test_monitor_probe_gives_up_eventually(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A persistently deferring upstream (forever-empty tools/list) is not
         re-probed forever: past the give-up window the monitor stops listing
         it (reconnect or upstream list_changed re-arms), while the keepalive
@@ -179,23 +180,19 @@ class TestMonitorRePrime:
         listed = {"n": 0}
         pings = {"n": 0}
 
-        async def list_tools():
+        async def list_tools() -> list[mt.Tool]:
             listed["n"] += 1
             return []
 
-        async def ping():
+        async def ping() -> None:
             pings["n"] += 1
-            return None
 
-        client = SimpleNamespace(is_connected=lambda: True, list_tools=list_tools, ping=ping)
-        conn = SimpleNamespace(
-            name="a", _auth_failed=False, client_ref=[client], _tools_ready=False
-        )
+        conn = managed_conn("a", ScriptedClient(list_tools=list_tools, ping=ping))
 
         task = asyncio.create_task(mgr._monitor(conn))
         try:
             for _ in range(200):
-                if getattr(conn, "_tools_probe_gave_up", False) and pings["n"] > listed["n"] + 2:
+                if conn._tools_probe_gave_up and pings["n"] > listed["n"] + 2:
                     break
                 await asyncio.sleep(0.001)
         finally:
@@ -209,7 +206,9 @@ class TestMonitorRePrime:
         assert conn._tools_probe_gave_up is True
         assert pings["n"] > listed["n"]  # keepalive unaffected
 
-    async def test_monitor_reconnects_when_prime_fails_on_stale_session(self, monkeypatch):
+    async def test_monitor_reconnects_when_prime_fails_on_stale_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A session that claims is_connected() but can't serve tools/list (the
         upstream restarted; the old session 404s everything) must fall through
         to the ping and reconnect — not re-prime forever stuck at 'connected'."""
@@ -224,21 +223,14 @@ class TestMonitorRePrime:
 
         mgr = ConnectionManager()
 
-        async def stale(*_a, **_kw):
+        async def stale() -> NoReturn:
             raise RuntimeError("Session terminated")
 
-        client = SimpleNamespace(is_connected=lambda: True, list_tools=stale, ping=stale)
-        conn = SimpleNamespace(
-            name="a",
-            _auth_failed=False,
-            client_ref=[client],
-            _tools_ready=False,
-            _consec_ping_failures=0,
-        )
+        conn = managed_conn("a", ScriptedClient(list_tools=stale, ping=stale))
 
         reconnected = asyncio.Event()
 
-        async def fake_reconnect(_conn):
+        async def fake_reconnect(_conn: _ManagedConnection) -> None:
             reconnected.set()
 
         monkeypatch.setattr(mgr, "_reconnect", fake_reconnect)
@@ -262,7 +254,9 @@ class TestMonitorHealthCheck:
     link) must NOT tear the session down — only _HEALTH_FAILURES_BEFORE_RECONNECT
     consecutive misses trigger a reconnect, and any success clears the count."""
 
-    async def test_transient_ping_miss_does_not_reconnect(self, monkeypatch):
+    async def test_transient_ping_miss_does_not_reconnect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import asyncio
 
         import mcp_combiner.connections as conns
@@ -275,24 +269,17 @@ class TestMonitorHealthCheck:
         # Ping fails the first two calls, then succeeds forever after.
         calls = {"n": 0}
 
-        async def flaky_ping():
+        async def flaky_ping() -> None:
             calls["n"] += 1
             if calls["n"] <= 2:
                 raise TimeoutError
-            return None
 
-        client = SimpleNamespace(is_connected=lambda: True, ping=flaky_ping)
-        conn = SimpleNamespace(
-            name="a",
-            _auth_failed=False,
-            client_ref=[client],
-            _tools_ready=True,  # skip the re-prime branch, go straight to ping
-            _consec_ping_failures=0,
-        )
+        # tools_ready: skip the re-prime branch, go straight to ping.
+        conn = managed_conn("a", ScriptedClient(ping=flaky_ping), tools_ready=True)
 
         reconnected = asyncio.Event()
 
-        async def fake_reconnect(_conn):
+        async def fake_reconnect(_conn: _ManagedConnection) -> None:
             reconnected.set()
 
         monkeypatch.setattr(mgr, "_reconnect", fake_reconnect)
@@ -316,7 +303,9 @@ class TestMonitorHealthCheck:
         assert not reconnected.is_set()
         assert conn._consec_ping_failures == 0
 
-    async def test_reconnects_after_threshold_consecutive_misses(self, monkeypatch):
+    async def test_reconnects_after_threshold_consecutive_misses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import asyncio
 
         import mcp_combiner.connections as conns
@@ -328,22 +317,15 @@ class TestMonitorHealthCheck:
 
         misses = {"n": 0}
 
-        async def always_fail():
+        async def always_fail() -> NoReturn:
             misses["n"] += 1
             raise TimeoutError
 
-        client = SimpleNamespace(is_connected=lambda: True, ping=always_fail)
-        conn = SimpleNamespace(
-            name="a",
-            _auth_failed=False,
-            client_ref=[client],
-            _tools_ready=True,
-            _consec_ping_failures=0,
-        )
+        conn = managed_conn("a", ScriptedClient(ping=always_fail), tools_ready=True)
 
         reconnected = asyncio.Event()
 
-        async def fake_reconnect(_conn):
+        async def fake_reconnect(_conn: _ManagedConnection) -> None:
             reconnected.set()
 
         monkeypatch.setattr(mgr, "_reconnect", fake_reconnect)
@@ -362,7 +344,9 @@ class TestMonitorHealthCheck:
         assert reconnected.is_set()
         assert misses["n"] >= 3
 
-    async def test_ping_timeout_and_failures_are_env_configurable(self, monkeypatch):
+    async def test_ping_timeout_and_failures_are_env_configurable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import importlib
 
         import mcp_combiner.connections as conns
@@ -378,30 +362,12 @@ class TestMonitorHealthCheck:
             importlib.reload(conns)
 
 
-def _reconnect_conn(*, shared_server: str | None, url: str = "http://127.0.0.1:1/mcp"):
-    """Minimal stand-in for _ManagedConnection covering what _reconnect touches.
-
-    _backoff starts at 0 so the test never actually sleeps.
-    """
-    from contextlib import AsyncExitStack
-
-    return SimpleNamespace(
-        name="a",
-        srv=SimpleNamespace(shared_server=shared_server, url=url),
-        stack=AsyncExitStack(),
-        client_ref=[None],
-        _backoff=0.0,
-        _tools_ready=False,
-        _consec_failures=0,
-    )
-
-
 class TestReconnectBackingRestart:
     """After _BACKING_RESTART_AFTER consecutive failed opens on a
     sharedserver-backed upstream, _reconnect escalates to restart_backing —
     re-dialing a dead process forever can never recover it."""
 
-    async def test_restarts_backing_after_threshold(self, monkeypatch):
+    async def test_restarts_backing_after_threshold(self, monkeypatch: pytest.MonkeyPatch) -> None:
         restarts: list[str] = []
 
         async def restart_backing(name: str) -> bool:
@@ -410,11 +376,11 @@ class TestReconnectBackingRestart:
 
         mgr = ConnectionManager(restart_backing=restart_backing)
 
-        async def failing_open(conn):
+        async def failing_open(conn: _ManagedConnection) -> None:
             conn.client_ref[0] = None
 
         monkeypatch.setattr(mgr, "_open", failing_open)
-        conn = _reconnect_conn(shared_server="crib")
+        conn = managed_conn("a", shared_server="crib")
 
         for _ in range(_BACKING_RESTART_AFTER):
             await mgr._reconnect(conn)
@@ -427,7 +393,7 @@ class TestReconnectBackingRestart:
         await mgr._reconnect(conn)
         assert restarts == ["a"]
 
-    async def test_no_restart_without_shared_server(self, monkeypatch):
+    async def test_no_restart_without_shared_server(self, monkeypatch: pytest.MonkeyPatch) -> None:
         restarts: list[str] = []
 
         async def restart_backing(name: str) -> bool:
@@ -436,17 +402,17 @@ class TestReconnectBackingRestart:
 
         mgr = ConnectionManager(restart_backing=restart_backing)
 
-        async def failing_open(conn):
+        async def failing_open(conn: _ManagedConnection) -> None:
             conn.client_ref[0] = None
 
         monkeypatch.setattr(mgr, "_open", failing_open)
-        conn = _reconnect_conn(shared_server=None)
+        conn = managed_conn("a")
 
         for _ in range(_BACKING_RESTART_AFTER * 2):
             await mgr._reconnect(conn)
         assert restarts == []
 
-    async def test_success_resets_failure_counter(self, monkeypatch):
+    async def test_success_resets_failure_counter(self, monkeypatch: pytest.MonkeyPatch) -> None:
         restarts: list[str] = []
 
         async def restart_backing(name: str) -> bool:
@@ -454,13 +420,13 @@ class TestReconnectBackingRestart:
             return True
 
         mgr = ConnectionManager(restart_backing=restart_backing)
-        conn = _reconnect_conn(shared_server="crib")
+        conn = managed_conn("a", shared_server="crib")
 
-        async def failing_open(c):
+        async def failing_open(c: _ManagedConnection) -> None:
             c.client_ref[0] = None
 
-        async def succeeding_open(c):
-            c.client_ref[0] = SimpleNamespace(is_connected=lambda: True)
+        async def succeeding_open(c: _ManagedConnection) -> None:
+            c.client_ref[0] = ScriptedClient(connected=True)
 
         monkeypatch.setattr(mgr, "_open", failing_open)
         for _ in range(_BACKING_RESTART_AFTER - 1):
@@ -477,38 +443,35 @@ class TestReconnectBackingRestart:
 
 
 class TestLocalBackoffCap:
-    def test_is_local_upstream(self):
-        assert _is_local_upstream(SimpleNamespace(shared_server="crib", url=None))
-        assert _is_local_upstream(
-            SimpleNamespace(shared_server=None, url="http://127.0.0.1:7732/mcp")
-        )
-        assert _is_local_upstream(
-            SimpleNamespace(shared_server=None, url="http://localhost:8002/mcp")
-        )
-        assert not _is_local_upstream(
-            SimpleNamespace(shared_server=None, url="https://mcp.clickup.com/mcp")
-        )
-        assert not _is_local_upstream(SimpleNamespace(shared_server=None, url=None))
+    def test_is_local_upstream(self) -> None:
+        def srv(*, shared_server: str | None = None, url: str | None = None) -> ServerConfig:
+            return ServerConfig(
+                name="x", shared_server=shared_server, url=url, transport=Transport.HTTP
+            )
 
-    async def test_local_backoff_capped(self, monkeypatch):
+        assert _is_local_upstream(srv(shared_server="crib"))
+        assert _is_local_upstream(srv(url="http://127.0.0.1:7732/mcp"))
+        assert _is_local_upstream(srv(url="http://localhost:8002/mcp"))
+        assert not _is_local_upstream(srv(url="https://mcp.clickup.com/mcp"))
+        assert not _is_local_upstream(srv())
+
+    async def test_local_backoff_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A repeatedly-failing local upstream never backs off past
         _MAX_BACKOFF_LOCAL — a bounced localhost process should be re-dialed
         in seconds, not after the remote-grade 60s cap."""
         mgr = ConnectionManager()
 
-        async def failing_open(conn):
+        async def failing_open(conn: _ManagedConnection) -> None:
             conn.client_ref[0] = None
 
         monkeypatch.setattr(mgr, "_open", failing_open)
-        conn = _reconnect_conn(shared_server=None, url="http://localhost:7732/mcp")
-        conn._backoff = 8.0
+        conn = managed_conn("a", url="http://localhost:7732/mcp", backoff=8.0)
 
-        async def no_sleep(_delay):
+        async def no_sleep(_delay: float) -> None:
             return None
 
-        import mcp_combiner.connections as conns
-
-        monkeypatch.setattr(conns.asyncio, "sleep", no_sleep)
+        # _reconnect sleeps via the asyncio module itself.
+        monkeypatch.setattr(asyncio, "sleep", no_sleep)
 
         for _ in range(6):
             await mgr._reconnect(conn)
@@ -531,94 +494,92 @@ def _inject_conn(
     matching every pre-"starting" test) means the first connect attempt has
     finished; False means it is still in flight.
     """
-    client = SimpleNamespace(is_connected=lambda: connected) if has_client else None
-    ready = asyncio.Event()
-    if first_attempt_done:
-        ready.set()
-    mgr._connections[name] = SimpleNamespace(  # type: ignore[assignment]
-        _auth_failed=auth_failed, client_ref=[client], _tools_ready=tools_ready, _ready=ready
+    mgr._connections[name] = managed_conn(
+        name,
+        ScriptedClient(connected=connected) if has_client else None,
+        tools_ready=tools_ready,
+        auth_failed=auth_failed,
+        first_attempt_done=first_attempt_done,
     )
 
 
 class TestLifecycleState:
-    def test_unknown_when_not_managed(self):
+    def test_unknown_when_not_managed(self) -> None:
         assert ConnectionManager().lifecycle_state("nope") == "unknown"
 
-    def test_auth_failed_takes_precedence(self):
+    def test_auth_failed_takes_precedence(self) -> None:
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", auth_failed=True, connected=True, tools_ready=True)
         assert mgr.lifecycle_state("a") == "auth_failed"
 
-    def test_ready_when_connected_and_tools_ready(self):
+    def test_ready_when_connected_and_tools_ready(self) -> None:
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", connected=True, tools_ready=True)
         assert mgr.lifecycle_state("a") == "ready"
 
-    def test_connected_when_tools_not_ready(self):
+    def test_connected_when_tools_not_ready(self) -> None:
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", connected=True, tools_ready=False)
         assert mgr.lifecycle_state("a") == "connected"
 
-    def test_disconnected_when_client_not_connected(self):
+    def test_disconnected_when_client_not_connected(self) -> None:
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", connected=False, tools_ready=True)
         assert mgr.lifecycle_state("a") == "disconnected"
 
-    def test_disconnected_when_no_client(self):
+    def test_disconnected_when_no_client(self) -> None:
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", has_client=False, tools_ready=True)
         assert mgr.lifecycle_state("a") == "disconnected"
 
-    def test_starting_before_first_attempt_finishes(self):
+    def test_starting_before_first_attempt_finishes(self) -> None:
         # Registered (or mid-connect): no client yet, _ready not signalled —
         # "wait", not "broken".
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", has_client=False, first_attempt_done=False)
         assert mgr.lifecycle_state("a") == "starting"
 
-    def test_starting_via_real_register(self):
+    def test_starting_via_real_register(self) -> None:
         # The actual register() path (no fake): entry exists, no attempt made.
         mgr = ConnectionManager()
         mgr._connections["a"] = _ManagedConnection(
             name="a",
-            config=None,
-            srv=None,  # type: ignore[arg-type]
+            config=CombinerConfig(),
+            srv=ServerConfig(name="a", url="http://127.0.0.1:1/mcp", transport=Transport.HTTP),
         )
         assert mgr.lifecycle_state("a") == "starting"
 
-    def test_auth_failed_beats_starting(self):
+    def test_auth_failed_beats_starting(self) -> None:
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", auth_failed=True, has_client=False, first_attempt_done=False)
         assert mgr.lifecycle_state("a") == "auth_failed"
 
-    def test_mark_tools_unready_downgrades_ready_to_connected(self):
+    def test_mark_tools_unready_downgrades_ready_to_connected(self) -> None:
         mgr = ConnectionManager()
         _inject_conn(mgr, "a", connected=True, tools_ready=True)
         assert mgr.lifecycle_state("a") == "ready"
         mgr.mark_tools_unready("a")
         assert mgr.lifecycle_state("a") == "connected"
 
-    def test_mark_tools_unready_unknown_is_noop(self):
+    def test_mark_tools_unready_unknown_is_noop(self) -> None:
         ConnectionManager().mark_tools_unready("nope")  # must not raise
 
 
 class TestBuildServerStatus:
     """build_server_status is the single source of truth for /health + combiner__status."""
 
-    def _config(self):
+    def _config(self) -> CombinerConfig:
         from pathlib import Path
-
-        from mcp_combiner.config import CombinerConfig
 
         return CombinerConfig.load(str(Path(__file__).parent / "fixtures" / "servers.json"))
 
-    def test_disabled_server_reports_disabled(self):
+    def test_disabled_server_reports_disabled(self) -> None:
         from mcp_combiner.server import build_server_status
 
         cfg = self._config()
         assert build_server_status(cfg, ConnectionManager(), "disabled-server").state == "disabled"
 
-    def test_stdio_server_tristate(self):
+    def test_stdio_server_tristate(self) -> None:
         """A stdio server is 'connected' (started) until its tools are confirmed
         listable, then 'ready' — the same lifecycle HTTP servers get. Presence
         of a confirmed slice IS the ready bit; mounting alone (no slice — e.g.
@@ -636,7 +597,7 @@ class TestBuildServerStatus:
         finally:
             srv._server_tool_cache.pop("everything", None)
 
-    def test_http_server_reflects_connection_lifecycle(self):
+    def test_http_server_reflects_connection_lifecycle(self) -> None:
         from mcp_combiner.server import build_server_status
 
         cfg = self._config()
@@ -648,7 +609,7 @@ class TestBuildServerStatus:
         mgr.mark_tools_unready("http-example")
         assert build_server_status(cfg, mgr, "http-example").state == "connected"
 
-    def test_stdio_crash_reports_disconnected(self):
+    def test_stdio_crash_reports_disconnected(self) -> None:
         """A stdio server with a recorded call failure reads disconnected, not ready."""
         import mcp_combiner.server as srv
         from mcp_combiner.server import build_server_status
@@ -667,7 +628,7 @@ class TestBuildServerStatus:
             srv._failed_servers.pop("everything", None)
             srv._server_tool_cache.pop("everything", None)
 
-    def test_call_failure_overrides_optimistic_http_ready(self):
+    def test_call_failure_overrides_optimistic_http_ready(self) -> None:
         """A recorded failure downgrades an otherwise-'ready' HTTP server."""
         import mcp_combiner.server as srv
         from mcp_combiner.server import build_server_status

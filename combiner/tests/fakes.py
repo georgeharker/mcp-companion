@@ -7,52 +7,159 @@ Moved here from test_reload_config.py so multiple test modules can share them.
 
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
-from mcp_combiner.config import CombinerConfig, ServerConfig
+import mcp.types as mt
+from fastmcp import Client, FastMCP
+from fastmcp.client.transports.http import StreamableHttpTransport
+from fastmcp.client.transports.sse import SSETransport
+from fastmcp.server.providers.base import Provider
+from fastmcp.tools import Tool
+
+from mcp_combiner.config import CombinerConfig, ServerConfig, Transport
+from mcp_combiner.connections import ConnectionManager, _ManagedConnection
 
 
-class FakeProvider:
-    def __init__(self, namespace: str) -> None:
-        self._namespace = namespace
+class ScriptedClient(Client[StreamableHttpTransport | SSETransport]):
+    """A real ``Client`` (the ConnectionManager's ``HttpClient``) that never
+    dials: the three methods the manager calls on a held client are scripted.
 
-    async def list_tools(self) -> list[Any]:
-        return []
+    Unscripted ``list_tools`` / ``ping`` fail loudly, so a test that didn't
+    expect the manager to probe or ping finds out.
+    """
 
-    def __repr__(self) -> str:  # pragma: no cover - trivial
-        return f"<FakeProvider namespace='{self._namespace}'>"
+    def __init__(
+        self,
+        *,
+        connected: bool = True,
+        list_tools: Callable[[], Awaitable[list[mt.Tool]]] | None = None,
+        ping: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        super().__init__(StreamableHttpTransport("http://127.0.0.1:1/mcp"))
+        self.connected = connected
+        self._list_tools_script = list_tools
+        self._ping_script = ping
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    async def list_tools(self, max_pages: int = 250) -> list[mt.Tool]:
+        if self._list_tools_script is None:
+            raise AssertionError("ScriptedClient.list_tools called but not scripted")
+        return await self._list_tools_script()
+
+    async def ping(self) -> bool:
+        if self._ping_script is None:
+            raise AssertionError("ScriptedClient.ping called but not scripted")
+        await self._ping_script()
+        return True
 
 
-class FakeCombiner:
-    """Captures @combiner.tool() functions and models mount/providers."""
+def tool(name: str) -> mt.Tool:
+    """A minimal real ``mcp.types.Tool``."""
+    return mt.Tool(name=name, inputSchema={"type": "object"})
+
+
+def managed_conn(
+    name: str = "a",
+    client: ScriptedClient | None = None,
+    *,
+    url: str | None = "http://127.0.0.1:1/mcp",
+    shared_server: str | None = None,
+    tools_ready: bool = False,
+    auth_failed: bool = False,
+    first_attempt_done: bool = True,
+    backoff: float = 0.0,
+) -> _ManagedConnection:
+    """A genuine ``_ManagedConnection`` record for manager-internals tests.
+
+    ``backoff`` defaults to 0 so ``_reconnect`` never actually sleeps;
+    ``first_attempt_done`` mirrors the ``_ready`` event.
+    """
+    ready = asyncio.Event()
+    if first_attempt_done:
+        ready.set()
+    return _ManagedConnection(
+        name=name,
+        config=CombinerConfig(),
+        srv=ServerConfig(name=name, url=url, shared_server=shared_server, transport=Transport.HTTP),
+        client_ref=[client],
+        _tools_ready=tools_ready,
+        _auth_failed=auth_failed,
+        _ready=ready,
+        _backoff=backoff,
+    )
+
+
+class FakeProvider(Provider):
+    """A real fastmcp ``Provider`` serving a scripted tool list, no upstream.
+
+    Hand it to ``_create_server_proxy`` (monkeypatched) or straight to
+    ``mount_server_provider``; fastmcp's own namespace transform then applies,
+    so a tool scripted as ``"ping"`` lists as ``"<server>_ping"``.
+    ``on_list`` observes each underlying list call (ordering assertions).
+    """
+
+    def __init__(
+        self,
+        tools: Sequence[Tool] = (),
+        *,
+        on_list: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self._tools = list(tools)
+        self._on_list = on_list
+
+    async def _list_tools(self) -> Sequence[Tool]:
+        if self._on_list is not None:
+            self._on_list()
+        return list(self._tools)
+
+
+class ScriptedProvider(Provider):
+    """A real ``Provider`` whose underlying tool listing runs *script* —
+    stateful scripts model warming / failing upstreams. Exceptions propagate
+    (the base ``Provider.list_tools`` does not swallow them)."""
+
+    def __init__(self, script: Callable[[], Awaitable[Sequence[Tool]]]) -> None:
+        super().__init__()
+        self._script = script
+
+    async def _list_tools(self) -> Sequence[Tool]:
+        return await self._script()
+
+
+class FakeCombiner(FastMCP[Any]):
+    """A real ``FastMCP`` whose ``@tool()`` captures the decorated function
+    instead of registering it, so tests can call meta-tools directly.
+
+    Everything else — ``providers``, ``add_provider``, ``mount`` — is the
+    real server, so mount bookkeeping is exercised for real.
+    """
 
     def __init__(self) -> None:
-        self.providers: list[Any] = []
-        self.tools: dict[str, Any] = {}
+        super().__init__("fake-combiner")
+        self.tools: dict[str, Callable[..., Any]] = {}
 
-    def tool(self, *_args: Any, **_kwargs: Any) -> Any:
-        def _decorator(fn: Any) -> Any:
+    def tool(self, *args: Any, **kwargs: Any) -> Any:
+        def _capture(fn: Callable[..., Any]) -> Callable[..., Any]:
             self.tools[fn.__name__] = fn
             return fn
 
-        return _decorator
-
-    def mount(self, proxy: Any, namespace: str) -> None:
-        self.providers.append(FakeProvider(namespace))
-
-    def add_provider(self, provider: Any, *, namespace: str = "") -> None:
-        """Matches FastMCP.add_provider: one provider entry under the namespace."""
-        self.providers.append(FakeProvider(namespace))
+        return _capture
 
 
-class FakeConnManager:
+class FakeConnManager(ConnectionManager):
+    """A real ``ConnectionManager`` that never dials: connection state is a
+    set of names, and every lifecycle call is recorded in ``calls``."""
+
     def __init__(self) -> None:
+        super().__init__()
         self.connected: set[str] = set()
         self.calls: list[tuple[str, str]] = []
-
-    @staticmethod
-    def is_http_server(srv: ServerConfig) -> bool:
-        return srv.transport.value in ("http", "sse")
 
     def has_connection(self, name: str) -> bool:
         return name in self.connected
@@ -66,10 +173,10 @@ class FakeConnManager:
     def reset_auth_failure(self, name: str) -> None:
         self.calls.append(("reset_auth", name))
 
-    def register(self, _config: CombinerConfig, name: str, _srv: ServerConfig) -> None:
+    def register(self, config: CombinerConfig, name: str, srv: ServerConfig) -> None:
         self.calls.append(("register", name))
 
-    async def connect(self, _config: CombinerConfig, name: str, _srv: ServerConfig) -> None:
+    async def connect(self, config: CombinerConfig, name: str, srv: ServerConfig) -> None:
         self.connected.add(name)
         self.calls.append(("connect", name))
 
@@ -84,12 +191,35 @@ class FakeSSManager:
         # Names that have a backing sharedserver process (restart() returns True).
         self.sharedserver_backed = sharedserver_backed or set()
 
-    async def ensure_started(self, name: str) -> None:
-        self.calls.append(("start", name))
+    async def ensure_started(self, server_name: str) -> None:
+        self.calls.append(("start", server_name))
 
-    async def ensure_stopped(self, name: str) -> None:
-        self.calls.append(("stop", name))
+    async def ensure_stopped(self, server_name: str) -> None:
+        self.calls.append(("stop", server_name))
 
-    async def restart(self, name: str) -> bool:
-        self.calls.append(("restart", name))
-        return name in self.sharedserver_backed
+    async def restart(self, server_name: str) -> bool:
+        self.calls.append(("restart", server_name))
+        return server_name in self.sharedserver_backed
+
+
+def content_text(result: Any) -> str:
+    """Join a ToolResult's text blocks — duck-typed so the mcp content union
+    (TextContent/ImageContent/EmbeddedResource/...) needs no isinstance
+    narrowing in tests that only want the text."""
+    content = getattr(result, "content", None)
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        str(getattr(block, "text", ""))
+        for block in content
+        if getattr(block, "type", None) == "text"
+    )
+
+
+def json_object(text: str) -> dict[str, Any]:
+    """Parse a tool's JSON-object text payload, failing loudly on any other
+    shape (a typed boundary instead of trusting ``json.loads``'s ``Any``)."""
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AssertionError(f"expected a JSON object, got {type(value).__name__}: {text!r}")
+    return value
