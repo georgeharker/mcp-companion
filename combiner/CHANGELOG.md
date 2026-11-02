@@ -4,6 +4,36 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [Unreleased]
+
+### Added
+
+- **Authorize OAuth servers from another device** — new `oauth.public_url`
+  and `oauth.prompt` settings (and a per-server `auth.oauth.prompt`). With
+  `prompt` `elicit` or `both`, a server needing (re-)authorization no longer
+  blocks the request that hit the 401: a tool call routed to it fails at once
+  with MCP's URL-elicitation error (`-32042`) carrying the authorization link,
+  which the client shows to the user and not to the model. With `public_url`
+  set, the OAuth redirect comes back to the combiner's own
+  `/oauth/callback/<server>` route (behind e.g. `tailscale serve`), so the
+  link can be completed on a phone. On completion the combiner exchanges the
+  code, reconnects the server without a manual `combiner__enable_server`, and
+  sends `notifications/elicitation/complete`. Clients without URL elicitation
+  get the link in the tool error text. `prompt` defaults to `both` with
+  `public_url` and `browser` without, so existing setups are unchanged;
+  `elicit` without `public_url` warns at load (the loopback redirect only
+  completes on the combiner host). Links expire after 15 minutes and the next
+  call issues a fresh one. The browser is not opened on hosts without one
+  (containers, Linux without a display).
+
+### Fixed
+
+- An OAuth failure while opening an upstream connection is now recognised as
+  an auth failure (the server parks in `auth_failed`) even though fastmcp
+  wraps it in `RuntimeError("Client failed to connect: ...")`. Before, the
+  wrapped error was treated as a connection problem and the reconnect monitor
+  kept retrying it.
+
 ## [0.18.0] — 2026-11-01
 
 ### Added

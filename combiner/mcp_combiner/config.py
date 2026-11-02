@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -569,17 +569,68 @@ class HealthResponse(BaseModel):
     pending_oauth: list[str] = Field(default_factory=list)
 
 
+AuthPrompt = Literal["elicit", "browser", "both"]
+"""How the combiner presents an OAuth authorization URL to the user:
+
+* ``"browser"`` — open a browser on the combiner host (the original behaviour).
+* ``"elicit"`` — hand the URL to the MCP client as a URL-mode elicitation
+  (a tool call routed to the server fails with ``-32042`` carrying the URL),
+  so a remote client can show it to the user.
+* ``"both"`` — elicit and open the browser.
+"""
+
+AUTH_PROMPTS: tuple[AuthPrompt, ...] = ("elicit", "browser", "both")
+
+
+def oauth_options(auth: dict[str, Any] | str | None) -> dict[str, Any] | None:
+    """A server's OAuth options: ``{}`` for bare ``auth: "oauth"``, the
+    ``auth.oauth`` block for ``{"oauth": {...}}``, ``None`` when the server
+    does not use OAuth (or the block is malformed — ``build_auth`` reports that).
+    """
+    if auth == "oauth":
+        return {}
+    if isinstance(auth, dict):
+        opts = auth.get("oauth")
+        if isinstance(opts, dict):
+            return opts
+    return None
+
+
+def resolve_auth_prompt(
+    server_name: str, per_server: object, default: AuthPrompt | None, public_url: str | None
+) -> AuthPrompt:
+    """The effective :data:`AuthPrompt` for one server.
+
+    The server's own ``auth.oauth.prompt`` wins, then the global
+    ``oauth.prompt``; with neither set it is ``"both"`` when a ``public_url``
+    is configured and ``"browser"`` otherwise — so an install without
+    ``public_url`` keeps the original behaviour unchanged.
+    """
+    chosen = per_server if per_server is not None else default
+    if chosen is None:
+        return "both" if public_url else "browser"
+    for prompt in AUTH_PROMPTS:
+        if chosen == prompt:
+            return prompt
+    raise ValueError(
+        f"Server '{server_name}': oauth prompt must be one of {', '.join(AUTH_PROMPTS)}; "
+        f"got {chosen!r}"
+    )
+
+
 class OAuthConfig(BaseModel):
     """Top-level OAuth settings for the combiner.
 
     These are global defaults; individual servers can override ``cache_tokens``
-    inside their ``auth: {oauth: {cache_tokens: false}}`` block.
+    and ``prompt`` inside their ``auth: {oauth: {...}}`` block.
 
     Example JSON (top-level section)::
 
         "oauth": {
             "cache_tokens": true,
-            "token_dir": "~/.cache/mcp-combiner/oauth-tokens"
+            "token_dir": "~/.cache/mcp-combiner/oauth-tokens",
+            "public_url": "https://combiner.tailnet.ts.net",
+            "prompt": "both"
         }
     """
 
@@ -598,6 +649,21 @@ class OAuthConfig(BaseModel):
     Supports ``~`` expansion.  Each server gets its own subdirectory.
     """
 
+    public_url: str | None = None
+    """The combiner's externally reachable base URL (e.g. its ``tailscale
+    serve`` address). When set, OAuth redirects come back to
+    ``<public_url>/oauth/callback/<server>`` on the combiner itself instead of
+    a loopback callback server, so a user authorizing on another device (a
+    phone) can complete the flow. The redirect URI must be registered with the
+    OAuth client (for Google: a Web-application client). When unset, the
+    loopback callback is used, which completes only from a browser on the
+    combiner host.
+    """
+
+    prompt: AuthPrompt | None = None
+    """Default :data:`AuthPrompt` for OAuth servers (see
+    :func:`resolve_auth_prompt` for the default when unset)."""
+
     @property
     def token_dir_path(self) -> Path:
         """Resolved :class:`~pathlib.Path` for *token_dir*, using default if not set."""
@@ -608,9 +674,21 @@ class OAuthConfig(BaseModel):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OAuthConfig:
         """Parse the top-level ``oauth`` config dict."""
+        public_url = data.get("public_url") or data.get("publicUrl")
+        if public_url is not None and not isinstance(public_url, str):
+            raise ValueError("oauth.public_url must be a string")
+        public_url = public_url.rstrip("/") if public_url else None
+        raw_prompt = data.get("prompt")
+        prompt = (
+            None
+            if raw_prompt is None
+            else resolve_auth_prompt("(global oauth)", raw_prompt, None, public_url)
+        )
         return cls(
             cache_tokens=bool(data.get("cache_tokens", True)),
             token_dir=data.get("token_dir") or data.get("tokenDir"),
+            public_url=public_url,
+            prompt=prompt,
         )
 
 
@@ -764,6 +842,22 @@ class CombinerConfig(BaseModel):
 
         raw_oauth: dict[str, Any] = raw.get("oauth", {})
         oauth = OAuthConfig.from_dict(raw_oauth) if raw_oauth else OAuthConfig()
+        # Validates every server's prompt up front (a typo fails the load, not
+        # the first re-auth) and flags elicitation that can't reach a remote device.
+        for name, srv in servers.items():
+            opts = oauth_options(srv.auth)
+            if opts is None:
+                continue
+            prompt = resolve_auth_prompt(name, opts.get("prompt"), oauth.prompt, oauth.public_url)
+            if prompt != "browser" and not oauth.public_url:
+                logger.warning(
+                    "Server '%s': oauth prompt %r without oauth.public_url — the "
+                    "authorization link redirects to a loopback callback, so it "
+                    "completes only from a browser on this host (a local chat), "
+                    "not from another device",
+                    name,
+                    prompt,
+                )
 
         raw_isolation: dict[str, Any] = raw.get("isolation", {})
         isolation = IsolationConfig.from_dict(raw_isolation) if raw_isolation else IsolationConfig()

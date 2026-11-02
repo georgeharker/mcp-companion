@@ -20,17 +20,19 @@ import getpass
 import logging
 import os
 import platform
+import secrets
 import time
 import typing
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
 
 import anyio
 import httpx
 from cryptography.fernet import Fernet
 from fastmcp.client.auth import OAuth
-from fastmcp.client.oauth_callback import OAuthCallbackResult
+from fastmcp.client.auth.oauth import ClientNotFoundError
+from fastmcp.client.oauth_callback import OAuthCallbackResult, create_oauth_callback_server
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
 from key_value.aio.protocols import AsyncKeyValue
 from key_value.aio.stores.filetree import (
@@ -40,6 +42,8 @@ from key_value.aio.stores.filetree import (
 )
 from key_value.aio.stores.memory import MemoryStore
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+from mcp.client.auth.exceptions import OAuthFlowError
+from mcp.client.auth.oauth2 import PKCEParameters
 from mcp.client.auth.utils import (
     build_oauth_authorization_server_metadata_discovery_urls,
     build_protected_resource_metadata_discovery_urls,
@@ -48,6 +52,10 @@ from mcp.client.auth.utils import (
     handle_protected_resource_response,
 )
 from mcp.shared.auth import OAuthToken
+from pydantic import AnyHttpUrl
+
+from mcp_combiner import authprompt
+from mcp_combiner.config import AuthPrompt, resolve_auth_prompt
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -234,6 +242,189 @@ class _RefreshTokenOAuth(OAuth):
     # piggy-backs on the existing server instead of launching a duplicate.
     _active_flows: ClassVar[dict[int, tuple[anyio.Event, OAuthCallbackResult]]] = {}
     _flow_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+
+    def __init__(
+        self,
+        *,
+        server_name: str,
+        mcp_url: str,
+        prompt: AuthPrompt = "browser",
+        public_url: str | None = None,
+        scopes: str | None = None,
+        client_name: str = "FastMCP Client",
+        token_storage: AsyncKeyValue | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        client_metadata_url: str | None = None,
+        callback_port: int | None = None,
+    ) -> None:
+        # Read by _bind(), which the parent constructor calls.
+        self.server_name = server_name
+        self.prompt: AuthPrompt = prompt
+        self.public_url = public_url
+        super().__init__(
+            mcp_url=mcp_url,
+            scopes=scopes,
+            client_name=client_name,
+            token_storage=token_storage,
+            client_id=client_id,
+            client_secret=client_secret,
+            client_metadata_url=client_metadata_url,
+            callback_port=callback_port,
+        )
+
+    @property
+    def detached(self) -> bool:
+        """Whether authorization runs out-of-band (see :mod:`mcp_combiner.authprompt`).
+
+        Only a browser-only prompt on the loopback callback keeps the original
+        inline flow, where the triggering request waits for the user.
+        """
+        return self.prompt != "browser" or self.public_url is not None
+
+    def _bind(self, mcp_url: str) -> None:
+        super()._bind(mcp_url)
+        if self.public_url is None:
+            return
+        # Redirect back to the combiner's own /oauth/callback/<server> route
+        # instead of the loopback callback server the parent configured.
+        redirect = AnyHttpUrl(
+            f"{self.public_url}/oauth/callback/{quote(self.server_name, safe='')}"
+        )
+        self.context.client_metadata.redirect_uris = [redirect]
+        if self._static_client_info is not None:
+            self._static_client_info.redirect_uris = [redirect]
+
+    async def _perform_authorization_code_grant(self) -> tuple[str, str]:
+        if not self.detached:
+            return await super()._perform_authorization_code_grant()
+        existing = authprompt.pending_for(self.server_name)
+        if existing is not None:
+            raise authprompt.AuthorizationPending(existing)
+        raise authprompt.AuthorizationPending(await self._begin_detached_authorization())
+
+    async def _begin_detached_authorization(self) -> authprompt.PendingAuthorization:
+        """Publish a pending authorization instead of waiting for the callback.
+
+        Mirrors the SDK's ``_perform_authorization_code_grant`` URL
+        construction (its PKCE verifier is a local there, so the code could not
+        be exchanged later); the code is exchanged by :meth:`_exchange_code`
+        when the redirect arrives.
+        """
+        ctx = self.context
+        redirect_uris = ctx.client_metadata.redirect_uris
+        if not redirect_uris:
+            raise OAuthFlowError("No redirect URIs provided for authorization code grant")
+        if ctx.client_info is None:
+            raise OAuthFlowError("No client info available for authorization")
+        if ctx.oauth_metadata and ctx.oauth_metadata.authorization_endpoint:
+            auth_endpoint = str(ctx.oauth_metadata.authorization_endpoint)
+        else:
+            auth_endpoint = urljoin(ctx.get_authorization_base_url(ctx.server_url), "/authorize")
+
+        pkce = PKCEParameters.generate()
+        state = secrets.token_urlsafe(32)
+        params = {
+            "response_type": "code",
+            "client_id": ctx.client_info.client_id,
+            "redirect_uri": str(redirect_uris[0]),
+            "state": state,
+            "code_challenge": pkce.code_challenge,
+            "code_challenge_method": "S256",
+        }
+        if ctx.should_include_resource_param(ctx.protocol_version):
+            params["resource"] = ctx.get_resource_url()
+        if ctx.client_metadata.scope:
+            params["scope"] = ctx.client_metadata.scope
+        url = _with_offline_access(f"{auth_endpoint}?{urlencode(params)}")
+        await self._preflight_authorization_url(url)
+
+        verifier = pkce.code_verifier
+
+        async def exchange(code: str) -> None:
+            await self._exchange_code(code, verifier)
+
+        pending = authprompt.PendingAuthorization(
+            server=self.server_name,
+            url=url,
+            state=state,
+            exchange=exchange,
+            expires_at=time.monotonic() + _PENDING_AUTHORIZATION_TTL,
+            elicit=self.prompt != "browser",
+        )
+        if self.public_url is None:
+            pending.callback_task = asyncio.create_task(
+                self._serve_loopback_callback(pending),
+                name=f"oauth-callback-{self.server_name}",
+            )
+        authprompt.publish(pending)
+        logger.info(
+            "OAuth authorization pending for '%s' (prompt=%s, callback=%s)",
+            self.server_name,
+            self.prompt,
+            redirect_uris[0],
+        )
+        if self.prompt != "elicit":
+            authprompt.open_browser(url)
+        return pending
+
+    async def _preflight_authorization_url(self, url: str) -> None:
+        """The parent ``redirect_handler``'s stale-client check, without opening
+        a browser: a 400 means the cached client registration was rejected."""
+        async with self.httpx_client_factory() as client:
+            response = await client.get(url, follow_redirects=False)
+        if response.status_code == 400:
+            raise ClientNotFoundError("OAuth client not found - cached credentials may be stale")
+        if response.status_code not in (200, 302, 303, 307, 308):
+            raise RuntimeError(f"Unexpected authorization response: {response.status_code}")
+
+    async def _exchange_code(self, code: str, code_verifier: str) -> None:
+        """Exchange an out-of-band authorization code and store the tokens."""
+        async with self.context.lock:
+            request = await self._exchange_token_authorization_code(code, code_verifier)
+            async with self.httpx_client_factory() as client:
+                response = await client.send(request)
+            await self._handle_token_response(response)
+            self._initialized = True
+
+    async def _serve_loopback_callback(self, pending: authprompt.PendingAuthorization) -> None:
+        """Receive a detached flow's redirect on the loopback callback port."""
+        result = OAuthCallbackResult()
+        ready = anyio.Event()
+        server = create_oauth_callback_server(
+            port=self.redirect_port,
+            host=self._callback_host,
+            server_url=self.mcp_url,
+            result_container=result,
+            result_ready=ready,
+        )
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(server.serve)
+                with anyio.move_on_after(max(0.0, pending.expires_at - time.monotonic())):
+                    await ready.wait()
+                server.should_exit = True
+                await anyio.sleep(0.1)
+                tg.cancel_scope.cancel()
+        except SystemExit:
+            # uvicorn exits on a bind failure (port in use).
+            logger.warning(
+                "OAuth callback server for '%s' could not bind port %d",
+                self.server_name,
+                self.redirect_port,
+            )
+            return
+        if not ready.is_set():
+            return
+        try:
+            await authprompt.complete(
+                self.server_name,
+                result.code,
+                result.state,
+                str(result.error) if result.error else None,
+            )
+        except Exception as exc:  # noqa: BLE001 — reported, the flow can be retried
+            logger.warning("OAuth callback for '%s' failed: %s", self.server_name, exc)
 
     async def callback_handler(self) -> tuple[str, str | None]:
         """Handle OAuth callback, reusing an existing server if one is active.
@@ -951,17 +1142,33 @@ class _RefreshTokenOAuth(OAuth):
             )
 
     async def redirect_handler(self, authorization_url: str) -> None:
-        parsed = urlparse(authorization_url)
-        if _GOOGLE_ACCOUNTS_HOST in parsed.netloc:
-            params = parse_qs(parsed.query, keep_blank_values=True)
-            params.setdefault("access_type", ["offline"])
-            params.setdefault("prompt", ["consent"])
-            new_query = urlencode({k: v[0] for k, v in params.items()})
-            authorization_url = urlunparse(parsed._replace(query=new_query))
-            logger.debug(
-                "Injected access_type=offline into Google authorization URL for refresh token"
-            )
-        await super().redirect_handler(authorization_url)
+        await super().redirect_handler(_with_offline_access(authorization_url))
+
+
+#: How long a detached authorization's link stays valid. Longer than the
+#: inline flow's callback timeout: a remote user may open it well after the
+#: tool call that surfaced it. ``MCP_COMBINER_AUTH_LINK_TTL`` overrides (tests).
+def _link_ttl() -> float:
+    try:
+        return float(os.environ["MCP_COMBINER_AUTH_LINK_TTL"])
+    except (KeyError, ValueError):
+        return 900.0
+
+
+_PENDING_AUTHORIZATION_TTL = _link_ttl()
+
+
+def _with_offline_access(authorization_url: str) -> str:
+    """Ask Google for a refresh token (``access_type=offline``, ``prompt=consent``)."""
+    parsed = urlparse(authorization_url)
+    if _GOOGLE_ACCOUNTS_HOST not in parsed.netloc:
+        return authorization_url
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    params.setdefault("access_type", ["offline"])
+    params.setdefault("prompt", ["consent"])
+    new_query = urlencode({k: v[0] for k, v in params.items()})
+    logger.debug("Injected access_type=offline into Google authorization URL for refresh token")
+    return urlunparse(parsed._replace(query=new_query))
 
 
 class _BearerAuth(httpx.Auth):
@@ -975,6 +1182,12 @@ class _BearerAuth(httpx.Auth):
         yield request
 
 
+def authorizes_out_of_band(auth: httpx.Auth | None) -> bool:
+    """Whether *auth* is an OAuth provider whose authorization runs detached
+    (see :mod:`mcp_combiner.authprompt`) rather than inline in a request."""
+    return isinstance(auth, _RefreshTokenOAuth) and auth.detached
+
+
 def build_auth(
     server_name: str,
     *,
@@ -982,8 +1195,14 @@ def build_auth(
     server_url: str | None = None,
     token_dir: Path | None = None,
     cache_tokens: bool = True,
+    public_url: str | None = None,
+    prompt: AuthPrompt | None = None,
 ) -> httpx.Auth | None:
     """Build an ``httpx.Auth`` from a server's auth configuration.
+
+    *public_url* and *prompt* are the global ``oauth`` defaults; a server's own
+    ``auth.oauth.prompt`` overrides *prompt* (see
+    :func:`~mcp_combiner.config.resolve_auth_prompt`).
 
     Supports three modes:
 
@@ -1020,6 +1239,8 @@ def build_auth(
             server_url=server_url,
             base_dir=base_dir,
             cache_tokens=cache_tokens,
+            prompt=resolve_auth_prompt(server_name, None, prompt, public_url),
+            public_url=public_url,
         )
 
     if not isinstance(auth_config, dict):
@@ -1056,6 +1277,8 @@ def build_auth(
             client_metadata_url=oauth_opts.get("client_metadata_url"),
             callback_port=oauth_opts.get("callback_port"),
             cache_tokens=effective_cache,
+            prompt=resolve_auth_prompt(server_name, oauth_opts.get("prompt"), prompt, public_url),
+            public_url=public_url,
         )
 
     raise ValueError(f"Server '{server_name}': unrecognized auth keys: {set(auth_config.keys())}")
@@ -1072,6 +1295,8 @@ def _build_oauth(
     client_metadata_url: str | None = None,
     callback_port: int | None = None,
     cache_tokens: bool = True,
+    prompt: AuthPrompt = "browser",
+    public_url: str | None = None,
 ) -> _RefreshTokenOAuth:
     """Construct a FastMCP ``OAuth`` provider.
 
@@ -1112,6 +1337,9 @@ def _build_oauth(
         )
 
     return _RefreshTokenOAuth(
+        server_name=server_name,
+        prompt=prompt,
+        public_url=public_url,
         mcp_url=server_url,
         scopes=scope_str,
         client_name=f"mcp-combiner ({server_name})",

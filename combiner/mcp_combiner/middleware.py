@@ -18,10 +18,12 @@ from typing import Any, ClassVar, TypeGuard, cast
 
 import mcp.types as mt
 from fastmcp.exceptions import NotFoundError, ToolError
+from fastmcp.server.context import Context
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool, ToolResult
+from mcp.server.session import ServerSession
 
-from mcp_combiner import nvim_proxy, permissions
+from mcp_combiner import authprompt, nvim_proxy, permissions
 from mcp_combiner.auth import clear_oauth_cache, is_stale_client_error
 from mcp_combiner.connections import AuthenticationError
 from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME
@@ -449,6 +451,21 @@ class ToolProcessingMiddleware(Middleware):
                     call_server = sname
                     break
 
+        # A server waiting on an out-of-band OAuth authorization can't serve the
+        # call: hand the caller the authorization link (-32042) before the
+        # upstream is touched. An auth-failed one whose link expired re-runs its
+        # flow first (a no-op for inline OAuth) — this has to happen here, not
+        # on the call's failure: a server that never authorized has no listed
+        # tools, so the call itself would fail as an unknown tool.
+        if call_server:
+            pending = authprompt.pending_for(call_server)
+            conns = RUNTIME.conn_manager
+            if pending is None and conns is not None and conns.is_auth_failed(call_server):
+                await conns.reauthorize(call_server)
+                pending = authprompt.pending_for(call_server)
+            if pending is not None:
+                raise authprompt.prompt_error(pending, _session_of(context.fastmcp_context))
+
         # Permission policy gate (tool CALLS only — never publication). Resolve
         # the effective allow/deny/elicit policy for the owning server; deny or a
         # declined elicitation short-circuits before the upstream ever runs.
@@ -471,6 +488,10 @@ class ToolProcessingMiddleware(Middleware):
             # Auth-failed servers: convert to ToolError immediately.
             # This must NOT propagate as a generic exception — RetryMiddleware
             # would catch it and retry (creating new OAuth instances).
+            # The server went out-of-band mid-call: hand over the link.
+            pending = authprompt.pending_for(call_server) if call_server else None
+            if pending is not None:
+                raise authprompt.prompt_error(pending, _session_of(context.fastmcp_context)) from e
             logger.warning("Tool '%s' blocked by auth failure: %s", tool_name, e)
             raise ToolError(
                 f"Tool '{tool_name}' is unavailable — the server's authentication "
@@ -479,6 +500,13 @@ class ToolProcessingMiddleware(Middleware):
         except Exception as e:
             server_name = call_server
             error_str = str(e)
+
+            # The call's own request hit an expired/revoked credential and the
+            # OAuth flow went out-of-band: the upstream never ran it, so hand
+            # the caller the authorization link rather than an opaque error.
+            pending = authprompt.pending_for(server_name) if server_name else None
+            if pending is not None:
+                raise authprompt.prompt_error(pending, _session_of(context.fastmcp_context)) from e
 
             # Check for rate limiting (429) — transient, caller should retry
             if (
@@ -589,3 +617,13 @@ class ToolProcessingMiddleware(Middleware):
                     # hold_for_widget folds (and returns) a ToolResult — same type in/out.
                     result = cast(ToolResult, held)
             return result
+
+
+def _session_of(ctx: Context | None) -> ServerSession | None:
+    """The downstream session behind *ctx*, if a request is active."""
+    if ctx is None:
+        return None
+    try:
+        return ctx.session
+    except RuntimeError:
+        return None

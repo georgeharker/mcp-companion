@@ -13,14 +13,16 @@ middleware reads. Preserved as-is pending discussion.
 
 from __future__ import annotations
 
+import html
 import logging
 from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
+from mcp_combiner import authprompt
 from mcp_combiner.config import CombinerConfig, HealthResponse, ServerStatusInfo
 from mcp_combiner.connections import ConnectionManager
 from mcp_combiner.runtime import RUNTIME
@@ -28,6 +30,16 @@ from mcp_combiner.status import build_server_status
 from mcp_combiner.toolcache import _notify_session_by_id
 
 logger = logging.getLogger("mcp-combiner")
+
+
+def _callback_page(message: str, status: int = 200) -> HTMLResponse:
+    body = html.escape(message)
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8>"
+        '<meta name=viewport content="width=device-width,initial-scale=1">'
+        f"<title>mcp-combiner</title><p>{body}</p>",
+        status_code=status,
+    )
 
 
 def register_routes(
@@ -56,6 +68,26 @@ def register_routes(
         payload["boot_id"] = RUNTIME.boot_id
         payload["handover_recovery"] = RUNTIME.handover_recovery
         return JSONResponse(payload)
+
+    # OAuth redirect target when ``oauth.public_url`` is set: the user's
+    # browser (possibly on another device) lands here after authorizing. Open
+    # by design — outside the inbound-bearer surface (combiner_protected_path)
+    # — because the browser carries no bearer; the OAuth ``state`` binds the
+    # redirect to the pending authorization it answers (authprompt.complete).
+    @combiner.custom_route("/oauth/callback/{server}", methods=["GET"])
+    async def oauth_callback(request: Request) -> HTMLResponse:
+        server = request.path_params["server"]
+        query = request.query_params
+        try:
+            await authprompt.complete(
+                server, query.get("code"), query.get("state"), query.get("error")
+            )
+        except authprompt.CallbackRejected as exc:
+            return _callback_page(f"Authorization failed: {exc}", status=400)
+        except Exception as exc:  # noqa: BLE001 — shown to the user, logged for ops
+            logger.warning("OAuth callback for '%s' failed: %s", server, exc)
+            return _callback_page("Authorization failed: the token exchange was rejected.", 502)
+        return _callback_page(f"'{server}' is authorized. You can close this tab.")
 
     # The general session map: every correlation the combiner holds around a
     # chat token — downstream wire session, nvim instance bind, and the

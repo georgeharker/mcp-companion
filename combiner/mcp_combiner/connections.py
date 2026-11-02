@@ -43,7 +43,8 @@ from fastmcp import Client
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.client.transports.sse import SSETransport
 
-from mcp_combiner.auth import build_auth
+from mcp_combiner import authprompt
+from mcp_combiner.auth import authorizes_out_of_band, build_auth
 from mcp_combiner.config import (
     CombinerConfig,
     ServerConfig,
@@ -84,6 +85,11 @@ _MAX_BACKOFF = _env_float("MCP_COMBINER_MAX_BACKOFF", 60.0)
 # "disconnected" after the process is already back up.
 _MAX_BACKOFF_LOCAL = _env_float("MCP_COMBINER_MAX_BACKOFF_LOCAL", 15.0)
 _BACKOFF_MULTIPLIER = 2.0
+# Bound on a connect attempt run on behalf of a waiting caller (re-authorize,
+# post-authorization reconnect). A detached OAuth flow fails such an attempt
+# fast (it publishes a pending authorization instead of waiting for the user),
+# so this only caps a slow upstream; the attempt itself keeps running.
+_AUTH_CONNECT_WAIT = _env_float("MCP_COMBINER_AUTH_CONNECT_WAIT", 30.0)
 # Consecutive failed re-opens on a sharedserver-backed upstream before the
 # monitor escalates from re-dialing to hard-restarting the backing process
 # (nothing else respawns a crashed process — re-dialing alone spins forever).
@@ -325,6 +331,8 @@ class ConnectionManager:
                 server_url=conn.srv.url,
                 token_dir=conn.config.oauth.token_dir_path,
                 cache_tokens=conn.config.oauth.cache_tokens,
+                public_url=conn.config.oauth.public_url,
+                prompt=conn.config.oauth.prompt,
             )
             conn._auth_built = True
         return conn.auth
@@ -407,6 +415,41 @@ class ConnectionManager:
             conn._auth_error_msg = ""
             # Reset ready so the next connect() can signal it again
             conn._ready = asyncio.Event()
+
+    async def reauthorize(self, name: str) -> None:
+        """Re-run an auth-failed server's out-of-band OAuth flow.
+
+        A detached flow leaves the connection auth-failed while the user's link
+        is pending; once that link expires nothing retries on its own. A tool
+        call routed to the server calls this so the flow publishes a fresh
+        pending authorization. No-op for inline (browser-only loopback) OAuth,
+        whose recovery stays the manual ``combiner__enable_server``.
+        """
+        conn = self._connections.get(name)
+        if conn is None or not conn._auth_failed or not authorizes_out_of_band(conn.auth):
+            return
+        logger.info("Re-running OAuth for '%s' to issue a fresh authorization link", name)
+        self.reset_auth_failure(name)
+        await self._connect_bounded(conn)
+
+    async def resume_after_authorization(self, name: str) -> None:
+        """Reconnect *name* after an out-of-band authorization stored its tokens."""
+        conn = self._connections.get(name)
+        if conn is None:
+            return
+        client = conn.client_ref[0]
+        if client is not None and client.is_connected():
+            return
+        self.reset_auth_failure(name)
+        await self._connect_bounded(conn)
+
+    async def _connect_bounded(self, conn: _ManagedConnection) -> None:
+        """Run ``connect`` for *conn*, waiting at most ``_AUTH_CONNECT_WAIT``."""
+        task = asyncio.create_task(
+            self.connect(conn.config, conn.name, conn.srv), name=f"conn-auth-{conn.name}"
+        )
+        self._background_tasks.append(task)
+        await asyncio.wait({task}, timeout=_AUTH_CONNECT_WAIT)
 
     # ------------------------------------------------------------------
     # Connect / disconnect
@@ -498,6 +541,7 @@ class ConnectionManager:
 
     async def close_all(self) -> None:
         """Shut down every managed connection (called in lifespan finally)."""
+        authprompt.reset()
         # Cancel any in-flight background connection tasks
         for task in self._background_tasks:
             if not task.done():
@@ -922,18 +966,25 @@ def _is_auth_error(exc: BaseException) -> bool:
     Checks concrete exception types from the MCP SDK and FastMCP rather than
     fragile substring matching.  Falls back to ``httpx.HTTPStatusError`` with
     a 401/403 status code for transport-level auth rejections.
+
+    Walks the explicit cause chain: fastmcp's ``Client`` re-raises a connect
+    failure as ``RuntimeError("Client failed to connect: ...") from exc``, so
+    the OAuth error is the *cause* of what ``_open`` sees, not the error itself.
     """
     from fastmcp.client.auth.oauth import ClientNotFoundError
     from mcp.client.auth.exceptions import (
         OAuthFlowError,
     )  # covers OAuthTokenError, OAuthRegistrationError
 
-    if isinstance(exc, (OAuthFlowError, ClientNotFoundError)):
-        return True
-
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in (401, 403)
-
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (OAuthFlowError, ClientNotFoundError)):
+            return True
+        if isinstance(current, httpx.HTTPStatusError):
+            return current.response.status_code in (401, 403)
+        current = current.__cause__
     return False
 
 
@@ -988,6 +1039,8 @@ def _make_disconnected_client(
             server_url=srv.url,
             token_dir=config.oauth.token_dir_path,
             cache_tokens=config.oauth.cache_tokens,
+            public_url=config.oauth.public_url,
+            prompt=config.oauth.prompt,
         )
 
     transport = build_http_transport(srv)

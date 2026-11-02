@@ -8,19 +8,23 @@ configs, and poll health. Tests that spawn processes are marked `e2e`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import httpx
 import pytest
+import uvicorn
+
+from mcp_combiner.mockserver import MockOAuthConfig, MockOAuthProvider, build_server
 
 _T = TypeVar("_T")
 
@@ -139,12 +143,15 @@ def write_servers_config(
     servers: dict[str, Any],
     shared_servers: dict[str, Any] | None = None,
     isolation: dict[str, Any] | None = None,
+    oauth: dict[str, Any] | None = None,
 ) -> Path:
     doc: dict[str, Any] = {"servers": servers}
     if shared_servers:
         doc["sharedServers"] = shared_servers
     if isolation:
         doc["isolation"] = isolation
+    if oauth:
+        doc["oauth"] = oauth
     path.write_text(json.dumps(doc, indent=2))
     return path
 
@@ -378,3 +385,99 @@ async def procs() -> AsyncIterator[ProcFactory]:
     factory = ProcFactory()
     yield factory
     factory.teardown()
+
+
+# ── in-process mock OAuth authorization server (shared by OAuth e2e tests) ──
+
+
+class NoSignalServer(uvicorn.Server):
+    """A uvicorn Server that never touches process-global signal handlers.
+
+    Running many uvicorn instances in one pytest process is not what uvicorn's
+    ``capture_signals`` was built for: each server swaps the process SIGINT/
+    SIGTERM handlers for its own bound ``handle_exit`` and restores them only
+    on a clean, LIFO unwind — overlapping servers scramble them. Worse,
+    sse-starlette's shutdown watcher *introspects* ``signal.getsignal(SIGTERM)
+    .__self__`` to find "the" uvicorn server and mirrors that server's
+    ``should_exit`` into the process-global, never-reset
+    ``AppStatus.should_exit`` — so one test's teardown (``should_exit = True``
+    observed by a still-polling watcher) permanently poisons every later SSE
+    response in the process: headers go out, the body drains instantly, and
+    the MCP client hangs forever awaiting an InitializeResult that never
+    arrives. Tests drive shutdown via ``should_exit``/cancellation, so signal
+    capture is pure liability here.
+    """
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
+
+
+# ── in-process HTTP serving of the mock OAuth server ───────────────
+
+
+@dataclass
+class ServedOAuthMock:
+    provider: MockOAuthProvider
+    base_url: str
+    port: int
+
+    @property
+    def mcp_url(self) -> str:
+        return f"{self.base_url}/mcp"
+
+
+class OAuthMockFactory(Protocol):
+    """``oauth_mock``'s factory: boots one served mock per call."""
+
+    def __call__(self, config: MockOAuthConfig | None = None) -> Awaitable[ServedOAuthMock]: ...
+
+
+@pytest.fixture
+async def oauth_mock() -> AsyncIterator[OAuthMockFactory]:
+    """Yield a factory that boots a bearer-guarded mock OAuth MCP server.
+
+    Each call serves a fresh mock on its own port via uvicorn in a background
+    task; all are torn down when the fixture exits.
+    """
+    # sse-starlette's process-global shutdown latch is never reset once True
+    # (see NoSignalServer) — clear it around every use so no test inherits it.
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.should_exit = False
+    running: list[tuple[uvicorn.Server, asyncio.Task[None]]] = []
+
+    async def make(config: MockOAuthConfig | None = None) -> ServedOAuthMock:
+        port = free_port()
+        issuer = f"http://127.0.0.1:{port}"
+        provider = MockOAuthProvider(resource_url=f"{issuer}/mcp", issuer_url=issuer, config=config)
+        mcp_srv, _state = build_server("mock", "http", oauth=provider)
+        app = provider.guard(mcp_srv.http_app())
+        server = NoSignalServer(
+            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+        )
+        task = asyncio.create_task(server.serve())
+        running.append((server, task))
+
+        async def _healthy() -> bool:
+            async with httpx.AsyncClient() as c:
+                r = await c.get(f"{issuer}/health", timeout=1.0)
+                return r.status_code == 200
+
+        await poll_until(_healthy, timeout=15.0, desc=f"mock oauth server :{port}")
+        return ServedOAuthMock(provider=provider, base_url=issuer, port=port)
+
+    yield make
+
+    for server, task in running:
+        server.should_exit = True
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(task, timeout=5.0)
+        if not task.done():
+            # A server that ignored should_exit must not outlive its test —
+            # a leaked serve task is exactly the cross-test poison this file
+            # was suffering from (see NoSignalServer).
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+    AppStatus.should_exit = False

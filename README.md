@@ -604,6 +604,7 @@ When `client_id` is provided, dynamic client registration is skipped.
 | `client_metadata_url` | `string`           | —       | CIMD URL (alternative to dynamic registration)                                                                                                                                                       |
 | `cache_tokens`        | `boolean`          | `true`  | Persist tokens to disk for this server (overrides global setting)                                                                                                                                    |
 | `callback_port`       | `integer`          | —       | Local port for the OAuth redirect callback (e.g. `9876`). Required when the auth provider validates redirect URIs strictly (Google, GitHub, etc.) — must match the URI registered in your OAuth app. |
+| `prompt`              | `string`           | —       | How the authorization link reaches the user: `browser`, `elicit` or `both` (overrides the global `oauth.prompt`; see [Authorizing from another device](#authorizing-from-another-device)).           |
 
 ### OAuth token caching
 
@@ -653,6 +654,49 @@ python -m mcp_combiner --mcp --config servers.json --oauth-cache
 ```
 
 Priority order (highest to lowest): CLI flag → config `oauth` section → built-in default.
+
+### Authorizing from another device
+
+By default a server that needs (re-)authorization opens a browser on the
+combiner host and waits for the redirect on a loopback callback. To authorize
+from somewhere else (a phone, a remote chat), the combiner can hand the
+authorization link to the MCP client instead:
+
+```json
+{
+  "oauth": {
+    "public_url": "https://combiner.your-tailnet.ts.net",
+    "prompt": "both"
+  }
+}
+```
+
+- **`public_url`** — the combiner's externally reachable base URL (for example
+  its `tailscale serve` address). OAuth redirects then come back to
+  `<public_url>/oauth/callback/<server>`, served by the combiner itself.
+  Register that redirect URI with the OAuth client; for Google this needs a
+  **Web application** client (Desktop clients only allow loopback redirects).
+  The callback route needs no bearer token — the browser has none — and is
+  bound to the pending authorization by its OAuth `state`.
+- **`prompt`** — `browser` opens a browser on the combiner host; `elicit` gives
+  the link to the client; `both` does both. Defaults to `both` when
+  `public_url` is set and `browser` otherwise, so existing setups are
+  unchanged. A server's own `auth.oauth.prompt` overrides it. The browser is
+  never opened on a host without one (containers, Linux without a display).
+
+With `elicit`/`both`, authorization no longer blocks the request that needed
+it. A tool call routed to the server fails at once with MCP's URL-elicitation
+error (`-32042`) carrying the link; the client shows it to the user, not the
+model. The upstream never ran that call, so nothing is replayed later. Once the
+user authorizes, the combiner exchanges the code, reconnects the server, and
+sends `notifications/elicitation/complete`, after which the call can be
+retried. A client that doesn't declare URL elicitation gets the link in the
+tool error text instead. Links stay valid for 15 minutes; a call after that
+issues a fresh one.
+
+`elicit` without `public_url` still works, with a startup warning: the link
+redirects to the loopback callback, so it only completes from a browser on the
+combiner host (a local chat), not from another device.
 
 ### External OAuth provider mode
 

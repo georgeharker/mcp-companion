@@ -79,6 +79,8 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
         server_url=srv.url,
         token_dir=config.oauth.token_dir_path,
         cache_tokens=config.oauth.cache_tokens,
+        public_url=config.oauth.public_url,
+        prompt=config.oauth.prompt,
     )
 
     if auth is not None and srv.url:
@@ -198,6 +200,8 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
         server_url=srv.url,
         token_dir=config.oauth.token_dir_path,
         cache_tokens=config.oauth.cache_tokens,
+        public_url=config.oauth.public_url,
+        prompt=config.oauth.prompt,
     )
     stateful: TokenKeyedStatefulClient[Any] = (
         TokenKeyedStatefulClient(transport, auth=auth, server_name=name)

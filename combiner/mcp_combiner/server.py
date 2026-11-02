@@ -321,6 +321,11 @@ def create_combiner(
     _conn_manager = conn_manager
     RUNTIME.conn_manager = conn_manager
     RUNTIME.proc_manager = proc_manager
+    # An out-of-band OAuth authorization (see authprompt) re-arms and
+    # reconnects its server once the callback has stored the tokens.
+    from mcp_combiner import authprompt
+
+    authprompt.set_on_authorized(conn_manager.resume_after_authorization)
 
     # Lifecycle knobs for token-keyed isolated upstream sessions.
     from mcp_combiner.isolated import REGISTRY as _isolated_registry
