@@ -42,6 +42,13 @@ tagged `vX.Y.Z`.
   before. Today's clients (Claude Code, OpenCode, Pi) use the handshake too.
   A client on the new 2026-07-28 protocol revision would be served
   statelessly by mcp 2, without `tools/list_changed` or other pushes.
+- **Clients are offered the handshake era only.** mcp 2 also serves the
+  2026-07-28 revision, and a client that probes `server/discover` (Claude Code
+  does) would pick it — losing `tools/list_changed`, consent prompts and
+  forwarded elicitations, which the combiner can't yet translate for that
+  revision. `server/discover` now lists no versions, so such clients fall back
+  to the stateful handshake, as before fastmcp 4. `MCP_COMBINER_OFFER_2026=1`
+  lifts the pin (for developing the translation layer).
 - Downstream HTTP sessions never expire from inactivity (mcp 2's default is
   30 minutes; chats routinely idle longer, and the combiner's isolation
   lifecycle owns chat expiry).

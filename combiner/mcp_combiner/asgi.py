@@ -412,6 +412,11 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
     import fastmcp
 
     fastmcp.settings.http_session_idle_timeout = None
+    # Offer clients the handshake era only, until the era translation layer
+    # exists (see mcp_combiner.era).
+    from mcp_combiner.era import pin_handshake_era
+
+    pin_handshake_era(combiner)
     app = combiner.http_app(
         path="/mcp",
         stateless_http=False,
