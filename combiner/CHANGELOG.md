@@ -4,6 +4,18 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [Unreleased]
+
+### Added
+
+- Era translation, part 2 (still behind `MCP_COMBINER_OFFER_2026=1`):
+  permission consent prompts work on the 2026-07-28 revision. A call that
+  needs consent returns an `InputRequiredResult` with the same question and
+  choices as the handshake era's prompt; the client's retry carries the
+  answer. The upstream is not called until consent is given; "Allow for
+  session" is remembered per chat token as before. (Before, a 2026 client
+  silently got the `elicitUnavailable` fallback.)
+
 ## [0.19.0] — 2026-11-02
 
 ### Added

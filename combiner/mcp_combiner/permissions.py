@@ -22,7 +22,9 @@ import logging
 from typing import Any
 
 from fastmcp.exceptions import ToolError
-from fastmcp.server.elicitation import AcceptedElicitation
+from fastmcp.server.elicitation import AcceptedElicitation, parse_elicit_response_type
+from mcp_types import ElicitRequest, ElicitRequestFormParams, ElicitResult, InputRequiredResult
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from mcp_combiner.config import PermissionAction, ResolvedPolicy
 from mcp_combiner.runtime import RUNTIME
@@ -32,20 +34,83 @@ logger = logging.getLogger("mcp-combiner")
 # Offered when a call resolves to ELICIT. "for session" is cached in the
 # SessionRegistry so repeated calls to the same tool aren't re-prompted.
 _ELICIT_OPTIONS = ["Allow once", "Allow for session", "Deny"]
+# The 2026-era ask: one form elicitation, the same choices as ctx.elicit sends.
+_CONSENT_INPUT = "consent"
+_CONSENT_SCHEMA: dict[str, Any] = parse_elicit_response_type(_ELICIT_OPTIONS).schema
 
 
-async def enforce(ctx: Any, server: str, local_name: str, policy: ResolvedPolicy) -> None:
+def _is_2026_request(ctx: Any) -> bool:
+    """Whether *ctx*'s request speaks the 2026-07-28 revision (no server-initiated
+    requests: consent must be asked with an ``InputRequiredResult``)."""
+    rc = getattr(ctx, "request_context", None)
+    return rc is not None and rc.protocol_version in MODERN_PROTOCOL_VERSIONS
+
+
+def _consent_request(server: str, local_name: str) -> InputRequiredResult:
+    """The 2026-era consent ask: the same question and choices as the handshake
+    era's ``ctx.elicit``, returned as the call's result; the client retries the
+    call with the answer. ``request_state`` names the tool asked about, so an
+    answer can only apply to the call it was given for (fastmcp seals it on the
+    wire, so it can't be forged)."""
+    return InputRequiredResult(
+        input_requests={
+            _CONSENT_INPUT: ElicitRequest(
+                params=ElicitRequestFormParams(
+                    message=_consent_message(server, local_name),
+                    requested_schema=_CONSENT_SCHEMA,
+                )
+            )
+        },
+        request_state=_consent_state(server, local_name),
+    )
+
+
+def _consent_answer(ctx: Any, server: str, local_name: str) -> str | None:
+    """The decision (``"once" | "session" | "deny"``) a 2026-era retry carries
+    for this tool, or ``None`` when the call hasn't been asked yet."""
+    if ctx.request_state != _consent_state(server, local_name):
+        return None
+    responses = ctx.input_responses or {}
+    answer = responses.get(_CONSENT_INPUT)
+    if not isinstance(answer, ElicitResult):
+        return None
+    if answer.action != "accept":
+        return "deny"
+    return _decision_from_choice((answer.content or {}).get("value"))
+
+
+def _consent_message(server: str, local_name: str) -> str:
+    return f"Allow '{server}' to run tool '{local_name}'?"
+
+
+def _consent_state(server: str, local_name: str) -> str:
+    return f"consent:{server}/{local_name}"
+
+
+def _decision_from_choice(choice: object) -> str:
+    if choice == "Allow for session":
+        return "session"
+    if choice == "Allow once":
+        return "once"
+    return "deny"
+
+
+async def enforce(
+    ctx: Any, server: str, local_name: str, policy: ResolvedPolicy
+) -> InputRequiredResult | None:
     """Apply *policy* to one tool call for ``(server, local_name)``.
 
     ``ctx`` is the FastMCP request context (``MiddlewareContext.fastmcp_context``).
-    Returns normally to allow the call; raises :class:`ToolError` to reject it
-    (deny, or a declined/failed elicitation).  An ELICIT decision prompts the
+    Returns ``None`` to allow the call; raises :class:`ToolError` to reject it
+    (deny, or a declined/failed elicitation). On a 2026-era request it returns
+    an ``InputRequiredResult`` asking for consent — the caller returns that as
+    the call's result, and the client's retry carries the answer.  An ELICIT decision prompts the
     user unless it was already granted for this session; a client that cannot
     elicit falls back per ``policy.elicit_unavailable``.
     """
     action = policy.resolve(local_name)
     if action is PermissionAction.ALLOW:
-        return
+        return None
 
     tool_name = f"{server}_{local_name}"
     if action is PermissionAction.DENY:
@@ -63,15 +128,22 @@ async def enforce(ctx: Any, server: str, local_name: str, policy: ResolvedPolicy
     ident = (nvim_proxy.token_for_session(sid) if sid else None) or sid
     if ident and RUNTIME.sessions.is_granted(ident, key):
         logger.info("consent: grant hit ident=%s key=%s (no ask)", ident, key)
-        return
+        return None
 
-    decision = await _elicit(ctx, server, local_name, policy)
+    if _is_2026_request(ctx):
+        answer = _consent_answer(ctx, server, local_name)
+        if answer is None:
+            return _consent_request(server, local_name)
+        decision = answer
+    else:
+        decision = await _elicit(ctx, server, local_name, policy)
     if decision == "deny":
         raise ToolError(f"Tool '{tool_name}' was denied by the user.")
     if decision == "session" and ident:
         RUNTIME.sessions.grant(ident, key)
         logger.info("consent: grant RECORDED ident=%s key=%s", ident, key)
     # "once" → allow just this call, without caching.
+    return None
 
 
 async def _elicit(ctx: Any, server: str, local_name: str, policy: ResolvedPolicy) -> str:
@@ -81,7 +153,7 @@ async def _elicit(ctx: Any, server: str, local_name: str, policy: ResolvedPolicy
     error) applies the configured ``elicit_unavailable`` fallback instead of
     hanging on a prompt no one will answer.
     """
-    message = f"Allow '{server}' to run tool '{local_name}'?"
+    message = _consent_message(server, local_name)
     try:
         result = await ctx.elicit(message, response_type=_ELICIT_OPTIONS)
     except Exception as exc:  # noqa: BLE001 - any failure → configured fallback
@@ -96,11 +168,6 @@ async def _elicit(ctx: Any, server: str, local_name: str, policy: ResolvedPolicy
         return "once" if fallback is PermissionAction.ALLOW else "deny"
 
     if isinstance(result, AcceptedElicitation):
-        choice = result.data
-        if choice == "Allow for session":
-            return "session"
-        if choice == "Allow once":
-            return "once"
-        return "deny"
+        return _decision_from_choice(result.data)
     # DeclinedElicitation / CancelledElicitation
     return "deny"

@@ -22,6 +22,7 @@ from fastmcp.server.context import Context
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
 from fastmcp.tools import Tool, ToolResult
+from fastmcp.tools.base import InputRequiredToolResult
 from mcp.server.connection import Connection
 
 from mcp_combiner import authprompt, fastvalidate, nvim_proxy, permissions
@@ -500,7 +501,13 @@ class ToolProcessingMiddleware(Middleware):
             policy = RUNTIME.config.effective_policy(call_server)
             if policy.is_active():
                 local_name = str(tool_name)[len(call_server) + 1 :]
-                await permissions.enforce(context.fastmcp_context, call_server, local_name, policy)
+                ask = await permissions.enforce(
+                    context.fastmcp_context, call_server, local_name, policy
+                )
+                if ask is not None:
+                    # 2026-era consent ask: the call's result is the question;
+                    # the client retries with the answer (upstream not called).
+                    return InputRequiredToolResult(ask)
 
         try:
             result = await call_next(context)
