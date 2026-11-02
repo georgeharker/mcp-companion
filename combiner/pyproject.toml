@@ -73,6 +73,7 @@ testpaths = ["tests"]
 timeout = 300
 markers = [
     "e2e: needs real OS resources the nix build sandbox forbids — spawns real subprocesses (combiner / mock upstreams) and/or binds a loopback socket (uvicorn); runs in ci.yml on a real runner, excluded from `flake check`",
+    "live_claude: drives the locally installed Claude Code (Agent SDK, real model calls) against a throwaway combiner; opt-in only — skipped unless MCP_COMBINER_LIVE_CLAUDE=1 and claude-agent-sdk is importable (uv run --with); never in CI",
 ]
 
 [tool.ruff]

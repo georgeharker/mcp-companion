@@ -162,6 +162,12 @@ async def resume(
             "(it expired, or the combiner restarted). Call the tool again."
         )
     answered = responses or {}
+    logger.debug(
+        "held call %s resumed: pending=%s answered=%s",
+        held.id[:8],
+        sorted(held.pending),
+        {k: (type(v).__name__, getattr(v, "action", None)) for k, v in answered.items()},
+    )
     for key, ask in list(held.pending.items()):
         response = answered.get(key)
         if not ask.answer.done():
