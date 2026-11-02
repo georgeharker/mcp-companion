@@ -22,6 +22,7 @@ import pytest
 from fakes import RecordingOutbound, recording_connection
 from fastmcp import Client
 from fastmcp.server.transforms.namespace import Namespace
+from mcp.server.subscriptions import ServerEvent
 from mcp.types import (
     LoggingMessageNotification,
     LoggingMessageNotificationParams,
@@ -31,6 +32,7 @@ from mcp.types import (
     ToolListChangedNotification,
 )
 
+from mcp_combiner.listen import HUB, ResourcesListChanged, ResourceUpdated
 from mcp_combiner.notifications import (
     _ResourceNotifyHandler,
     attach_resource_forwarding,
@@ -274,3 +276,31 @@ class TestForwarding:
         handler = _ResourceNotifyHandler("svg-mcp", target=target)
         await handler(_log())
         assert outbound.notifications == []
+
+
+class TestListenStreams:
+    """2026-era chats have no long-lived Connection: forwarding also publishes
+    to the event hub — per chat by token, or broadcast."""
+
+    async def test_per_chat_update_reaches_only_that_chats_bus(self) -> None:
+        mine: list[ServerEvent] = []
+        theirs: list[ServerEvent] = []
+        undo_mine = HUB.chat_bus("chat-mine").subscribe(mine.append)
+        undo_theirs = HUB.chat_bus("chat-theirs").subscribe(theirs.append)
+        try:
+            handler = _ResourceNotifyHandler("svg-mcp", target_token="chat-mine")
+            await handler(_updated())
+        finally:
+            undo_mine()
+            undo_theirs()
+        assert mine == [ResourceUpdated(uri=NAMESPACED)]
+        assert theirs == []
+
+    async def test_broadcast_update_reaches_the_broadcast_bus(self) -> None:
+        seen: list[ServerEvent] = []
+        undo = HUB.broadcast_bus.subscribe(seen.append)
+        try:
+            await _ResourceNotifyHandler("svg-mcp")(_list_changed())
+        finally:
+            undo()
+        assert seen == [ResourcesListChanged()]

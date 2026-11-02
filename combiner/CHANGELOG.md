@@ -28,6 +28,11 @@ tagged `vX.Y.Z`.
   a short link on the combiner (`/oauth/authorize/<id>`, redirecting to the
   full ~400-character authorization URL) that fits on one line and stays
   clickable in terminals.
+- `subscriptions/listen` for 2026-07-28 clients (the first piece of the
+  era translation layer, active only with `MCP_COMBINER_OFFER_2026=1` for
+  now): a chat's listen stream receives `tools/list_changed` and resource
+  notifications — broadcasts plus its own per-chat events, keyed by its chat
+  token — wherever handshake-era sessions get them today.
 - The mock OAuth server (`mcp_combiner.mockserver --oauth`) gains
   `POST /control/oauth/revoke` (`?clients=1` also forgets registrations), to
   force re-authorization when testing.

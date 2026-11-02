@@ -411,6 +411,9 @@ def create_combiner(
                 await _isolated_registry.close_all()
             await conn_manager.close_all()
             await proc_manager.stop_all()
+            from mcp_combiner.listen import HUB
+
+            HUB.close()
 
     combiner = FastMCP(
         name="mcp-combiner",
@@ -465,6 +468,11 @@ def create_combiner(
 
     # Session/health REST API (extracted to routes.py).
     register_routes(combiner, config, conn_manager)
+
+    # subscriptions/listen for 2026-era clients (mcp_combiner.listen).
+    from mcp_combiner.listen import register_listen
+
+    register_listen(combiner)
 
     # Neovim back-channel REST API (/neovim/instances, /neovim/bind).
     nvim_proxy.register_routes(combiner, _notify_tool_list_changed)

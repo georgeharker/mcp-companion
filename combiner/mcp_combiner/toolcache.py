@@ -29,6 +29,7 @@ from typing import Any
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
 
+from mcp_combiner.listen import HUB, ToolsListChanged
 from mcp_combiner.runtime import RUNTIME, connection_session_id
 from mcp_combiner.schemafix import _sanitize_tools
 
@@ -77,6 +78,8 @@ async def _notify_tool_list_changed() -> None:
     Exceptions from individual sessions (e.g. client already disconnected)
     are logged and swallowed so one bad session never blocks the rest.
     """
+    # 2026-era clients: every open listen stream (see mcp_combiner.listen).
+    await HUB.publish(ToolsListChanged())
     connections = RUNTIME.sessions.connections()
     if not connections:
         logger.debug("No active sessions to notify of tool list change")
@@ -90,8 +93,19 @@ async def _notify_tool_list_changed() -> None:
             logger.debug("Failed to notify session of tool list change", exc_info=True)
 
 
+async def notify_chat_tools_changed(token: str) -> None:
+    """Tell one chat (by token) its tool list changed: its 2026-era listen
+    streams. Handshake-era sessions are reached by :func:`_notify_session_by_id`."""
+    await HUB.publish(ToolsListChanged(), token=token)
+
+
 async def _notify_session_by_id(session_id: str) -> None:
     """Send ``notifications/tools/list_changed`` to a specific session by ID."""
+    from mcp_combiner.nvim_proxy import token_for_session
+
+    token = token_for_session(session_id)
+    if token:
+        await notify_chat_tools_changed(token)
     for connection in RUNTIME.sessions.connections():
         try:
             if connection_session_id(connection) == session_id:

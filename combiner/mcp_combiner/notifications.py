@@ -65,11 +65,14 @@ from typing import Any
 import mcp.types
 from fastmcp import Client
 from fastmcp.client.messages import MessageHandler
-from fastmcp.server.dependencies import get_context
+from fastmcp.server.dependencies import get_context, get_http_headers
 from mcp.server.connection import Connection
 from mcp.server.session import ServerSession
+from mcp.server.subscriptions import ServerEvent
 from pydantic import AnyUrl
 
+from mcp_combiner.isolated import TOKEN_HEADER
+from mcp_combiner.listen import HUB, ResourcesListChanged, ResourceUpdated
 from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME, downstream_connection
 from mcp_combiner.toolcache import namespace_uri
 from mcp_combiner.upstream_session import use_tolerant_session
@@ -84,9 +87,18 @@ class _ResourceNotifyHandler(MessageHandler):
     ``isolate: true``); ``None`` broadcasts to every active session.
     """
 
-    def __init__(self, server_name: str, *, target: Connection | None = None) -> None:
+    def __init__(
+        self,
+        server_name: str,
+        *,
+        target: Connection | None = None,
+        target_token: str | None = None,
+    ) -> None:
         super().__init__()
         self._server = server_name
+        # The per-chat target's chat token: its 2026-era listen streams (which
+        # have no long-lived Connection) are reached through the event hub.
+        self._target_token = target_token if target is not None or target_token else None
         # Weakref the per-chat target so the handler never pins the downstream
         # session alive (the session's own exit tears down the per-chat client;
         # a dead ref just means "chat gone → nothing to notify"). None = broadcast.
@@ -94,8 +106,11 @@ class _ResourceNotifyHandler(MessageHandler):
             weakref.ref(target) if target is not None else None
         )
 
-    def targets(self, target: Connection | None) -> bool:
-        """Whether this handler already delivers to *target* (None = broadcast)."""
+    def targets(self, target: Connection | None, target_token: str | None = None) -> bool:
+        """Whether this handler already delivers to *target* / *target_token*
+        (both None = broadcast)."""
+        if target_token != self._target_token:
+            return False
         if self._target_ref is None:
             return target is None
         return target is not None and self._target_ref() is target
@@ -111,13 +126,19 @@ class _ResourceNotifyHandler(MessageHandler):
                 "Failed to namespace resources/updated URI for '%s'", self._server, exc_info=True
             )
             return
-        await self._forward(lambda c: c.send_resource_updated(str(uri)), f"resources/updated {uri}")
+        await self._forward(
+            lambda c: c.send_resource_updated(str(uri)),
+            ResourceUpdated(uri=str(uri)),
+            f"resources/updated {uri}",
+        )
 
     async def on_resource_list_changed(
         self, message: mcp.types.ResourceListChangedNotification
     ) -> None:
         await self._forward(
-            lambda c: c.send_resource_list_changed(), f"resources/list_changed ({self._server})"
+            lambda c: c.send_resource_list_changed(),
+            ResourcesListChanged(),
+            f"resources/list_changed ({self._server})",
         )
 
     async def on_tool_list_changed(self, message: mcp.types.ToolListChangedNotification) -> None:
@@ -146,7 +167,16 @@ class _ResourceNotifyHandler(MessageHandler):
                 "Failed to handle tools/list_changed for '%s'", self._server, exc_info=True
             )
 
-    async def _forward(self, send: Callable[[Connection], Awaitable[None]], desc: str) -> None:
+    async def _forward(
+        self, send: Callable[[Connection], Awaitable[None]], event: ServerEvent, desc: str
+    ) -> None:
+        # 2026-era listen streams: the chat's own, or all of them (broadcast).
+        per_chat = self._target_ref is not None or self._target_token is not None
+        if per_chat:
+            if self._target_token is not None:
+                await HUB.publish(event, token=self._target_token)
+        else:
+            await HUB.publish(event)
         if self._target_ref is not None:
             # Per-chat: notify only this chat's connection (skip if it's gone).
             target = self._target_ref()
@@ -164,7 +194,11 @@ class _ResourceNotifyHandler(MessageHandler):
 
 
 def attach_resource_forwarding(
-    client: Any, server_name: str, *, target: Connection | None = None
+    client: Any,
+    server_name: str,
+    *,
+    target: Connection | None = None,
+    target_token: str | None = None,
 ) -> Any:
     """Install (or re-install) resource-forwarding on *client*'s message handler.
 
@@ -195,9 +229,11 @@ def attach_resource_forwarding(
             )
             return client
         current = kwargs["message_handler"]
-        if isinstance(current, _ResourceNotifyHandler) and current.targets(target):
+        if isinstance(current, _ResourceNotifyHandler) and current.targets(target, target_token):
             return client
-        kwargs["message_handler"] = _ResourceNotifyHandler(server_name, target=target)
+        kwargs["message_handler"] = _ResourceNotifyHandler(
+            server_name, target=target, target_token=target_token
+        )
     except Exception:
         logger.warning(
             "Failed to attach resource forwarding for '%s' (FastMCP internals "
@@ -304,6 +340,14 @@ def forwarding_factory(factory: Any, server_name: str, *, per_chat: bool) -> Any
     factory must never raise.
     """
 
+    def _target_token() -> str | None:
+        if not per_chat:
+            return None
+        try:
+            return get_http_headers().get(TOKEN_HEADER) or None
+        except Exception:
+            return None
+
     def _target() -> Connection | None:
         if not per_chat:
             return None
@@ -335,13 +379,17 @@ def forwarding_factory(factory: Any, server_name: str, *, per_chat: bool) -> Any
                 attach_elicitation_forwarding(
                     resolved, server_name, session=elicit_session, request_id=elicit_request_id
                 )
-                return attach_resource_forwarding(resolved, server_name, target=_target())
+                return attach_resource_forwarding(
+                    resolved, server_name, target=_target(), target_token=_target_token()
+                )
 
             return _finish()
         _prepare_session(client)
         attach_elicitation_forwarding(
             client, server_name, session=elicit_session, request_id=elicit_request_id
         )
-        return attach_resource_forwarding(client, server_name, target=_target())
+        return attach_resource_forwarding(
+            client, server_name, target=_target(), target_token=_target_token()
+        )
 
     return wrapped

@@ -707,6 +707,12 @@ def register_meta_tools(
                 await ctx.session.send_tool_list_changed()
             except Exception:
                 logger.debug("Failed to notify session of tool list change", exc_info=True)
+        if token:
+            # 2026-era clients hear it on their listen streams (the named chat's
+            # too, when chat_id names another one).
+            from mcp_combiner.toolcache import notify_chat_tools_changed
+
+            await notify_chat_tools_changed(token)
 
         logger.info(
             "Session %s (token %s): disabled server '%s'", ctx.session_id, token, server_name
@@ -781,6 +787,12 @@ def register_meta_tools(
                 await ctx.session.send_tool_list_changed()
             except Exception:
                 logger.debug("Failed to notify session of tool list change", exc_info=True)
+        if token:
+            # 2026-era clients hear it on their listen streams (the named chat's
+            # too, when chat_id names another one).
+            from mcp_combiner.toolcache import notify_chat_tools_changed
+
+            await notify_chat_tools_changed(token)
 
         logger.info(
             "Session %s (token %s): re-enabled server '%s'", ctx.session_id, token, server_name

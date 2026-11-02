@@ -27,7 +27,7 @@ from mcp_combiner.config import CombinerConfig, HealthResponse, ServerStatusInfo
 from mcp_combiner.connections import ConnectionManager
 from mcp_combiner.runtime import RUNTIME, connection_session_id
 from mcp_combiner.status import build_server_status
-from mcp_combiner.toolcache import _notify_session_by_id
+from mcp_combiner.toolcache import _notify_session_by_id, notify_chat_tools_changed
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -374,6 +374,7 @@ def register_routes(
                 await _notify_session_by_id(session_id)
             for ctx_sid in nvim_proxy.sessions_for_token(token):
                 await _notify_session_by_id(ctx_sid)
+            await notify_chat_tools_changed(token)  # 2026-era listen streams
 
         if request.method == "GET":
             return JSONResponse(
