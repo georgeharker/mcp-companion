@@ -15,14 +15,17 @@ from typing import Any
 
 import pytest
 from conftest import (
+    FAST_TIMING_ENV,
     CombinerHandle,
     ProcFactory,
+    http_mock_entry,
     stdio_mock_entry,
     write_servers_config,
     write_tools_spec,
 )
 from fakes import content_text, json_object
 from fastmcp import Client
+from fastmcp.client.elicitation import ElicitResult
 from fastmcp.exceptions import ToolError
 from mcp.client.subscriptions import listen
 from mcp.shared.subscriptions import ToolsListChanged
@@ -146,3 +149,75 @@ class TestConsentOn2026:
         async with Client(url, elicitation_handler=answer) as c:  # same chat token
             await c.call_tool("mockup_greet", {"who": "z"})
         assert answer.asked == 1
+
+
+ANSWER: dict[str, Any] = {"environment": "prod", "confirm": True, "ticket": "T-1", "replicas": 3}
+
+
+async def _held_combiner(
+    procs: ProcFactory, tmp_path: Path, extra_env: dict[str, str] | None = None
+) -> CombinerHandle:
+    """A handshake-era isolated upstream behind a combiner offering 2026."""
+    mock = await procs.start_http_mock("mockup")
+    config = write_servers_config(
+        tmp_path / "servers.json",
+        {"mockup": {**http_mock_entry(mock.port), "isolate": True}},
+        isolation={"grace_seconds": 3600.0, "park_ttl_seconds": 3600.0},
+    )
+    combiner = await procs.start_combiner(
+        config,
+        env={**FAST_TIMING_ENV, OFFER_2026_ENV: "1", **(extra_env or {})},
+        extra_args=["--log-file", str(tmp_path / "combiner.log")],
+    )
+    await combiner.wait_server_state("mockup", ("ready",))
+    return combiner
+
+
+def _upstream_saw(result: Any) -> dict[str, Any]:
+    text = content_text(result)
+    assert text.startswith("elicit: "), text[:200]
+    return json_object(text.removeprefix("elicit: "))
+
+
+class TestHeldCalls:
+    """2026-era client + handshake-era upstream that elicits mid-call: the
+    combiner holds the upstream call and relays the question as an
+    InputRequiredResult; the client's retry answers it."""
+
+    async def test_answer_reaches_the_upstream(self, procs: ProcFactory, tmp_path: Path) -> None:
+        combiner = await _held_combiner(procs, tmp_path)
+        asked: list[str] = []
+
+        async def answer(message: str, response_type: Any, params: Any, context: object) -> Any:
+            asked.append(message)
+            return ANSWER
+
+        async with Client(f"{combiner.mcp_url}/chat-held-001", elicitation_handler=answer) as c:
+            assert c.protocol_version in MODERN_PROTOCOL_VERSIONS
+            payload = _upstream_saw(await c.call_tool("mockup_mock__elicit_form", {}))
+        assert asked and "Deploy confirmation" in asked[0]
+        assert payload["action"] == "accept"
+        assert payload["content"] == ANSWER
+
+    async def test_decline_reaches_the_upstream(self, procs: ProcFactory, tmp_path: Path) -> None:
+        combiner = await _held_combiner(procs, tmp_path)
+
+        async def decline(message: str, response_type: Any, params: Any, context: object) -> Any:
+            return ElicitResult(action="decline")
+
+        async with Client(f"{combiner.mcp_url}/chat-held-002", elicitation_handler=decline) as c:
+            payload = _upstream_saw(await c.call_tool("mockup_mock__elicit_form", {}))
+        assert payload["action"] == "decline"
+
+    async def test_an_expired_hold_asks_the_client_to_call_again(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner = await _held_combiner(procs, tmp_path, {"MCP_COMBINER_HOLD_TIMEOUT": "1"})
+
+        async def slow(message: str, response_type: Any, params: Any, context: object) -> Any:
+            await asyncio.sleep(2.0)  # the user takes longer than the hold
+            return ANSWER
+
+        async with Client(f"{combiner.mcp_url}/chat-held-003", elicitation_handler=slow) as c:
+            with pytest.raises(ToolError, match="Call the tool again"):
+                await c.call_tool("mockup_mock__elicit_form", {})

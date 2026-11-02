@@ -19,15 +19,18 @@ from typing import Any, ClassVar, TypeGuard, cast
 import mcp.types as mt
 from fastmcp.exceptions import FastMCPError, NotFoundError, ToolError
 from fastmcp.server.context import Context
+from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
 from fastmcp.tools import Tool, ToolResult
 from fastmcp.tools.base import InputRequiredToolResult
 from mcp.server.connection import Connection
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
-from mcp_combiner import authprompt, fastvalidate, nvim_proxy, permissions
+from mcp_combiner import authprompt, fastvalidate, heldcalls, nvim_proxy, permissions
 from mcp_combiner.auth import clear_oauth_cache, is_stale_client_error
 from mcp_combiner.connections import AuthenticationError
+from mcp_combiner.isolated import TOKEN_HEADER
 from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME, downstream_connection
 from mcp_combiner.schemafix import _finalize_schemas, _sanitize_tools
 from mcp_combiner.toolcache import (
@@ -469,13 +472,21 @@ class ToolProcessingMiddleware(Middleware):
                     call_server = sname
                     break
 
+        # A 2026-era retry of a held call (mcp_combiner.heldcalls) resumes the
+        # upstream call already in flight: the first leg already passed the
+        # gates below, so they are not run again.
+        fctx = context.fastmcp_context
+        era_2026 = _is_2026_request(fctx)
+        request_state = fctx.request_state if fctx is not None and era_2026 else None
+        resuming = heldcalls.resumes(request_state)
+
         # A server waiting on an out-of-band OAuth authorization can't serve the
         # call: hand the caller the authorization link (-32042) before the
         # upstream is touched. An auth-failed one whose link expired re-runs its
         # flow first (a no-op for inline OAuth) — this has to happen here, not
         # on the call's failure: a server that never authorized has no listed
         # tools, so the call itself would fail as an unknown tool.
-        if call_server:
+        if call_server and not resuming:
             pending = authprompt.pending_for(call_server)
             conns = RUNTIME.conn_manager
             if pending is None and conns is not None and conns.is_auth_failed(call_server):
@@ -488,7 +499,7 @@ class ToolProcessingMiddleware(Middleware):
         # client was shown fails here, before any permission prompt or
         # upstream round trip (validation.input, on by default).
         published = RUNTIME.tools.published(str(tool_name)) if call_server else None
-        if published is not None and RUNTIME.input_validation:
+        if published is not None and RUNTIME.input_validation and not resuming:
             arguments = context.message.arguments if context.message else None
             problem = fastvalidate.first_error(arguments or {}, published.parameters)
             if problem is not None:
@@ -497,7 +508,12 @@ class ToolProcessingMiddleware(Middleware):
         # Permission policy gate (tool CALLS only — never publication). Resolve
         # the effective allow/deny/elicit policy for the owning server; deny or a
         # declined elicitation short-circuits before the upstream ever runs.
-        if call_server and RUNTIME.config is not None and context.fastmcp_context is not None:
+        if (
+            call_server
+            and not resuming
+            and RUNTIME.config is not None
+            and context.fastmcp_context is not None
+        ):
             policy = RUNTIME.config.effective_policy(call_server)
             if policy.is_active():
                 local_name = str(tool_name)[len(call_server) + 1 :]
@@ -510,7 +526,16 @@ class ToolProcessingMiddleware(Middleware):
                     return InputRequiredToolResult(ask)
 
         try:
-            result = await call_next(context)
+            if resuming and request_state is not None and fctx is not None:
+                result = await heldcalls.resume(request_state, _chat_token(), fctx.input_responses)
+            elif era_2026 and call_server and fctx is not None:
+                # A handshake-era upstream may ask for input mid-call; hold the
+                # call so the question can go back to this 2026-era client.
+                result = await heldcalls.start(
+                    lambda: call_next(context), _chat_token(), str(fctx.request_id)
+                )
+            else:
+                result = await call_next(context)
         except NotFoundError:
             # Protocol error — wrong tool name or server disabled. Re-raise
             # so the MCP layer returns a -32002 JSON-RPC error, not a tool result.
@@ -596,6 +621,11 @@ class ToolProcessingMiddleware(Middleware):
             logger.error("Tool '%s' failed: %s", tool_name, e)
             raise ToolError(f"Error calling tool '{tool_name}': {e}") from e
         else:
+            if isinstance(result, InputRequiredToolResult):
+                # The held upstream asked for input: the question is this
+                # leg's result; post-processing runs on the leg that completes.
+                return result
+
             # Output schema gate (validation.output, off by default — fastmcp
             # relays results and the end client validates what it consumes).
             if published is not None and RUNTIME.output_validation:
@@ -693,3 +723,17 @@ def _check_output(tool: Tool, result: ToolResult) -> None:
     problem = fastvalidate.first_error(result.structured_content, schema)
     if problem is not None:
         raise ToolError(f"Output validation error: {problem}")
+
+
+def _is_2026_request(ctx: Context | None) -> bool:
+    """Whether *ctx*'s request speaks the 2026-07-28 revision."""
+    rc = ctx.request_context if ctx is not None else None
+    return rc is not None and rc.protocol_version in MODERN_PROTOCOL_VERSIONS
+
+
+def _chat_token() -> str | None:
+    """The current request's chat token (``/mcp/<token>`` or the header)."""
+    try:
+        return get_http_headers().get(TOKEN_HEADER) or None
+    except Exception:
+        return None

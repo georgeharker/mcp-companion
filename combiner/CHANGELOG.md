@@ -15,6 +15,16 @@ tagged `vX.Y.Z`.
   answer. The upstream is not called until consent is given; "Allow for
   session" is remembered per chat token as before. (Before, a 2026 client
   silently got the `elicitUnavailable` fallback.)
+- Era translation, part 3 (behind the same flag): **held calls**. When a
+  handshake-era upstream (isolated, so it forwards elicitation) asks for
+  input mid-call and the client is on the 2026 revision, the combiner keeps
+  the upstream call running, returns the question as an
+  `InputRequiredResult`, and resumes the call with the client's retry —
+  repeatedly if the upstream asks again. A held call belongs to the chat
+  token that started it and is cancelled after 60 minutes without an answer
+  (`MCP_COMBINER_HOLD_TIMEOUT`); a retry after that, or after a combiner
+  restart, is told to call the tool again. Sampling and roots requests from
+  upstreams are not bridged yet.
 
 ## [0.19.0] — 2026-11-02
 

@@ -75,6 +75,7 @@ from fastmcp.client.transports.base import ClientTransportT
 from fastmcp.server.dependencies import get_context, get_http_headers
 from fastmcp.server.providers.proxy import StatefulProxyClient
 
+from mcp_combiner.heldcalls import bind_bridged_elicitation
 from mcp_combiner.resume_transport import ResumableStreamableHttpTransport
 from mcp_combiner.runtime import CLIENT_CONNECT_MODE, downstream_connection
 
@@ -709,6 +710,11 @@ class TokenKeyedStatefulClient(StatefulProxyClient[ClientTransportT]):
         kwargs.setdefault("mode", CLIENT_CONNECT_MODE)
         super().__init__(*args, **kwargs)
         self._server_name = server_name
+        bind_bridged_elicitation(self)
+
+    def _bind_restoring_handlers(self) -> None:
+        super()._bind_restoring_handlers()
+        bind_bridged_elicitation(self)  # per-chat clones rebind fastmcp's defaults
 
     async def acquire_stateful(self) -> Client[Any]:
         token = _request_group_key()
@@ -832,6 +838,7 @@ class TokenKeyedStdioClient(StatefulProxyClient[StdioTransport]):
             StdioTransport(command=command, args=args, env=env), mode=CLIENT_CONNECT_MODE
         )
         self._server_name = server_name
+        bind_bridged_elicitation(self)
         self._command = command
         self._args = args
         self._env = env
@@ -979,6 +986,10 @@ class TokenKeyedStdioClient(StatefulProxyClient[StdioTransport]):
         client = self.new()  # StatefulProxyClient clone — handlers, config
         client.transport = StdioTransport(command=self._command, args=self._args, env=self._env)
         return client
+
+    def _bind_restoring_handlers(self) -> None:
+        super()._bind_restoring_handlers()
+        bind_bridged_elicitation(self)  # per-chat clones rebind fastmcp's defaults
 
     def _new_stdio_probe(self) -> Client[Any]:
         """An EPHEMERAL client for out-of-context tools/list (startup prime):
