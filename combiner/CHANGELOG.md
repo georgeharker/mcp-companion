@@ -4,7 +4,7 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
-## [Unreleased]
+## [0.19.0] — 2026-11-02
 
 ### Added
 
