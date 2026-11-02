@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from conftest import (
     CombinerHandle,
@@ -36,7 +36,7 @@ from mcp_combiner import runtime
 from mcp_combiner.ctl import _strip_flag_with_value
 from mcp_combiner.handover import HANDOVER_VERSION, load_handover, write_handover
 from mcp_combiner.isolated import REGISTRY, ParkedSession
-from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE, RUNTIME
 
 _SPEC = [
     {"name": "greet", "params": {"who": "string"}, "response_template": "Hello, {who}!"},
@@ -133,7 +133,8 @@ class TestHandoverE2E:
 
         def _chat(c: CombinerHandle) -> Client[Any]:
             return Client(
-                StreamableHttpTransport(c.mcp_url, headers={"X-MCP-Combiner-Session": token})
+                StreamableHttpTransport(c.mcp_url, headers={"X-MCP-Combiner-Session": token}),
+                mode=CLIENT_CONNECT_MODE,
             )
 
         async with _chat(combiner) as c:
@@ -141,7 +142,7 @@ class TestHandoverE2E:
 
         # A token-keyed filter for a second (never-connected) token: pure
         # token-keyed state that must ride the handover.
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.post(
                 f"{combiner.base_url}/sessions/token/other-token/filter",
                 json={"disable": "mockup"},
@@ -151,7 +152,7 @@ class TestHandoverE2E:
 
         # Arm the handover, then a graceful stop (SIGTERM → lifespan writes it).
         handover_file = tmp_path / "handover.json"
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.post(
                 f"{combiner.base_url}/handover/prepare",
                 json={"path": str(handover_file)},
@@ -182,7 +183,7 @@ class TestHandoverE2E:
         # both as bookkeeping and as ENFORCEMENT: the chat that presents that
         # token gets the filtered view from its very first request
         # (read-through — there is no join step to miss).
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.get(
                 f"{successor.base_url}/sessions/token/other-token/filter", timeout=5.0
             )
@@ -191,7 +192,8 @@ class TestHandoverE2E:
         async with Client(
             StreamableHttpTransport(
                 successor.mcp_url, headers={"X-MCP-Combiner-Session": "other-token"}
-            )
+            ),
+            mode=CLIENT_CONNECT_MODE,
         ) as fc:
             names = {t.name for t in await fc.list_tools()}
             assert not any(str(n).startswith("mockup_") for n in names)
@@ -218,14 +220,15 @@ class TestHandoverE2E:
 
         def _chat(c: CombinerHandle) -> Client[Any]:
             return Client(
-                StreamableHttpTransport(c.mcp_url, headers={"X-MCP-Combiner-Session": token})
+                StreamableHttpTransport(c.mcp_url, headers={"X-MCP-Combiner-Session": token}),
+                mode=CLIENT_CONNECT_MODE,
             )
 
         async with _chat(combiner) as c:
             await c.call_tool("mockup_mock__remember", {"value": "the-current-document"})
 
         handover_file = tmp_path / "handover.json"
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.post(
                 f"{combiner.base_url}/handover/prepare",
                 json={"path": str(handover_file)},
@@ -263,12 +266,12 @@ class TestHandoverE2E:
         combiner = await procs.start_combiner(cfg, port=port)
         await combiner.wait_server_state("mockup", ("ready",))
 
-        c = Client(combiner.mcp_url)  # no token — sid-keyed identity
+        c = Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE)  # no token — sid-keyed identity
         async with c:
             await c.call_tool("mockup_mock__remember", {"value": "doomed"})
 
             handover_file = tmp_path / "handover.json"
-            async with httpx.AsyncClient() as http:
+            async with httpx2.AsyncClient() as http:
                 r = await http.post(
                     f"{combiner.base_url}/handover/prepare",
                     json={"path": str(handover_file)},
@@ -286,7 +289,7 @@ class TestHandoverE2E:
                 await c.call_tool("mockup_mock__recall", {})
 
         # Reconnect: clean fresh session, state honestly gone.
-        async with Client(successor.mcp_url) as c2:
+        async with Client(successor.mcp_url, mode=CLIENT_CONNECT_MODE) as c2:
             with pytest.raises(Exception, match="nothing remembered"):
                 await c2.call_tool("mockup_mock__recall", {})
 

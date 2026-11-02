@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-import httpx
+import httpx2
 import pytest
 import uvicorn
 
@@ -199,7 +199,7 @@ class CombinerHandle:
         return f"{self.base_url}/mcp"
 
     async def health(self) -> dict[str, Any]:
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.get(f"{self.base_url}/health", timeout=2.0)
             r.raise_for_status()
             return dict(r.json())
@@ -254,20 +254,20 @@ class MockHandle:
         return f"{self.base_url}/mcp"
 
     async def stats(self) -> dict[str, Any]:
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.get(f"{self.base_url}/stats", timeout=2.0)
             r.raise_for_status()
             return dict(r.json())
 
     async def control(self, method: str, path: str, body: Any = None) -> Any:
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.request(method, f"{self.base_url}{path}", json=body, timeout=5.0)
             r.raise_for_status()
             return r.json()
 
     async def wait_healthy(self, timeout: float = 30.0) -> None:
         async def _ok() -> bool:
-            async with httpx.AsyncClient() as http:
+            async with httpx2.AsyncClient() as http:
                 r = await http.get(f"{self.base_url}/health", timeout=1.0)
                 return r.status_code == 200
 
@@ -460,7 +460,7 @@ async def oauth_mock() -> AsyncIterator[OAuthMockFactory]:
         running.append((server, task))
 
         async def _healthy() -> bool:
-            async with httpx.AsyncClient() as c:
+            async with httpx2.AsyncClient() as c:
                 r = await c.get(f"{issuer}/health", timeout=1.0)
                 return r.status_code == 200
 

@@ -7,6 +7,13 @@ where it looks broken, so an eventual fix flips them loudly.
 
 ## Q1 — Session-ID namespace split: token-route filters silently never apply
 
+> **Closed (2026-11-01, fastmcp 4 / mcp 2 migration).** Filters were already
+> fixed by read-through enforcement; the residual listing split is gone too:
+> fastmcp 4's `Context.session_id` reports the Connection's wire
+> `mcp-session-id`, so `/sessions` and the token map share one namespace
+> (`test_token_sessions_appear_in_sessions_listing` now pins it). The history
+> below describes fastmcp 3.
+
 **Found by:** `tests/test_session_independence.py` (e2e, 2026-07-08).
 
 **Symptom:** `POST /sessions/token/<token>/filter {"disable": "mockup"}`

@@ -35,14 +35,15 @@ from pathlib import Path
 
 from fastmcp.exceptions import ToolError
 from mcp.client.auth.exceptions import OAuthFlowError
-from mcp.server.session import ServerSession
+from mcp.server.connection import Connection
 from mcp.shared.exceptions import UrlElicitationRequiredError
 from mcp.types import ElicitRequestURLParams
 
 logger = logging.getLogger("mcp-combiner")
 
-#: Exchanges an authorization code for tokens and stores them.
-CodeExchange = Callable[[str], Awaitable[None]]
+#: Exchanges an authorization code (with the redirect's RFC 9207 ``iss``, when
+#: the server sent one) for tokens and stores them.
+CodeExchange = Callable[[str, str | None], Awaitable[None]]
 
 
 @dataclass
@@ -58,8 +59,8 @@ class PendingAuthorization:
     #: browser-only flow, whose callers are only told to finish in the browser.
     elicit: bool = True
     elicitation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    #: sessions that were handed this elicitation — notified on completion.
-    notified: weakref.WeakSet[ServerSession] = field(default_factory=weakref.WeakSet)
+    #: client connections that were handed this elicitation — notified on completion.
+    notified: weakref.WeakSet[Connection] = field(default_factory=weakref.WeakSet)
     #: loopback callback server (no public_url) — cancelled once settled.
     callback_task: asyncio.Task[None] | None = None
 
@@ -90,6 +91,33 @@ def set_on_authorized(hook: Callable[[str], Awaitable[None]] | None) -> None:
     """Register what runs after a server's tokens are stored (re-arm + reconnect)."""
     global _on_authorized
     _on_authorized = hook
+
+
+def pending_by_elicitation(elicitation_id: str) -> PendingAuthorization | None:
+    """The live pending authorization with *elicitation_id* (the short link's key)."""
+    for pending in list(_pending.values()):
+        if secrets.compare_digest(pending.elicitation_id, elicitation_id):
+            return pending_for(pending.server)
+    return None
+
+
+def short_link(pending: PendingAuthorization) -> str:
+    """A short URL on the combiner that redirects to *pending*'s authorization URL.
+
+    The real URL runs to ~400 characters (PKCE challenge, state, scopes) and
+    wraps across lines, which stops terminals and many chat UIs recognising it
+    as one link. The short one fits on a line. Keyed by the unguessable
+    elicitation id, so it reveals no more than the URL it stands for. Served
+    from ``oauth.public_url`` when set, else the combiner's loopback address;
+    falls back to the full URL when neither is known.
+    """
+    from mcp_combiner.runtime import RUNTIME
+
+    config = RUNTIME.config
+    base = (config.oauth.public_url if config is not None else None) or RUNTIME.local_origin
+    if base is None:
+        return pending.url
+    return f"{base}/oauth/authorize/{pending.elicitation_id}"
 
 
 def pending_for(server: str) -> PendingAuthorization | None:
@@ -128,7 +156,14 @@ class CallbackRejected(Exception):
     """The callback does not match the server's pending authorization."""
 
 
-async def complete(server: str, code: str | None, state: str | None, error: str | None) -> None:
+async def complete(
+    server: str,
+    code: str | None,
+    state: str | None,
+    error: str | None,
+    *,
+    iss: str | None = None,
+) -> None:
     """Finish *server*'s pending authorization from its OAuth redirect.
 
     Raises :class:`CallbackRejected` for a redirect that isn't the pending one
@@ -145,15 +180,16 @@ async def complete(server: str, code: str | None, state: str | None, error: str 
         raise CallbackRejected(f"authorization was not granted: {error}")
     if not code:
         raise CallbackRejected("the redirect carried no authorization code")
-    await pending.exchange(code)
+    await pending.exchange(code, iss)
     logger.info("OAuth authorization completed for '%s'", server)
     if _on_authorized is not None:
         await _on_authorized(server)
-    for session in list(pending.notified):
-        try:
-            await session.send_elicit_complete(pending.elicitation_id)
-        except Exception as exc:  # noqa: BLE001 — a closed session must not fail the others
-            logger.debug("elicitation/complete to a session failed: %s", exc)
+    for connection in list(pending.notified):
+        # Best-effort by contract: Connection.notify drops (never raises) when
+        # the client's standalone stream is gone.
+        await connection.notify(
+            "notifications/elicitation/complete", {"elicitationId": pending.elicitation_id}
+        )
 
 
 def reset() -> None:
@@ -165,16 +201,14 @@ def reset() -> None:
 # ── presenting the URL to a caller ─────────────────────────────────────
 
 
-def supports_url_elicitation(session: ServerSession | None) -> bool:
-    """True when the client declared URL-mode elicitation in ``initialize``."""
-    params = session.client_params if session is not None else None
-    if params is None:
-        return False
-    elicitation = params.capabilities.elicitation
+def supports_url_elicitation(connection: Connection) -> bool:
+    """True when the client declared URL-mode elicitation."""
+    capabilities = connection.client_capabilities
+    elicitation = capabilities.elicitation if capabilities is not None else None
     return elicitation is not None and elicitation.url is not None
 
 
-def prompt_error(pending: PendingAuthorization, session: ServerSession | None) -> Exception:
+def prompt_error(pending: PendingAuthorization, connection: Connection | None) -> Exception:
     """The error a tool call routed to *pending*'s server fails with.
 
     A client that supports URL elicitation gets ``-32042`` with the URL (shown
@@ -187,22 +221,24 @@ def prompt_error(pending: PendingAuthorization, session: ServerSession | None) -
             f"Server '{pending.server}' is waiting for authorization in a browser on "
             "the combiner host; retry once it is complete."
         )
-    if session is not None and supports_url_elicitation(session):
-        pending.notified.add(session)
+    if connection is not None and supports_url_elicitation(connection):
+        pending.notified.add(connection)
         return UrlElicitationRequiredError(
             [
                 ElicitRequestURLParams(
                     mode="url",
                     message=pending.message(),
                     url=pending.url,
-                    elicitationId=pending.elicitation_id,
+                    elicitation_id=pending.elicitation_id,
                 )
             ],
             message=f"Authorization required for '{pending.server}'",
         )
+    # The short link, bare: a markdown link renders without being clickable
+    # in some hosts, and the full URL is too long to survive wrapping.
     return ToolError(
-        f"Server '{pending.server}' needs authorization. Open this link to authorize, "
-        f"then retry: {pending.url}"
+        f"Server '{pending.server}' needs authorization. Open {short_link(pending)} "
+        "to authorize, then retry."
     )
 
 

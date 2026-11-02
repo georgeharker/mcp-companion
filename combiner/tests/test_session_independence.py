@@ -11,8 +11,9 @@ NOTE (QUESTIONS.md Q1 — RESOLVED for filters): the token-keyed filter store
 is canonical and enforcement reads through ``ctx.session_id → token → store``
 at request time, so /sessions/token/<t>/filter and the session meta-tools
 apply live, before or after the chat connects. The one residual namespace
-split — the /sessions LISTING reporting Context ids while the token map holds
-wire ids — keeps its strict xfail below and flips loudly if unified.
+split — the /sessions LISTING reporting Context ids while the token map held
+wire ids — closed with fastmcp 4 / mcp 2, where ``Context.session_id`` IS the
+wire ``mcp-session-id`` (the Connection's); the listing test below now pins it.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from conftest import (
     CombinerHandle,
@@ -36,15 +37,9 @@ from fakes import content_text, json_object
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
-pytestmark = pytest.mark.e2e
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
-xfail_session_namespace_split = pytest.mark.xfail(
-    strict=True,
-    reason="Q1 residual: the /sessions LISTING reports Context.session_id while "
-    "the token map records the wire mcp-session-id — the two id namespaces are "
-    "not joinable for display (filters are unaffected: enforcement reads through "
-    "the token store)",
-)
+pytestmark = pytest.mark.e2e
 
 _SPEC = [
     {"name": "greet", "params": {"who": "string"}, "response_template": "Hello, {who}!"},
@@ -57,12 +52,13 @@ def _token() -> str:
 
 def _header_client(combiner: CombinerHandle, token: str) -> Client[Any]:
     return Client(
-        StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token})
+        StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token}),
+        mode=CLIENT_CONNECT_MODE,
     )
 
 
 def _url_client(combiner: CombinerHandle, token: str) -> Client[Any]:
-    return Client(f"{combiner.mcp_url}/{token}")
+    return Client(f"{combiner.mcp_url}/{token}", mode=CLIENT_CONNECT_MODE)
 
 
 async def _text(client: Client[Any], tool: str, args: dict[str, Any]) -> str:
@@ -73,7 +69,7 @@ async def _text(client: Client[Any], tool: str, args: dict[str, Any]) -> str:
 async def _rest(
     combiner: CombinerHandle, method: str, path: str, body: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    async with httpx.AsyncClient() as http:
+    async with httpx2.AsyncClient() as http:
         r = await http.request(method, f"{combiner.base_url}{path}", json=body, timeout=5.0)
         r.raise_for_status()
         return json_object(r.text)
@@ -137,12 +133,12 @@ class TestTokenSessionMapping:
                 out = await _rest(combiner, "GET", f"/sessions/token/{tok}")
                 assert out["session_id"], f"token {tok} not mapped"
 
-    @xfail_session_namespace_split
     async def test_token_sessions_appear_in_sessions_listing(
         self, procs: ProcFactory, tmp_path: Path
     ) -> None:
-        """The session ids reported for tokens should be joinable against the
-        /sessions listing (currently: hex HTTP ids vs dashed Context ids)."""
+        """The session ids reported for tokens are joinable against the
+        /sessions listing: both are the wire mcp-session-id (Q1 residual,
+        closed by fastmcp 4)."""
         combiner = await _start_stdio_combiner(procs, tmp_path)
         tok = _token()
         async with _header_client(combiner, tok) as c:
@@ -226,7 +222,9 @@ class TestControlChannelFilters:
         combiner = await _start_stdio_combiner(procs, tmp_path)
         tok = _token()
         async with (
-            Client(combiner.mcp_url) as control,  # tokenless control channel
+            Client(
+                combiner.mcp_url, mode=CLIENT_CONNECT_MODE
+            ) as control,  # tokenless control channel
             _header_client(combiner, tok) as chat,
         ):
             assert await _text(chat, "mockup_greet", {"who": "x"}) == "Hello, x!"
@@ -247,7 +245,7 @@ class TestControlChannelFilters:
         combiner = await _start_stdio_combiner(procs, tmp_path)
         tok = _token()
         async with (
-            Client(combiner.mcp_url) as control,
+            Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as control,
             _header_client(combiner, tok) as chat,
         ):
             assert await _text(chat, "mockup_greet", {"who": "x"}) == "Hello, x!"

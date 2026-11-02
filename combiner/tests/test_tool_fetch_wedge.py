@@ -25,7 +25,7 @@ from fastmcp.server.middleware import CallNext, MiddlewareContext
 from fastmcp.tools import Tool
 
 import mcp_combiner.server as srv
-from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE, RUNTIME
 
 # Small bounds so tests exercise the timeouts quickly.
 _FETCH_TIMEOUT = 0.05
@@ -124,7 +124,7 @@ class TestBoundedListProvider:
         mount_server_provider(combiner, child, "mockup")
         tools = await combiner.list_tools()
         assert [t.name for t in tools] == ["mockup_mock_whoami"]
-        async with Client(combiner) as c:
+        async with Client(combiner, mode=CLIENT_CONNECT_MODE) as c:
             result = await c.call_tool("mockup_mock_whoami", {})
             assert result.content[0].model_dump_json() is not None
 

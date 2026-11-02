@@ -317,7 +317,7 @@ class MockTool(Tool):
             try:
                 result = await ctx.session.elicit(
                     message=spec.elicit["message"],
-                    requestedSchema=spec.elicit["requested_schema"],
+                    requested_schema=spec.elicit["requested_schema"],
                     related_request_id=ctx.request_id,
                 )
                 payload: dict[str, Any] = {"action": result.action, "tool": spec.name}
@@ -422,7 +422,7 @@ class MockServer:
     def _add(self, spec: ToolSpec) -> None:
         tool = MockTool.from_spec(spec, self.state)
         if spec.name in self._tools:
-            self.mcp.remove_tool(spec.name)
+            self.mcp.local_provider.remove_tool(spec.name)
         self.mcp.add_tool(tool)
         self._tools[spec.name] = tool
 
@@ -433,7 +433,7 @@ class MockServer:
     async def remove_tool(self, name: str) -> bool:
         if name not in self._tools:
             return False
-        self.mcp.remove_tool(name)
+        self.mcp.local_provider.remove_tool(name)
         del self._tools[name]
         await self.state.notify_tools_changed()
         return True
@@ -563,7 +563,7 @@ class MockServer:
             try:
                 result = await ctx.session.elicit(
                     message="Deploy confirmation — answer each field",
-                    requestedSchema=_ELICIT_FORM_SCHEMA,
+                    requested_schema=_ELICIT_FORM_SCHEMA,
                     related_request_id=ctx.request_id,
                 )
                 payload: dict[str, Any] = {
@@ -1100,6 +1100,27 @@ class MockOAuthProvider:
             if state := params.get("state"):
                 location += f"&state={state}"
             return _RedirectResponse(location, status_code=302)
+
+        @mcp.custom_route("/control/oauth/revoke", methods=["POST"])
+        async def revoke(request: Request) -> JSONResponse:
+            """Force re-authorization: invalidate every access + refresh token
+            (the next /mcp request 401s and refresh fails). ``?clients=1``
+            also forgets client registrations, forcing a fresh DCR."""
+            from starlette.responses import JSONResponse as _JSONResponse
+
+            revoked = {
+                "access_tokens": len(self.valid_access_tokens),
+                "refresh_tokens": len(self.valid_refresh_tokens),
+                "pending_codes": len(self.pending_codes),
+                "clients": 0,
+            }
+            self.valid_access_tokens.clear()
+            self.valid_refresh_tokens.clear()
+            self.pending_codes.clear()
+            if request.query_params.get("clients") in ("1", "true"):
+                revoked["clients"] = len(self.registered_clients)
+                self.registered_clients.clear()
+            return _JSONResponse({"revoked": revoked})
 
         @mcp.custom_route("/oauth/token", methods=["POST"])
         async def token(request: Request) -> JSONResponse:

@@ -24,9 +24,54 @@ tagged `vX.Y.Z`.
   `elicit` without `public_url` warns at load (the loopback redirect only
   completes on the combiner host). Links expire after 15 minutes and the next
   call issues a fresh one. The browser is not opened on hosts without one
-  (containers, Linux without a display).
+  (containers, Linux without a display). Clients without URL elicitation get
+  a short link on the combiner (`/oauth/authorize/<id>`, redirecting to the
+  full ~400-character authorization URL) that fits on one line and stays
+  clickable in terminals.
+- The mock OAuth server (`mcp_combiner.mockserver --oauth`) gains
+  `POST /control/oauth/revoke` (`?clients=1` also forgets registrations), to
+  force re-authorization when testing.
+
+### Changed
+
+- **Built on fastmcp 4 / mcp 2** (was fastmcp 3 / mcp 1.26); the HTTP client
+  is now `httpx2`, a direct dependency. The combiner stays on the stateful
+  protocol: every client it opens (upstream connections, isolated sessions,
+  the ctl and widget host) uses the `initialize` handshake, so upstream
+  `Mcp-Session-Id` continuity, isolation, resume and handover behave as
+  before. Today's clients (Claude Code, OpenCode, Pi) use the handshake too.
+  A client on the new 2026-07-28 protocol revision would be served
+  statelessly by mcp 2, without `tools/list_changed` or other pushes.
+- Downstream HTTP sessions never expire from inactivity (mcp 2's default is
+  30 minutes; chats routinely idle longer, and the combiner's isolation
+  lifecycle owns chat expiry).
+- **Schema validation of proxied calls is the combiner's own**, since fastmcp
+  4 / mcp 2 validate neither direction for proxied tools. Input validation is
+  now **on by default**: a call whose arguments don't match the published
+  schema is refused without an upstream round trip (`required` names the
+  schema's own properties never declare are ignored). Output validation is
+  now **off by default**: results are relayed and the end client validates
+  what it consumes. `validation.input` / `validation.output` and
+  `--[no-]input-validation` / `--[no-]output-validation` override both.
+- Upstream tool schemas the MCP wire format rejects (a property given as
+  `[]`, a non-object root, non-string `required` entries) are repaired before
+  mcp 2's client validates the listing, which would otherwise drop the
+  server's entire tool list; the combiner applies the same repair to what it
+  publishes, since mcp 2 also refuses to send them.
+- The `/sessions` listing and the token routes now report the same session
+  ids (the wire `Mcp-Session-Id`), closing the last part of QUESTIONS.md Q1.
+- The combiner's HTTP clients accept server-sent events up to 64 MiB
+  (fastmcp 4 defaults to 1 MiB, which a combined `tools/list` across many
+  servers exceeds — `mcp-combiner tools` / `restart-server` failed).
 
 ### Fixed
+
+- A completed out-of-band authorization now reconnects the server even when
+  the reconnect uses a different OAuth provider object than the one that
+  issued the link: providers re-read the shared token store first. Before,
+  the reconnect saw no tokens and issued a second link.
+- A server whose tokens were revoked mid-chat now hands the next call a fresh
+  authorization link instead of failing with "Connection closed".
 
 - An OAuth failure while opening an upstream connection is now recognised as
   an auth failure (the server parks in `auth_failed`) even though fastmcp

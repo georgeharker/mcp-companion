@@ -24,10 +24,12 @@ import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from conftest import free_port
 from fastmcp import Client
+
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 
 def _content_text(content: object) -> str:
@@ -61,7 +63,7 @@ pytestmark = [
 
 async def _poll_health(timeout: float = 20.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
-    async with httpx.AsyncClient() as http:
+    async with httpx2.AsyncClient() as http:
         while asyncio.get_running_loop().time() < deadline:
             try:
                 r = await http.get(f"http://127.0.0.1:{_PORT}/health", timeout=1.0)
@@ -178,7 +180,7 @@ async def test_tokenless_client_must_name_instance() -> None:
         stderr=subprocess.DEVNULL,
     )
     try:
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             deadline = asyncio.get_running_loop().time() + 20
             while asyncio.get_running_loop().time() < deadline:
                 try:
@@ -195,7 +197,9 @@ async def test_tokenless_client_must_name_instance() -> None:
                 json={"instance_id": "solo", "socket": sock},
             )
 
-        async with Client(f"http://127.0.0.1:{port}/mcp/{token}") as client:
+        async with Client(
+            f"http://127.0.0.1:{port}/mcp/{token}", mode=CLIENT_CONNECT_MODE
+        ) as client:
             names: set[str] = set()
             for _ in range(20):
                 names = {t.name for t in await client.list_tools()}
@@ -236,7 +240,7 @@ async def test_tokenless_client_must_name_instance() -> None:
 async def test_agent_calls_neovim_tool_through_combiner(combiner_and_nvim: None) -> None:
     url = f"http://127.0.0.1:{_PORT}/mcp/{_TOKEN}"
 
-    async with Client(url) as client:
+    async with Client(url, mode=CLIENT_CONNECT_MODE) as client:
         # Channel registration is async on the Neovim side; poll until the
         # virtual neovim tools surface for this (now token-bound) session.
         names: set[str] = set()

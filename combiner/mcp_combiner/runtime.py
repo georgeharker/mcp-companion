@@ -9,9 +9,9 @@ extracted from server.py take the runtime directly.
 Layout mirrors the state's two concerns:
 
 - ``SessionRegistry`` — everything keyed by/about downstream client sessions.
-  NOTE (QUESTIONS.md Q1): ``token_sessions`` values are currently the wire
-  ``mcp-session-id`` while filtering reads ``Context.session_id`` keys in
-  ``disabled`` — two namespaces. Preserved as-is; do not "fix" in passing.
+  ``token_sessions`` values are the wire ``mcp-session-id``; since fastmcp 4
+  that is also what ``Context.session_id`` (the ``disabled`` keys) reports for
+  HTTP sessions, so the two namespaces of QUESTIONS.md Q1 coincide.
 - ``ToolCacheState`` — the tools/list cache, per-server last-known-good
   hysteresis slices, started→ready tracking for local (stdio/sharedserver)
   servers, and lazy failure bookkeeping.
@@ -26,6 +26,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mcp.server.connection import Connection
+
 if TYPE_CHECKING:
     from fastmcp import FastMCP
     from fastmcp.tools import Tool
@@ -37,6 +39,42 @@ if TYPE_CHECKING:
     from mcp_combiner.ui_host import UiHost
 
 
+#: Protocol era every client the combiner opens speaks (fastmcp 4 ``Client(mode=)``):
+#: the initialize handshake. Persistent connections, isolation, resume and
+#: handover all depend on a stateful upstream session (``Mcp-Session-Id``);
+#: fastmcp's default ``"auto"`` would negotiate the stateless 2026-07-28 era
+#: with any upstream that offers it.
+CLIENT_CONNECT_MODE = "legacy"
+
+#: Largest single server-sent event the combiner's HTTP clients accept. fastmcp
+#: 4 defaults to 1 MiB, which a combined tools/list across many servers (or a
+#: large upstream's own list) exceeds — the whole response then fails. Still a
+#: bound, so a runaway stream can't exhaust memory.
+MAX_SSE_EVENT_BYTES = 64 * 1024 * 1024
+
+
+def downstream_connection(session: ServerSession) -> Connection | None:
+    """The per-client ``Connection`` behind a request's ``ServerSession``.
+
+    mcp 2 builds a fresh ``ServerSession`` for every inbound request; the
+    object that lives as long as the client's session (and carries its
+    ``exit_stack``, capabilities and standalone notification channel) is the
+    ``Connection``. fastmcp's request context only exposes the session, and
+    fastmcp itself reaches the connection the same way (``Context.session_id``)
+    — this is the single place the combiner does so.
+    """
+    connection = getattr(session, "_connection", None)
+    return connection if isinstance(connection, Connection) else None
+
+
+def connection_session_id(connection: Connection) -> str | None:
+    """The id fastmcp's ``Context.session_id`` reports for *connection*."""
+    cached = connection.state.get("_fastmcp_state_prefix")
+    if isinstance(cached, str):
+        return cached
+    return connection.session_id
+
+
 @dataclass
 class SessionRegistry:
     """Downstream (client ↔ combiner) session state.
@@ -46,29 +84,30 @@ class SessionRegistry:
     this class should mutate them directly.
     """
 
-    # Weak refs to all active ServerSessions; populated per request by
+    # Weak refs to every live downstream Connection (one per client session;
+    # see downstream_connection); populated per request by
     # ToolProcessingMiddleware, auto-pruned on GC.
-    active: weakref.WeakSet[ServerSession] = field(default_factory=weakref.WeakSet)
+    active: weakref.WeakSet[Connection] = field(default_factory=weakref.WeakSet)
     # Per-session server blocklist: session id -> disabled server names.
     disabled: dict[str, set[str]] = field(default_factory=dict)
     # Per-session elicitation grants ("Allow for session"): session id ->
     # set of "<server>/<local_tool>" keys the user approved for the session.
     granted: dict[str, set[str]] = field(default_factory=dict)
-    # Chat token -> combiner session id (see Q1 namespace caveat above).
+    # Chat token -> the chat's wire mcp-session-id (== Context.session_id).
     token_sessions: dict[str, str] = field(default_factory=dict)
     # Filters stored for a token before its client has connected.
     pending_token_filters: dict[str, set[str]] = field(default_factory=dict)
 
     # -- active sessions --------------------------------------------------
 
-    def track(self, session: ServerSession) -> bool:
-        """Record a live session; returns True the first time it is seen."""
-        is_new = session not in self.active
-        self.active.add(session)
+    def track(self, connection: Connection) -> bool:
+        """Record a live connection; returns True the first time it is seen."""
+        is_new = connection not in self.active
+        self.active.add(connection)
         return is_new
 
-    def sessions(self) -> list[ServerSession]:
-        """Snapshot of the live sessions (safe to iterate)."""
+    def connections(self) -> list[Connection]:
+        """Snapshot of the live downstream connections (safe to iterate)."""
         return list(self.active)
 
     # -- per-session blocklist ---------------------------------------------
@@ -231,6 +270,9 @@ class ToolCacheState:
     # The combined tools/list cache and when it was filled.
     cache: list[Tool] | None = None
     cache_time: float = 0.0
+    # Name index over ``cache`` (rebuilt when the cache list is replaced).
+    _index: dict[str, Tool] = field(default_factory=dict, repr=False)
+    _indexed: list[Tool] | None = field(default=None, repr=False)
     # Per-server last-known-good slices + when each was last seen live
     # (the stale-tool hysteresis that stops cross-server flapping).
     # Presence in server_tools is the validity bit: an entry exists iff a REAL
@@ -272,6 +314,17 @@ class ToolCacheState:
             return False
         self.set_cache(tools, now)
         return True
+
+    def published(self, name: str) -> Tool | None:
+        """The tool *name* as last published to clients (post schema fixes),
+        or ``None`` when it isn't in the current cache."""
+        cache = self.cache
+        if cache is None:
+            return None
+        if self._indexed is not cache:
+            self._index = {tool.name: tool for tool in cache}
+            self._indexed = cache
+        return self._index.get(name)
 
     def clear_cache(self) -> None:
         self.cache = None
@@ -333,11 +386,18 @@ class CombinerRuntime:
     # clients must present it on every call to /mcp/<token> — the middleware
     # treats loopback traffic exactly like any other client.
     inbound_auth_token: str | None = None
+    # The combiner's own loopback base URL (http://127.0.0.1:<port>), set by
+    # create_app — where locally-opened links (OAuth short links) point.
+    local_origin: str | None = None
     conn_manager: ConnectionManager | None = None
     proc_manager: BackingProcessManager | None = None
 
     # Enabled schema fixes (frozen at server creation).
     schema_fixes: frozenset[str] = frozenset()
+    # Schema gates for proxied tool calls (see fastvalidate; set at server
+    # creation from --input-validation / the "validation" block).
+    input_validation: bool = True
+    output_validation: bool = False
 
     # Unique per-process id surfaced via /health; a change signals a combiner
     # restart so clients re-register instances and token bindings.

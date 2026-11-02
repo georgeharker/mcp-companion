@@ -10,12 +10,9 @@ from contextlib import asynccontextmanager
 from typing import Any, Literal, overload
 
 from fastmcp import FastMCP
-from fastmcp.server.middleware.error_handling import (
-    ErrorHandlingMiddleware,
-    RetryMiddleware,
-)
+from fastmcp.server.middleware.error_handling import RetryMiddleware
 from fastmcp.tools import Tool
-from mcp.server.session import ServerSession
+from mcp.server.connection import Connection
 
 from mcp_combiner import nvim_proxy
 from mcp_combiner.backing import BackingProcessManager
@@ -23,7 +20,10 @@ from mcp_combiner.config import (
     CombinerConfig,  # noqa: PLC2701
 )
 from mcp_combiner.connections import ConnectionManager
-from mcp_combiner.middleware import ToolProcessingMiddleware  # noqa: F401 (re-export)
+from mcp_combiner.middleware import (  # noqa: F401 (ToolProcessingMiddleware re-export)
+    ToolErrorPassthroughMiddleware,
+    ToolProcessingMiddleware,
+)
 from mcp_combiner.mounts import mount_server_provider
 from mcp_combiner.proxyfactory import (
     _create_server_proxy as _create_server_proxy,  # noqa: PLC0414 (re-export)
@@ -114,10 +114,10 @@ _server_tool_seen: dict[str, float] = RUNTIME.tools.server_seen
 
 
 # --- Session registry for ToolListChanged notifications ---
-# Weak references to all active ServerSessions connected to this combiner.
+# Weak references to every live downstream Connection (one per client session).
 # Populated by ToolProcessingMiddleware on each request; entries are
 # automatically removed when the session is garbage-collected.
-_active_sessions: weakref.WeakSet[ServerSession] = RUNTIME.sessions.active
+_active_sessions: weakref.WeakSet[Connection] = RUNTIME.sessions.active
 
 # Per-session server blocklist.
 # Maps a session ID string to the set of server names disabled for that session.
@@ -256,30 +256,24 @@ def create_combiner(
     _combiner_config = config  # Store for tool filtering
     RUNTIME.config = config
 
-    # Launch-path gates (--input-validation / MCP_COMBINER_INPUT_VALIDATION and
-    # the output twin) override the config file's "validation" block, which
-    # falls back to the SDK defaults (None). Precedence: flag > env > config
-    # > default — the same ladder the bind host uses.
-    if input_validation is None and config.validation.input is not None:
+    # Schema gates for proxied tool calls (ToolProcessingMiddleware, cached
+    # validators in fastvalidate). Launch-path flags (--input-validation /
+    # MCP_COMBINER_INPUT_VALIDATION and the output twin) override the config
+    # file's "validation" block. Precedence: flag > env > config > default —
+    # the same ladder the bind host uses. Defaults: input on (a malformed call
+    # is refused without an upstream round trip), output off (the end client
+    # validates the results it consumes).
+    if input_validation is None:
         input_validation = config.validation.input
-    if output_validation is None and config.validation.output is not None:
+    if output_validation is None:
         output_validation = config.validation.output
-
-    # Replace the MCP SDK's per-call jsonschema.validate (which rebuilds the
-    # validator + re-checks the meta-schema on every tool call) with a cached
-    # validator. Idempotent; cache is cleared on reload via invalidate_tool_cache.
-    from mcp_combiner import fastvalidate
-
-    fastvalidate.install()
-    # Tri-state output-schema validation (None = SDK default, True = force on,
-    # False = force off). The upstream server already validated its structured
-    # output, so forcing it off removes redundant per-call work at the proxy.
-    # Input validation is driven natively via strict_input_validation below.
-    fastvalidate.set_output_validation(output_validation)
-    if input_validation is not None:
-        logger.info("Input validation forced %s", "on" if input_validation else "off")
-    if output_validation is not None:
-        logger.info("Output validation forced %s", "on" if output_validation else "off")
+    RUNTIME.input_validation = True if input_validation is None else input_validation
+    RUNTIME.output_validation = False if output_validation is None else output_validation
+    logger.info(
+        "Schema validation of proxied calls: input %s, output %s",
+        "on" if RUNTIME.input_validation else "off",
+        "on" if RUNTIME.output_validation else "off",
+    )
     # ``--normalize-schema`` is a back-compat alias for the anyof_type_hoist fix.
     RUNTIME.schema_fixes = frozenset(schema_fixes or ()) | (
         frozenset({"anyof_type_hoist"}) if normalize_schemas else frozenset()
@@ -442,15 +436,11 @@ def create_combiner(
             "`combiner__session_enable_server` (this chat only) bring a disabled "
             "server's tools online."
         ),
-        # Tri-state input-schema validation. None → fastmcp's own default
-        # (off — inputs are coerced, not strictly validated); True → force
-        # strict validation on; False → force it off. This is the only switch
-        # that actually gates the SDK's per-call input jsonschema.validate.
-        strict_input_validation=input_validation,
         dereference_schemas=False,  # Disabled: circular $ref causes infinite recursion
         middleware=[
             # Outermost: catch-all safety net for any unhandled exception
-            ErrorHandlingMiddleware(
+            # (tool-visible errors pass through as isError results).
+            ToolErrorPassthroughMiddleware(
                 logger=logger,
                 include_traceback=True,
             ),

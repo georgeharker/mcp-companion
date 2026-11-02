@@ -741,26 +741,28 @@ class ValidationConfig(BaseModel):
 
         "validation": {"input": true}
 
-    Tri-state semantics: ``true`` forces validation on, ``false`` forces it
-    off, a missing key expresses no preference (the fastmcp/SDK default
-    applies). Launch-path flags take precedence: ``--input-validation`` /
-    ``--no-input-validation`` (or their ``MCP_COMBINER_*`` env forms) > the
-    config value > the SDK default.
+    ``true`` turns a gate on, ``false`` off, a missing key keeps the combiner
+    default (input on, output off). Launch-path flags take precedence:
+    ``--input-validation`` / ``--no-input-validation`` (or their
+    ``MCP_COMBINER_*`` env forms) > the config value > the default. The gates
+    run in ``ToolProcessingMiddleware`` (fastmcp 4 / mcp 2 validate neither
+    for proxied tools).
     """
 
     input: bool | None = None
     """Strict JSON-schema validation of tool *call arguments* against the
-    aggregated tool's inputSchema, before forwarding upstream. ``true`` — a
-    mismatched call fails at the combiner (``isError`` "Input validation
-    error: ...", no upstream call). ``False``/missing — inputs pass through
-    and the upstream decides (pydantic-strict servers reject permissively
-    typed calls; permissive ones accept junk keys)."""
+    aggregated tool's inputSchema, before forwarding upstream. On (default) —
+    a mismatched call fails at the combiner (``isError`` "Input validation
+    error: ...", no upstream call). ``required`` names the schema's own
+    ``properties`` never declare are ignored, and a call made before the
+    tool list was ever fetched is not checked (fails open). ``false`` —
+    inputs pass through and the upstream decides."""
 
     output: bool | None = None
-    """Tool *result* validation against a declared outputSchema (tri-state,
-    see fastvalidate). ``false`` is the useful direction: the upstream
-    already validated its structured output, so the proxy re-check is
-    redundant per-call work on large responses."""
+    """Tool *result* validation against a declared outputSchema. Off
+    (default): results are relayed and the end client validates what it
+    consumes. ``true`` — a result contradicting the schema becomes an
+    "Output validation error" at the combiner."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ValidationConfig":

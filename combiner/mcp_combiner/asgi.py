@@ -57,8 +57,8 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,199}$")
 # token attempt (shorter or unsafe strings fall through untouched and 404).
 _MCP_TOKEN_PATH_RE = re.compile(r"^/mcp/([A-Za-z0-9][A-Za-z0-9._-]{7,199})(/.*)?$")
 
-# NOTE (QUESTIONS.md Q1): token→session mappings recorded here carry the wire
-# mcp-session-id — a different namespace from Context.session_id. Preserved.
+# Token→session mappings recorded here carry the wire mcp-session-id — since
+# fastmcp 4 the same id Context.session_id reports (QUESTIONS.md Q1).
 
 
 def _grace_env_to_float(value: str | None) -> float | None:
@@ -404,6 +404,14 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
 
     # Use streamable HTTP with stateful mode.
     # Stateless mode doesn't support GET for SSE streams, which OpenCode needs.
+    # Downstream sessions never expire from inactivity: a chat routinely sits
+    # idle for hours, and the chat lifecycle (isolation grace/park TTL) is the
+    # combiner's own. mcp 2 defaults to a 30-minute idle timeout; only the
+    # global setting can express "never" (http_app's None means "use the
+    # setting").
+    import fastmcp
+
+    fastmcp.settings.http_session_idle_timeout = None
     app = combiner.http_app(
         path="/mcp",
         stateless_http=False,
@@ -426,4 +434,5 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
     from mcp_combiner.runtime import RUNTIME
 
     RUNTIME.inbound_auth_token = options.auth_token
+    RUNTIME.local_origin = f"http://127.0.0.1:{options.port}"
     return app

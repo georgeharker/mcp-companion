@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import mcp.types
 import pytest
 from conftest import (
@@ -37,6 +37,8 @@ from conftest import (
 from fastmcp import Client
 from fastmcp.client.messages import MessageHandler
 from fastmcp.client.transports import StreamableHttpTransport
+
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 pytestmark = pytest.mark.e2e
 
@@ -73,9 +75,10 @@ def _chat(
     transport = StreamableHttpTransport(
         combiner.mcp_url,
         headers={"X-MCP-Combiner-Session": token},
-        sse_read_timeout=120.0,  # the capture needs a LIVE read stream, not an idle-close
     )
-    return Client(transport, message_handler=cap)
+    # Stateful (handshake) era: the capture needs the standalone GET stream
+    # that carries tools/list_changed.
+    return Client(transport, message_handler=cap, mode=CLIENT_CONNECT_MODE)
 
 
 async def _names(client: Client[Any]) -> set[str]:
@@ -83,7 +86,7 @@ async def _names(client: Client[Any]) -> set[str]:
 
 
 async def _isolated_map(combiner: CombinerHandle) -> dict[str, Any]:
-    async with httpx.AsyncClient() as http:
+    async with httpx2.AsyncClient() as http:
         r = await http.get(f"{combiner.base_url}/sessions/map", timeout=5.0)
         r.raise_for_status()
         return dict(r.json())
@@ -184,7 +187,7 @@ class TestIsolatedFirstCall:
 
         async with _chat(combiner) as c:
             # The FIRST thing this token ever does is a tool call.
-            result = await c.call_tool("mockup_echo", {"text": "one"})
+            result = await c.call_tool("mockup_echo", {"message": "one"})
             assert "one" in _first_text(result)
             state = await _isolated_map(combiner)
             print(f"\n    sessions/map after first call: {state}")
@@ -202,10 +205,10 @@ class TestIsolatedFirstCall:
         await combiner.wait_server_state("mockup", ("ready",))
 
         async with _chat(combiner) as c:
-            await c.call_tool("mockup_echo", {"text": "seed"})
+            await c.call_tool("mockup_echo", {"message": "seed"})
         # clean close → park; now the reopen + immediate call
         async with _chat(combiner) as c2:
-            result = await c2.call_tool("mockup_echo", {"text": "resume"})
+            result = await c2.call_tool("mockup_echo", {"message": "resume"})
             assert "resume" in _first_text(result)
 
 

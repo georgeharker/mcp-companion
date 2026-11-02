@@ -23,6 +23,7 @@ from fakes import content_text
 from fastmcp import Client
 
 from mcp_combiner.resume_transport import ResumableStreamableHttpTransport
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 pytestmark = pytest.mark.e2e
 
@@ -46,13 +47,13 @@ class TestResumeRoundTrip:
         # First connection: normal initialize, but do NOT terminate the
         # upstream session on close (the park/handover shutdown behavior).
         first = ResumableStreamableHttpTransport(mock.mcp_url, terminate_on_close=False)
-        async with Client(first) as c1:
+        async with Client(first, mode=CLIENT_CONNECT_MODE) as c1:
             assert await _greet(c1, "a") == "Hello, a!"
             session_id = first.get_session_id()
             init = c1.initialize_result
             assert session_id, "no upstream session id captured"
             assert init is not None
-            protocol_version = str(init.protocolVersion)
+            protocol_version = str(init.protocol_version)
 
         # Second connection: seeded reattach, no initialize handshake.
         second = ResumableStreamableHttpTransport(
@@ -60,7 +61,7 @@ class TestResumeRoundTrip:
             resume_session_id=session_id,
             resume_protocol_version=protocol_version,
         )
-        async with Client(second, auto_initialize=False) as c2:
+        async with Client(second, auto_initialize=False, mode=CLIENT_CONNECT_MODE) as c2:
             assert await _greet(c2, "b") == "Hello, b!"
 
         stats = await mock.stats()
@@ -82,9 +83,11 @@ class TestResumeRoundTrip:
             mock.mcp_url, resume_session_id="00000000000000000000000000000000"
         )
         with pytest.raises(Exception):
-            async with Client(bogus, auto_initialize=False) as c:
+            async with Client(bogus, auto_initialize=False, mode=CLIENT_CONNECT_MODE) as c:
                 await _greet(c, "x")
 
         # A fresh normal connection still works — the fallback path is open.
-        async with Client(ResumableStreamableHttpTransport(mock.mcp_url)) as c:
+        async with Client(
+            ResumableStreamableHttpTransport(mock.mcp_url), mode=CLIENT_CONNECT_MODE
+        ) as c:
             assert await _greet(c, "y") == "Hello, y!"

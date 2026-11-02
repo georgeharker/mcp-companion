@@ -27,7 +27,7 @@ import mcp.types as mt
 from fastmcp.tools import Tool
 
 from mcp_combiner.runtime import RUNTIME
-from mcp_combiner.schema import normalize_object_schema
+from mcp_combiner.schema import normalize_object_schema, wire_conformant_schema
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -291,7 +291,8 @@ def _normalize_tool_schema(tool: Tool, fixes: frozenset[str]) -> Tool:
 
 def _coerce_object_schemas(tools: Sequence[Tool]) -> list[Tool]:
     """Unconditional final-pass guarantee that every advertised tool's parameter
-    schema is object-shaped — belt-and-braces, independent of the opt-in
+    schema is wire-conformant (object-shaped, schema-valued properties) —
+    belt-and-braces, independent of the opt-in
     ``schema_fixes`` ("clean") path.
 
     A blank / non-object / ``[]``-encoded ``inputSchema`` is never valid and is
@@ -306,11 +307,20 @@ def _coerce_object_schemas(tools: Sequence[Tool]) -> list[Tool]:
     """
     out: list[Tool] = []
     for t in tools:
-        fixed = normalize_object_schema(t.parameters)
-        if fixed == t.parameters:
-            out.append(t)  # already valid — preserve identity/fn, don't rebuild
-        else:
-            out.append(t.model_copy(update={"parameters": fixed}))
+        update: dict[str, Any] = {}
+        # Published input schemas also always carry `properties` (strict
+        # adapters such as Copilot reject an object schema without it).
+        fixed = wire_conformant_schema(normalize_object_schema(t.parameters))
+        if fixed != t.parameters:
+            update["parameters"] = fixed
+        # mcp 2 refuses to SEND a non-conformant outputSchema too, failing the
+        # whole tools/list response — so the output side gets the same net.
+        if t.output_schema is not None:
+            fixed_out = wire_conformant_schema(t.output_schema)
+            if fixed_out is not t.output_schema:
+                update["output_schema"] = fixed_out
+        # Already valid — preserve identity/fn, don't rebuild.
+        out.append(t.model_copy(update=update) if update else t)
     return out
 
 

@@ -19,7 +19,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp>=3.4.2,<4",
+    "fastmcp>=4.1.5,<5",
+    # Imported directly (auth flows, transports, probes); fastmcp 4 / mcp 2
+    # moved from httpx to this fork, and the SDK's auth objects are httpx2 types.
+    "httpx2>=2.16,<3",
     "pynvim>=0.6.0",
 ]
 

@@ -2,7 +2,7 @@
 
 Provides:
 - Encrypted file-based key-value store for persistent OAuth token storage
-- Auth factory: builds the right httpx.Auth for each server config
+- Auth factory: builds the right httpx2.Auth for each server config
 - Uses FastMCP's OAuth client for the full Authorization Code + PKCE flow
 
 Token files are stored under ``token_dir/<server>/`` (default
@@ -28,7 +28,7 @@ from typing import Any, ClassVar
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
 
 import anyio
-import httpx
+import httpx2
 from cryptography.fernet import Fernet
 from fastmcp.client.auth import OAuth
 from fastmcp.client.auth.oauth import ClientNotFoundError
@@ -50,8 +50,9 @@ from mcp.client.auth.utils import (
     create_oauth_metadata_request,
     handle_auth_metadata_response,
     handle_protected_resource_response,
+    validate_authorization_response_iss,
 )
-from mcp.shared.auth import OAuthToken
+from mcp.shared.auth import AuthorizationCodeResult, OAuthToken
 from pydantic import AnyHttpUrl
 
 from mcp_combiner import authprompt
@@ -98,7 +99,7 @@ def _is_network_error(exc: BaseException) -> bool:
     the network is merely temporarily unavailable.
     """
     # httpx transport-level errors (no TCP connection, DNS failure, etc.)
-    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError, httpx.TimeoutException)):
+    if isinstance(exc, (httpx2.ConnectError, httpx2.NetworkError, httpx2.TimeoutException)):
         return True
     # anyio / trio / asyncio transport errors bubble up as ConnectionError
     if isinstance(exc, (ConnectionError, OSError, TimeoutError)):
@@ -205,7 +206,7 @@ def create_encrypted_store(storage_dir: Path) -> AsyncKeyValue:
 _GOOGLE_ACCOUNTS_HOST = "accounts.google.com"
 
 
-def _shared_flow_outcome(result: OAuthCallbackResult) -> tuple[str, str | None]:
+def _shared_flow_outcome(result: OAuthCallbackResult) -> AuthorizationCodeResult:
     """Resolve a flow we waited on (another caller owned the callback server).
 
     The owner sets ``error`` or ``code`` before signalling; a signalled result
@@ -216,7 +217,7 @@ def _shared_flow_outcome(result: OAuthCallbackResult) -> tuple[str, str | None]:
         raise result.error
     if result.code is None:
         raise RuntimeError("OAuth callback finished without an authorization code")
-    return result.code, result.state
+    return AuthorizationCodeResult(code=result.code, state=result.state, iss=result.iss)
 
 
 class _RefreshTokenOAuth(OAuth):
@@ -336,12 +337,17 @@ class _RefreshTokenOAuth(OAuth):
             params["resource"] = ctx.get_resource_url()
         if ctx.client_metadata.scope:
             params["scope"] = ctx.client_metadata.scope
+            # OIDC requires prompt=consent when offline_access is requested.
+            if "offline_access" in ctx.client_metadata.scope.split():
+                params["prompt"] = "consent"
         url = _with_offline_access(f"{auth_endpoint}?{urlencode(params)}")
         await self._preflight_authorization_url(url)
 
         verifier = pkce.code_verifier
 
-        async def exchange(code: str) -> None:
+        async def exchange(code: str, iss: str | None) -> None:
+            # RFC 9207: the redirect's issuer must be the server we sent it to.
+            validate_authorization_response_iss(iss, self.context.oauth_metadata)
             await self._exchange_code(code, verifier)
 
         pending = authprompt.PendingAuthorization(
@@ -422,11 +428,12 @@ class _RefreshTokenOAuth(OAuth):
                 result.code,
                 result.state,
                 str(result.error) if result.error else None,
+                iss=result.iss,
             )
         except Exception as exc:  # noqa: BLE001 — reported, the flow can be retried
             logger.warning("OAuth callback for '%s' failed: %s", self.server_name, exc)
 
-    async def callback_handler(self) -> tuple[str, str | None]:
+    async def callback_handler(self) -> AuthorizationCodeResult:
         """Handle OAuth callback, reusing an existing server if one is active.
 
         The parent implementation starts a new uvicorn callback server on
@@ -477,10 +484,11 @@ class _RefreshTokenOAuth(OAuth):
             return _shared_flow_outcome(res)
 
         try:
-            code, state = await super().callback_handler()
-            result.code = code
-            result.state = state
-            return code, state
+            outcome = await super().callback_handler()
+            result.code = outcome.code
+            result.state = outcome.state
+            result.iss = outcome.iss
+            return outcome
         except Exception as exc:
             result.error = exc
             raise
@@ -489,7 +497,7 @@ class _RefreshTokenOAuth(OAuth):
             async with self._flow_lock:
                 self._active_flows.pop(port, None)
 
-    def _build_refresh_request(self) -> httpx.Request:
+    def _build_refresh_request(self) -> httpx2.Request:
         """Build a token refresh POST request from current context state.
 
         Uses only public ``OAuthContext`` APIs so it carries no dependency on
@@ -516,7 +524,7 @@ class _RefreshTokenOAuth(OAuth):
             data["resource"] = ctx.get_resource_url()
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         data, headers = ctx.prepare_token_auth(data, headers)
-        return httpx.Request("POST", token_url, data=data, headers=headers)
+        return httpx2.Request("POST", token_url, data=data, headers=headers)
 
     async def _proactive_refresh(self) -> _RefreshOutcome:
         """Refresh the access token proactively using the refresh_token.
@@ -568,7 +576,7 @@ class _RefreshTokenOAuth(OAuth):
 
         try:
             refresh_request = self._build_refresh_request()
-            async with httpx.AsyncClient() as http:
+            async with httpx2.AsyncClient() as http:
                 resp = await http.send(refresh_request)
 
             if resp.status_code != 200:
@@ -784,7 +792,7 @@ class _RefreshTokenOAuth(OAuth):
 
         token = ctx.current_tokens.access_token
         try:
-            async with httpx.AsyncClient(timeout=_GOOGLE_PROBE_TIMEOUT_SECONDS) as http:
+            async with httpx2.AsyncClient(timeout=_GOOGLE_PROBE_TIMEOUT_SECONDS) as http:
                 resp = await http.get(
                     probe_url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -870,8 +878,8 @@ class _RefreshTokenOAuth(OAuth):
         # AUTH_ERROR: tokens left as-is so the SDK's inline 401 path can run.
 
     async def async_auth_flow(
-        self, request: httpx.Request
-    ) -> typing.AsyncGenerator[httpx.Request, httpx.Response]:
+        self, request: httpx2.Request
+    ) -> typing.AsyncGenerator[httpx2.Request, httpx2.Response]:
         """Wrap the parent auth flow to persist the absolute token expiry.
 
         Adds a pre-flight refresh (margin + wake-up heuristic) so the SDK's
@@ -1085,7 +1093,7 @@ class _RefreshTokenOAuth(OAuth):
         ctx = self.context
         server_url = str(ctx.server_url)
 
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             # 1. Discover protected resource metadata
             prm_urls = build_protected_resource_metadata_discovery_urls(
                 www_auth_url=None,
@@ -1171,18 +1179,31 @@ def _with_offline_access(authorization_url: str) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 
-class _BearerAuth(httpx.Auth):
+class _BearerAuth(httpx2.Auth):
     """Simple static Bearer token authentication."""
 
     def __init__(self, token: str) -> None:
         self._token = token
 
-    def auth_flow(self, request: httpx.Request) -> Any:
+    def auth_flow(self, request: httpx2.Request) -> Any:
         request.headers["Authorization"] = f"Bearer {self._token}"
         yield request
 
 
-def authorizes_out_of_band(auth: httpx.Auth | None) -> bool:
+def reload_stored_tokens(auth: httpx2.Auth | None) -> None:
+    """Make an OAuth provider re-read its token store on its next request.
+
+    An out-of-band authorization stores tokens through the provider that
+    issued the link. A provider loads its store once, so any other provider
+    for the same server (sharing the store) would keep acting on what it
+    loaded before — no tokens — and start yet another authorization. Called
+    before reconnecting after an authorization completes.
+    """
+    if isinstance(auth, _RefreshTokenOAuth):
+        auth._initialized = False
+
+
+def authorizes_out_of_band(auth: httpx2.Auth | None) -> bool:
     """Whether *auth* is an OAuth provider whose authorization runs detached
     (see :mod:`mcp_combiner.authprompt`) rather than inline in a request."""
     return isinstance(auth, _RefreshTokenOAuth) and auth.detached
@@ -1197,8 +1218,8 @@ def build_auth(
     cache_tokens: bool = True,
     public_url: str | None = None,
     prompt: AuthPrompt | None = None,
-) -> httpx.Auth | None:
-    """Build an ``httpx.Auth`` from a server's auth configuration.
+) -> httpx2.Auth | None:
+    """Build an ``httpx2.Auth`` from a server's auth configuration.
 
     *public_url* and *prompt* are the global ``oauth`` defaults; a server's own
     ``auth.oauth.prompt`` overrides *prompt* (see

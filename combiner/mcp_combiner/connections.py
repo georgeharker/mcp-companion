@@ -38,13 +38,13 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from fastmcp import Client
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.client.transports.sse import SSETransport
 
 from mcp_combiner import authprompt
-from mcp_combiner.auth import authorizes_out_of_band, build_auth
+from mcp_combiner.auth import authorizes_out_of_band, build_auth, reload_stored_tokens
 from mcp_combiner.config import (
     CombinerConfig,
     ServerConfig,
@@ -52,6 +52,8 @@ from mcp_combiner.config import (
     _interpolate_dict,
     _interpolate_str,
 )
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE, MAX_SSE_EVENT_BYTES
+from mcp_combiner.upstream_session import use_tolerant_session
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -155,10 +157,10 @@ class _ManagedConnection:
     srv: ServerConfig
     # Mutable client reference — the factory closure reads client_ref[0]
     client_ref: list[HttpClient | None] = field(default_factory=lambda: [None])
-    # The httpx.Auth for this upstream, built once and reused. Shared with any
+    # The httpx2.Auth for this upstream, built once and reused. Shared with any
     # per-chat isolated proxy (server.py) so the OAuth flow runs once and the
     # token + its refresh are shared rather than duplicated per chat.
-    auth: httpx.Auth | None = field(default=None, repr=False)
+    auth: httpx2.Auth | None = field(default=None, repr=False)
     _auth_built: bool = field(default=False, repr=False)
     # Exit stack that owns the ``async with client:`` context
     stack: AsyncExitStack = field(default_factory=AsyncExitStack)
@@ -313,8 +315,8 @@ class ConnectionManager:
 
         return _factory
 
-    def get_auth(self, name: str) -> httpx.Auth | None:
-        """Return the (cached) ``httpx.Auth`` for *name*, building it once.
+    def get_auth(self, name: str) -> httpx2.Auth | None:
+        """Return the (cached) ``httpx2.Auth`` for *name*, building it once.
 
         Shared between the persistent "primer" connection and any per-chat
         isolated proxy created in ``server.py``, so the OAuth flow runs exactly
@@ -440,6 +442,7 @@ class ConnectionManager:
         client = conn.client_ref[0]
         if client is not None and client.is_connected():
             return
+        reload_stored_tokens(conn.auth)
         self.reset_auth_failure(name)
         await self._connect_bounded(conn)
 
@@ -964,7 +967,7 @@ def _is_auth_error(exc: BaseException) -> bool:
     """Return True if *exc* is an OAuth / authentication failure.
 
     Checks concrete exception types from the MCP SDK and FastMCP rather than
-    fragile substring matching.  Falls back to ``httpx.HTTPStatusError`` with
+    fragile substring matching.  Falls back to ``httpx2.HTTPStatusError`` with
     a 401/403 status code for transport-level auth rejections.
 
     Walks the explicit cause chain: fastmcp's ``Client`` re-raises a connect
@@ -982,7 +985,7 @@ def _is_auth_error(exc: BaseException) -> bool:
         seen.add(id(current))
         if isinstance(current, (OAuthFlowError, ClientNotFoundError)):
             return True
-        if isinstance(current, httpx.HTTPStatusError):
+        if isinstance(current, httpx2.HTTPStatusError):
             return current.response.status_code in (401, 403)
         current = current.__cause__
     return False
@@ -1000,7 +1003,7 @@ def build_http_transport(srv: ServerConfig) -> StreamableHttpTransport | SSETran
     headers: dict[str, str] = _interpolate_dict(srv.headers) if srv.headers else {}
     if srv.transport == Transport.SSE:
         return SSETransport(url=url, headers=headers)
-    return StreamableHttpTransport(url=url, headers=headers)
+    return StreamableHttpTransport(url=url, headers=headers, max_sse_event_size=MAX_SSE_EVENT_BYTES)
 
 
 def _hard_kill_session(conn: "_ManagedConnection") -> None:
@@ -1017,11 +1020,11 @@ def _make_disconnected_client(
     config: CombinerConfig,
     name: str,
     srv: ServerConfig,
-    auth: httpx.Auth | None = None,
+    auth: httpx2.Auth | None = None,
 ) -> HttpClient:
     """Create a disconnected ``Client`` for the given HTTP/SSE server.
 
-    Ensures that both ``auth`` (``httpx.Auth``) and static ``headers`` from
+    Ensures that both ``auth`` (``httpx2.Auth``) and static ``headers`` from
     the server config are applied.  The ``headers`` field is how servers like
     GitHub Copilot MCP receive their Bearer token when ``auth`` is not set.
 
@@ -1050,6 +1053,7 @@ def _make_disconnected_client(
     # updates broadcast (target=None); see mcp_combiner.notifications.
     from mcp_combiner.notifications import attach_resource_forwarding
 
-    client = Client(transport, auth=auth) if auth is not None else Client(transport)
+    client = Client(transport, auth=auth, mode=CLIENT_CONNECT_MODE)
+    use_tolerant_session(client)
     attach_resource_forwarding(client, name)
     return client

@@ -5,10 +5,10 @@ sessions and manage per-session server filters by session id or chat token —
 without being the session owner. Handlers moved verbatim from
 create_combiner; ``register_routes`` re-attaches them.
 
-NOTE (QUESTIONS.md Q1): the token routes resolve tokens through
-``RUNTIME.sessions.token_sessions``, whose values are wire ``mcp-session-id``s
-— a different namespace from the ``Context.session_id`` keys the filtering
-middleware reads. Preserved as-is pending discussion.
+The token routes resolve tokens through ``RUNTIME.sessions.token_sessions``,
+whose values are wire ``mcp-session-id``s — since fastmcp 4 the same ids
+``Context.session_id`` (and so the ``/sessions`` listing) reports
+(QUESTIONS.md Q1).
 """
 
 from __future__ import annotations
@@ -20,12 +20,12 @@ from typing import Any
 
 from fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from mcp_combiner import authprompt
 from mcp_combiner.config import CombinerConfig, HealthResponse, ServerStatusInfo
 from mcp_combiner.connections import ConnectionManager
-from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.runtime import RUNTIME, connection_session_id
 from mcp_combiner.status import build_server_status
 from mcp_combiner.toolcache import _notify_session_by_id
 
@@ -74,13 +74,31 @@ def register_routes(
     # by design — outside the inbound-bearer surface (combiner_protected_path)
     # — because the browser carries no bearer; the OAuth ``state`` binds the
     # redirect to the pending authorization it answers (authprompt.complete).
+    # Short authorization links (authprompt.short_link): redirect to the real,
+    # very long authorization URL. Open for the same reason as the callback;
+    # the elicitation id is the secret.
+    @combiner.custom_route("/oauth/authorize/{elicitation_id}", methods=["GET"])
+    async def oauth_authorize(request: Request) -> Response:
+        pending = authprompt.pending_by_elicitation(request.path_params["elicitation_id"])
+        if pending is None:
+            return _callback_page(
+                "This authorization link has expired or was already used. "
+                "Retry the tool call for a fresh one.",
+                status=404,
+            )
+        return RedirectResponse(pending.url, status_code=302)
+
     @combiner.custom_route("/oauth/callback/{server}", methods=["GET"])
     async def oauth_callback(request: Request) -> HTMLResponse:
         server = request.path_params["server"]
         query = request.query_params
         try:
             await authprompt.complete(
-                server, query.get("code"), query.get("state"), query.get("error")
+                server,
+                query.get("code"),
+                query.get("state"),
+                query.get("error"),
+                iss=query.get("iss"),
             )
         except authprompt.CallbackRejected as exc:
             return _callback_page(f"Authorization failed: {exc}", status=400)
@@ -170,24 +188,14 @@ def register_routes(
     async def list_sessions(request: Request) -> JSONResponse:
         """List active MCP sessions with their IDs, client info, and filter state."""
         sessions_out: list[dict[str, Any]] = []
-        for sess in RUNTIME.sessions.sessions():
-            try:
-                sid = getattr(sess, "_fastmcp_state_prefix", None) or str(id(sess))
-            except AttributeError:
-                sid = str(id(sess))
+        for connection in RUNTIME.sessions.connections():
+            sid = connection_session_id(connection) or str(id(connection))
             blocked = RUNTIME.sessions.disabled.get(sid, set())
             # Extract client info from the MCP initialize handshake
             client_info: dict[str, Any] | None = None
-            try:
-                cp = getattr(sess, "client_params", None)
-                ci = getattr(cp, "clientInfo", None) if cp else None
-                if ci:
-                    client_info = {
-                        "name": getattr(ci, "name", None),
-                        "version": getattr(ci, "version", None),
-                    }
-            except Exception:
-                pass
+            cp = connection.client_params
+            if cp is not None and cp.client_info is not None:
+                client_info = {"name": cp.client_info.name, "version": cp.client_info.version}
             entry: dict[str, Any] = {
                 "session_id": sid,
                 "disabled_servers": sorted(blocked),

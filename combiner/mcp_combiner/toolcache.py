@@ -29,7 +29,7 @@ from typing import Any
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
 
-from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.runtime import RUNTIME, connection_session_id
 from mcp_combiner.schemafix import _sanitize_tools
 
 logger = logging.getLogger("mcp-combiner")
@@ -77,26 +77,25 @@ async def _notify_tool_list_changed() -> None:
     Exceptions from individual sessions (e.g. client already disconnected)
     are logged and swallowed so one bad session never blocks the rest.
     """
-    sessions = RUNTIME.sessions.sessions()
-    if not sessions:
+    connections = RUNTIME.sessions.connections()
+    if not connections:
         logger.debug("No active sessions to notify of tool list change")
         return
 
-    logger.info("Notifying %d active session(s) of tool list change", len(sessions))
-    for session in sessions:
+    logger.info("Notifying %d active session(s) of tool list change", len(connections))
+    for connection in connections:
         try:
-            await session.send_tool_list_changed()
+            await connection.send_tool_list_changed()
         except Exception:
             logger.debug("Failed to notify session of tool list change", exc_info=True)
 
 
 async def _notify_session_by_id(session_id: str) -> None:
     """Send ``notifications/tools/list_changed`` to a specific session by ID."""
-    for session in RUNTIME.sessions.sessions():
+    for connection in RUNTIME.sessions.connections():
         try:
-            sid = getattr(session, "_fastmcp_state_prefix", None) or str(id(session))
-            if sid == session_id:
-                await session.send_tool_list_changed()
+            if connection_session_id(connection) == session_id:
+                await connection.send_tool_list_changed()
                 return
         except Exception:
             logger.debug("Failed to notify session %s", session_id, exc_info=True)

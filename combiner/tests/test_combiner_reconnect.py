@@ -16,7 +16,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from conftest import (
     FAST_TIMING_ENV,
@@ -32,6 +32,8 @@ from conftest import (
 )
 from fakes import content_text
 from fastmcp import Client
+
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 pytestmark = pytest.mark.e2e
 
@@ -57,7 +59,7 @@ class TestCombinerRestartReattach:
 
         combiner = await procs.start_combiner(cfg, env=FAST_TIMING_ENV)
         await combiner.wait_server_state("mockup", ("ready",))
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "mockup_greet", {"who": "one"}) == "Hello, one!"
 
         # Bounce the combiner; reuse the same port (the Lua plugin's restart
@@ -67,7 +69,7 @@ class TestCombinerRestartReattach:
         combiner2 = await procs.start_combiner(cfg, port=combiner.port, env=FAST_TIMING_ENV)
         await combiner2.wait_server_state("mockup", ("ready",))
 
-        async with Client(combiner2.mcp_url) as c:
+        async with Client(combiner2.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "mockup_greet", {"who": "two"}) == "Hello, two!"
 
         # The upstream never restarted.
@@ -101,10 +103,10 @@ class TestCombinerRestartReattach:
 
         combiner = await procs.start_combiner(cfg, env=FAST_TIMING_ENV)
         await combiner.wait_server_state("mockup", ("ready",), timeout=60.0)
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "mockup_greet", {"who": "one"}) == "Hello, one!"
 
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             first = (await http.get(f"http://127.0.0.1:{port}/stats", timeout=2.0)).json()
 
         combiner.terminate()
@@ -112,10 +114,10 @@ class TestCombinerRestartReattach:
         combiner2 = await procs.start_combiner(cfg, port=combiner.port, env=FAST_TIMING_ENV)
         await combiner2.wait_server_state("mockup", ("ready",), timeout=60.0)
 
-        async with Client(combiner2.mcp_url) as c:
+        async with Client(combiner2.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "mockup_greet", {"who": "two"}) == "Hello, two!"
 
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             second = (await http.get(f"http://127.0.0.1:{port}/stats", timeout=2.0)).json()
 
         # Same long-lived process across the combiner bounce.
@@ -137,7 +139,7 @@ class TestCombinerRestartReattach:
         combiner = await procs.start_combiner(cfg)
 
         # Establish a session and capture its id.
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             init = await http.post(
                 combiner.mcp_url,
                 json={
@@ -164,7 +166,7 @@ class TestCombinerRestartReattach:
         await asyncio.sleep(1.0)
         combiner2 = await procs.start_combiner(cfg, port=combiner.port)
 
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             # Stale session id → prompt, clean 4xx (not a hang, not a 200).
             stale = await http.post(
                 combiner2.mcp_url,
@@ -179,6 +181,6 @@ class TestCombinerRestartReattach:
             assert 400 <= stale.status_code < 500
 
         # A fresh client works immediately.
-        async with Client(combiner2.mcp_url) as c:
+        async with Client(combiner2.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             tools = await c.list_tools()
             assert any(t.name.startswith("combiner__") for t in tools)

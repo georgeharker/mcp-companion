@@ -132,10 +132,9 @@ def _add_serve_args(parser: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Tri-state JSON-schema validation of tool *input* arguments. "
-            "--input-validation forces it on; --no-input-validation forces it "
-            "off; omit to leave the combiner default (off — inputs are coerced, "
-            "not strictly validated)."
+            "JSON-schema validation of proxied tool-call arguments at the "
+            "combiner (a malformed call is refused without an upstream round "
+            "trip). Default on; --no-input-validation turns it off."
         ),
     )
     parser.add_argument(
@@ -144,12 +143,9 @@ def _add_serve_args(parser: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Tri-state JSON-schema validation of tool *output*. "
-            "--no-output-validation forces it off (the upstream server already "
-            "validated its structured output, so re-validating here is redundant "
-            "per-call work — measurably slow for large responses); "
-            "--output-validation forces it on; omit to leave the default (on for "
-            "tools that declare an outputSchema)."
+            "JSON-schema validation of proxied tools' structured output against "
+            "their declared outputSchema. Default off (the end client validates "
+            "what it consumes); --output-validation turns it on."
         ),
     )
     parser.add_argument(
@@ -254,7 +250,7 @@ def _setup_logging(log_level: str, log_file: str | None) -> None:
 
     # At DEBUG, also turn on the SDK loggers that carry the OAuth flow detail.
     if level <= logging.DEBUG:
-        for name in ("httpx", "httpcore", "mcp.client.auth", "fastmcp.client.auth"):
+        for name in ("httpx2", "httpcore2", "mcp.client.auth", "fastmcp.client.auth"):
             logging.getLogger(name).setLevel(logging.DEBUG)
 
 

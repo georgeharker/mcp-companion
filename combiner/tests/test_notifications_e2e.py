@@ -25,10 +25,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING
 
 import mcp.types
 import pytest
+from fakes import RecordingOutbound, recording_connection
 from fastmcp import Client, Context, FastMCP
 from fastmcp.client.messages import MessageHandler
 from fastmcp.server.providers.proxy import FastMCPProxy, _create_client_factory
@@ -36,48 +36,22 @@ from fastmcp.server.transforms.namespace import Namespace
 from pydantic import AnyUrl
 
 from mcp_combiner.notifications import _ResourceNotifyHandler, forwarding_factory
-from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE, RUNTIME
 
 
 def _forwarding_proxy(upstream: FastMCP, *, per_chat: bool) -> FastMCPProxy:
     """Build the proxy exactly as proxyfactory does: wrap the base factory with
     forwarding_factory and pass it via the public FastMCPProxy(client_factory=…)."""
-    base = _create_client_factory(upstream)
+    base = _create_client_factory(upstream, mode=CLIENT_CONNECT_MODE)
     return FastMCPProxy(
         client_factory=forwarding_factory(base, "svg-mcp", per_chat=per_chat), name="svg-mcp"
     )
 
 
-# _CaptureSession stands in for a real combiner→client ServerSession. Give it that
-# type as a base for type-checking only (object at runtime) so it's accepted in
-# RUNTIME.sessions' WeakSet[ServerSession] without the real constructor.
-if TYPE_CHECKING:
-    from mcp.server.session import ServerSession as _SessionBase
-else:
-    _SessionBase = object
-
 WIDGET_URI = "ui://svg-mcp/preview"
 # What the mount's Namespace applies to resources — the handler must push the
 # SAME transform so the pushed URI matches resources/list and the tool _meta.
 NAMESPACED = str(AnyUrl(Namespace("svg-mcp")._transform_uri(WIDGET_URI)))
-
-
-class _CaptureSession(_SessionBase):
-    """Duck-typed downstream ServerSession: records what gets forwarded to it.
-
-    Only needs the two coroutine methods the handler calls; it stands in for a
-    real combiner→client ServerSession in ``RUNTIME.sessions``.
-    """
-
-    def __init__(self) -> None:
-        self.updated: list[str] = []
-        self.list_changed = 0
-
-    async def send_resource_updated(self, uri: AnyUrl) -> None:
-        self.updated.append(str(uri))
-
-    async def send_resource_list_changed(self) -> None:
-        self.list_changed += 1
 
 
 def _make_upstream() -> FastMCP:
@@ -122,15 +96,20 @@ class _CaptureHandler(MessageHandler):
 
 
 @pytest.fixture
-def capture() -> Iterator[_CaptureSession]:
-    # RUNTIME.sessions.active is a WeakSet — hold the strong ref for the test so
-    # the broadcast target isn't GC'd out from under us.
-    sess = _CaptureSession()
-    RUNTIME.sessions.active.add(sess)  # test double; tests aren't type-checked in CI (see sibling)
+def capture() -> Iterator[RecordingOutbound]:
+    """A bystander downstream connection registered for broadcasts; yields what
+    was sent to it. RUNTIME.sessions.active is a WeakSet — the fixture holds the
+    strong ref so the broadcast target isn't GC'd out from under the test."""
+    connection, outbound = recording_connection()
+    RUNTIME.sessions.active.add(connection)
     try:
-        yield sess
+        yield outbound
     finally:
-        RUNTIME.sessions.active.discard(sess)
+        RUNTIME.sessions.active.discard(connection)
+
+
+def _updated_uris(outbound: RecordingOutbound) -> list[str]:
+    return [str(p["uri"]) for p in outbound.sent("notifications/resources/updated")]
 
 
 async def _settle(pred: Callable[[], bool]) -> None:
@@ -154,31 +133,31 @@ def test_forwarding_factory_wraps_a_real_proxy() -> None:
     assert isinstance(client._session_kwargs.get("message_handler"), _ResourceNotifyHandler)
 
 
-async def test_resource_updated_delivered_namespaced(capture: _CaptureSession) -> None:
+async def test_resource_updated_delivered_namespaced(capture: RecordingOutbound) -> None:
     """Full chain: an upstream edit's resources/updated reaches the downstream
     session, forward-namespaced."""
     proxy = _forwarding_proxy(_make_upstream(), per_chat=False)
 
-    async with Client(proxy) as client:
+    async with Client(proxy, mode=CLIENT_CONNECT_MODE) as client:
         await client.call_tool("edit")
-        await _settle(lambda: bool(capture.updated))
+        await _settle(lambda: bool(_updated_uris(capture)))
 
-    assert capture.updated == [NAMESPACED], capture.updated
+    assert _updated_uris(capture) == [NAMESPACED], capture.notifications
 
 
-async def test_per_chat_routes_to_requesting_session_only(capture: _CaptureSession) -> None:
+async def test_per_chat_routes_to_requesting_session_only(capture: RecordingOutbound) -> None:
     """per_chat=True: the update goes to the requesting chat's own session
     (observed by that client's message handler), and NOT to a bystander session
     in RUNTIME.sessions — proving it's targeted, not broadcast."""
     proxy = _forwarding_proxy(_make_upstream(), per_chat=True)
 
     handler = _CaptureHandler()
-    async with Client(proxy, message_handler=handler) as client:
+    async with Client(proxy, message_handler=handler, mode=CLIENT_CONNECT_MODE) as client:
         await client.call_tool("edit")
         await _settle(lambda: bool(handler.updated))
 
     assert handler.updated == [NAMESPACED], handler.updated  # this chat got it
-    assert capture.updated == []  # the bystander (broadcast target) did NOT
+    assert _updated_uris(capture) == []  # the bystander (broadcast target) did NOT
 
 
 async def test_list_changed_forwarded_through_proxy() -> None:
@@ -187,7 +166,7 @@ async def test_list_changed_forwarded_through_proxy() -> None:
     proxy = _forwarding_proxy(_make_upstream(), per_chat=True)
 
     handler = _CaptureHandler()
-    async with Client(proxy, message_handler=handler) as client:
+    async with Client(proxy, message_handler=handler, mode=CLIENT_CONNECT_MODE) as client:
         await client.call_tool("add_widget")
         await _settle(lambda: handler.list_changed > 0)
 

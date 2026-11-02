@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
+import httpx2
 from fastmcp import Client, FastMCP
 from fastmcp.server.providers.proxy import FastMCPProxy, _create_client_factory
 
@@ -29,7 +29,7 @@ from mcp_combiner.connections import (
     build_http_transport,
 )
 from mcp_combiner.notifications import forwarding_factory
-from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE, RUNTIME
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -73,7 +73,7 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
 
         return FastMCPProxy(client_factory=factory, name=name)
 
-    auth: httpx.Auth | None = build_auth(
+    auth: httpx2.Auth | None = build_auth(
         name,
         auth_config=srv.auth,
         server_url=srv.url,
@@ -84,13 +84,13 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
     )
 
     if auth is not None and srv.url:
-        # Auth requires a Client so we can inject httpx.Auth into the transport.
+        # Auth requires a Client so we can inject httpx2.Auth into the transport.
         # _create_client_factory(client) is what create_proxy builds internally: a
         # per-request client.new() factory (which downgrades our handler), so we
         # wrap it to re-attach point-of-use, then pass it via the PUBLIC
         # FastMCPProxy(client_factory=…) — no reach into the built proxy.
         # Broadcast (shared upstream, no per-chat).
-        client = Client(build_http_transport(srv), auth=auth)
+        client = Client(build_http_transport(srv), auth=auth, mode=CLIENT_CONNECT_MODE)
         factory = forwarding_factory(_create_client_factory(client), name, per_chat=False)
         return FastMCPProxy(client_factory=factory, name=name)
 
@@ -100,7 +100,9 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
     # via the public constructor. This is what makes non-isolate stdio servers
     # (which DO emit resources/updated, e.g. svg-mcp) forward correctly.
     proxy_config = config.to_fastmcp_config(name)
-    base = _create_client_factory(proxy_config.model_dump(exclude_none=True))
+    base = _create_client_factory(
+        proxy_config.model_dump(exclude_none=True), mode=CLIENT_CONNECT_MODE
+    )
     factory = forwarding_factory(base, name, per_chat=False)
     return FastMCPProxy(client_factory=factory, name=name)
 
@@ -146,7 +148,11 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
     if isinstance(transport, StreamableHttpTransport) and not isinstance(
         transport, ResumableStreamableHttpTransport
     ):
-        transport = ResumableStreamableHttpTransport(url=transport.url, headers=transport.headers)
+        transport = ResumableStreamableHttpTransport(
+            url=transport.url,
+            headers=transport.headers,
+            max_sse_event_size=transport.max_sse_event_size,
+        )
 
     # OAuth-isolated: borrow the primer connection's shared, refreshed auth and
     # gate per-chat session creation on the primer's eager auth completing.
@@ -194,7 +200,7 @@ def _create_isolated_proxy(config: CombinerConfig, name: str, srv: ServerConfig)
 
     # Non-OAuth (or static-header/bearer auth): self-contained. The auth, if any,
     # is held on the shared base client so per-chat sessions reuse it.
-    auth: httpx.Auth | None = build_auth(
+    auth: httpx2.Auth | None = build_auth(
         name,
         auth_config=srv.auth,
         server_url=srv.url,

@@ -37,6 +37,8 @@ from fastmcp import Client
 from fastmcp.client.elicitation import ElicitResult
 from fastmcp.client.transports import StreamableHttpTransport
 
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
+
 pytestmark = pytest.mark.e2e
 
 TOKEN = "e11ce217-0000-4000-8000-000000000001"
@@ -67,6 +69,7 @@ def _chat(combiner: CombinerHandle, elicitation_handler: Any) -> Client[Any]:
     return Client(
         StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": TOKEN}),
         elicitation_handler=elicitation_handler,
+        mode=CLIENT_CONNECT_MODE,
     )
 
 

@@ -2,7 +2,7 @@
 
 For ``isolate: true`` servers the combiner opens a distinct upstream MCP
 session per *chat*. fastmcp's ``StatefulProxyClient`` keys that cache by the
-live downstream ``ServerSession`` object and force-disconnects the upstream
+live downstream ``Connection`` and force-disconnects the upstream
 session the moment the downstream session exits — so any mid-chat downstream
 reconnect (SSE drop, transport cycle) silently discarded the chat's upstream
 state even though nothing restarted.
@@ -68,7 +68,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
-import httpx
+import httpx2
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from fastmcp.client.transports.base import ClientTransportT
@@ -76,9 +76,10 @@ from fastmcp.server.dependencies import get_context, get_http_headers
 from fastmcp.server.providers.proxy import StatefulProxyClient
 
 from mcp_combiner.resume_transport import ResumableStreamableHttpTransport
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE, downstream_connection
 
 if TYPE_CHECKING:
-    from mcp.server.session import ServerSession
+    from mcp.server.connection import Connection
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -100,6 +101,14 @@ PARK_TTL_SECONDS = 3600.0
 
 # Sweep cadence for the grace/ttl timers.
 SWEEP_INTERVAL_SECONDS = 30.0
+
+
+def _request_connection() -> Connection | None:
+    """The current request's downstream connection, outside a request ``None``."""
+    try:
+        return downstream_connection(get_context().session)
+    except Exception:
+        return None
 
 
 def _request_token() -> str | None:
@@ -151,21 +160,21 @@ async def _close_client(client: Client[Any]) -> None:
 class LiveEntry:
     """A connected per-chat upstream client and the downstream sessions using it.
 
-    Liveness is tracked TWO ways because neither alone is reliable:
-    ``session_ids`` counts sessions whose exit-stack callback has not yet
-    fired (the authoritative clean-exit signal — fastmcp's session manager
-    keeps strong refs to terminated ServerSessions, so GC alone never
-    empties the weakset), while the weakset catches a session that died
-    without unwinding its exit stack. The entry counts as idle when EITHER
-    says no sessions remain.
+    A downstream session is its mcp ``Connection`` (see
+    ``runtime.downstream_connection``). Liveness is tracked TWO ways because
+    neither alone is reliable: ``session_ids`` counts connections whose
+    exit-stack callback has not yet fired (the authoritative clean-exit
+    signal — GC alone can lag a terminated session), while the weakset
+    catches a connection that died without unwinding its exit stack. The
+    entry counts as idle when EITHER says no sessions remain.
     """
 
     client: Client[Any]
-    # id(session) for each downstream session still inside its lifecycle;
-    # removed by the session's own exit-stack callback.
+    # id(connection) for each downstream session still inside its lifecycle;
+    # removed by the connection's own exit-stack callback.
     session_ids: set[int] = field(default_factory=set)
-    # Weak belt-and-braces: a session that vanished without a clean exit.
-    sessions: weakref.WeakSet[ServerSession] = field(default_factory=weakref.WeakSet)
+    # Weak belt-and-braces: a connection that vanished without a clean exit.
+    sessions: weakref.WeakSet[Connection] = field(default_factory=weakref.WeakSet)
     # Monotonic time of the last factory acquire or downstream session exit;
     # the grace window counts from here once no sessions remain.
     last_activity: float = field(default_factory=time.monotonic)
@@ -234,7 +243,7 @@ class ParkedSession(ParkedEntry):
         if evict:
             return
         with contextlib.suppress(Exception):
-            async with httpx.AsyncClient() as http:
+            async with httpx2.AsyncClient() as http:
                 await http.delete(
                     self.url,
                     headers={**self.headers, "mcp-session-id": self.session_id},
@@ -302,7 +311,7 @@ class IsolatedSessionRegistry:
 
     # -- factory-side operations -------------------------------------------
 
-    def acquire(self, server: str, token: str, session: ServerSession | None) -> LiveEntry | None:
+    def acquire(self, server: str, token: str, session: Connection | None) -> LiveEntry | None:
         """Return the live entry for (server, token), tracking the session.
 
         Touches ``last_activity`` (the factory runs per proxied call, so this
@@ -318,7 +327,7 @@ class IsolatedSessionRegistry:
         return entry
 
     def register(
-        self, server: str, token: str, client: Client[Any], session: ServerSession | None
+        self, server: str, token: str, client: Client[Any], session: Connection | None
     ) -> LiveEntry:
         """Record a per-chat client as the live entry."""
         entry = LiveEntry(client=client)
@@ -381,7 +390,7 @@ class IsolatedSessionRegistry:
             except RuntimeError:
                 return
 
-            # The DELETE's session teardown must finish (and the ServerSession
+            # The DELETE's session teardown must finish (and the Connection
             # be collected out of the weakset) before a sweep can park; retry
             # a few times rather than waiting for the slow background cadence.
             async def _sweep_soon() -> None:
@@ -413,7 +422,7 @@ class IsolatedSessionRegistry:
     # the upstream server's state promptly instead of leaving it to the
     # server's own expiry.
 
-    def _track_session(self, entry: LiveEntry, session: ServerSession | None) -> None:
+    def _track_session(self, entry: LiveEntry, session: Connection | None) -> None:
         if session is None:
             return
         sid = id(session)
@@ -428,7 +437,7 @@ class IsolatedSessionRegistry:
             entry.session_ids.discard(sid)
             entry.last_activity = time.monotonic()
 
-        session._exit_stack.push_async_callback(_on_session_exit)
+        session.exit_stack.push_async_callback(_on_session_exit)
 
     # -- park / forget -----------------------------------------------------
 
@@ -485,7 +494,7 @@ class IsolatedSessionRegistry:
         # resumed (auto_initialize=False never fills initialize_result).
         init = entry.client.initialize_result
         protocol_version = (
-            str(init.protocolVersion) if init is not None else transport.resume_protocol_version
+            str(init.protocol_version) if init is not None else transport.resume_protocol_version
         )
 
         transport.terminate_on_close = False
@@ -688,7 +697,7 @@ class TokenKeyedStatefulClient(StatefulProxyClient[ClientTransportT]):
     Tokened requests resolve their upstream client through ``REGISTRY`` by
     ``(server, token)`` — surviving downstream session churn — and resume
     parked upstream sessions via a seeded transport. Tokenless requests fall
-    through to the inherited per-``ServerSession`` cache with its
+    through to the inherited per-``Connection`` cache with its
     disconnect-on-exit lifecycle.
 
     ``acquire_stateful`` (async, so the parked-resume probe can await) is the
@@ -697,6 +706,7 @@ class TokenKeyedStatefulClient(StatefulProxyClient[ClientTransportT]):
     """
 
     def __init__(self, *args: Any, server_name: str, **kwargs: Any) -> None:
+        kwargs.setdefault("mode", CLIENT_CONNECT_MODE)
         super().__init__(*args, **kwargs)
         self._server_name = server_name
 
@@ -705,10 +715,7 @@ class TokenKeyedStatefulClient(StatefulProxyClient[ClientTransportT]):
         if token is None:
             return super().new_stateful()
 
-        try:
-            session: ServerSession | None = get_context().session
-        except Exception:
-            session = None
+        session = _request_connection()
 
         entry = REGISTRY.acquire(self._server_name, token, session)
         if entry is not None:
@@ -802,7 +809,7 @@ class TokenKeyedStdioClient(StatefulProxyClient[StdioTransport]):
     terminates it; a token re-appearing inside the window reattaches to the
     still-running process.
 
-    Tokenless requests fall through to the inherited per-``ServerSession``
+    Tokenless requests fall through to the inherited per-``Connection``
     cache over the SHARED base subprocess — the documented
     supervised/unsupervised asymmetry (tokenless chats are never isolated).
 
@@ -821,7 +828,9 @@ class TokenKeyedStdioClient(StatefulProxyClient[StdioTransport]):
         args: list[str],
         env: dict[str, str] | None = None,
     ) -> None:
-        super().__init__(StdioTransport(command=command, args=args, env=env))
+        super().__init__(
+            StdioTransport(command=command, args=args, env=env), mode=CLIENT_CONNECT_MODE
+        )
         self._server_name = server_name
         self._command = command
         self._args = args
@@ -834,7 +843,7 @@ class TokenKeyedStdioClient(StatefulProxyClient[StdioTransport]):
         token = _request_group_key()
         if token is None:
             # Two tokenless shapes:
-            #  (a) a tokenless chat in-request — the inherited per-ServerSession
+            #  (a) a tokenless chat in-request — the inherited per-Connection
             #      machinery keys the SHARED base subprocess;
             #  (b) OUT of any request context — the startup/prime tools/list.
             #      ``new_stateful`` needs a server request context and would
@@ -850,10 +859,7 @@ class TokenKeyedStdioClient(StatefulProxyClient[StdioTransport]):
                 return self._new_stdio_probe()
             return super().new_stateful()
 
-        try:
-            session: ServerSession | None = get_context().session
-        except Exception:
-            session = None
+        session = _request_connection()
 
         entry = REGISTRY.acquire(self._server_name, token, session)
         if entry is not None:
@@ -979,7 +985,8 @@ class TokenKeyedStdioClient(StatefulProxyClient[StdioTransport]):
         ``keep_alive=False`` so the child dies with the proxy's list context
         instead of lingering for a chat that never calls us."""
         return Client(
-            StdioTransport(command=self._command, args=self._args, env=self._env, keep_alive=False)
+            StdioTransport(command=self._command, args=self._args, env=self._env, keep_alive=False),
+            mode=CLIENT_CONNECT_MODE,
         )
 
 

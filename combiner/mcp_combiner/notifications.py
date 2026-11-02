@@ -12,25 +12,21 @@ equal to FastMCP's ``Namespace``) — so the pushed URI matches what the host
 subscribed to and what ``resources/list`` / the tool ``_meta.ui.resourceUri``
 advertise.
 
-Composing with FastMCP's default handler (the important bit)
------------------------------------------------------------
-Every ``Client`` gets ``message_handler or TaskNotificationHandler(self)`` by
-default (``fastmcp/client/client.py``); ``TaskNotificationHandler`` routes
-``TaskStatusNotification`` to ``client._handle_task_status_notification`` (SEP-1686
-background-task delivery).  So we must **not** replace it — we *subclass* it (task
-routing inherited) and add the resource hooks (patch-and-pass).
+Composing with FastMCP's handler
+--------------------------------
+A ``Client``'s ``message_handler`` is a plain ``MessageHandler`` slot (fastmcp 4
+moved task-status routing into a client *extension*, so nothing else lives in
+the handler); we install a ``MessageHandler`` subclass with the resource hooks.
 
 The clone trap (``isolate: true``)
 -----------------------------------
 ``Client.new()`` — used by ``StatefulProxyClient.new_stateful`` for each per-chat
-session — re-wraps the handler with a hardcoded *plain* ``TaskNotificationHandler``:
-
-    if isinstance(handler, TaskNotificationHandler):
-        new_client._session_kwargs["message_handler"] = TaskNotificationHandler(new_client)
-
-so a subclass is silently downgraded on every clone (exactly the live-repaint case).
-The fix is to **re-attach after the clone** by wrapping the client factory (see
-``proxyfactory``).  ``new_stateful`` caches per session, so re-attach is idempotent.
+session — rebuilds the clone's handler from the one the parent was
+*constructed* with, so a handler installed after construction (ours) does not
+survive the clone. The fix is to **re-attach after the clone** by wrapping the
+client factory (see ``proxyfactory``), binding the handler to the clone's own
+downstream connection; re-attaching with the same target is a no-op, so
+``new_stateful``'s per-session caching stays idempotent.
 
 Routing: per-chat under ``isolate: true`` (the handler is bound to the owning
 downstream session captured at factory time), else broadcast to all active
@@ -67,36 +63,42 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import mcp.types
-from fastmcp.client.tasks import TaskNotificationHandler
+from fastmcp import Client
+from fastmcp.client.messages import MessageHandler
 from fastmcp.server.dependencies import get_context
+from mcp.server.connection import Connection
 from mcp.server.session import ServerSession
 from pydantic import AnyUrl
 
-from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME
+from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME, downstream_connection
 from mcp_combiner.toolcache import namespace_uri
+from mcp_combiner.upstream_session import use_tolerant_session
 
 logger = logging.getLogger("mcp-combiner")
 
 
-class _ResourceNotifyHandler(TaskNotificationHandler):
-    """A ``TaskNotificationHandler`` (task routing inherited) that also forwards
-    resource notifications downstream, forward-namespaced.
+class _ResourceNotifyHandler(MessageHandler):
+    """Forwards upstream resource notifications downstream, forward-namespaced.
 
     ``target`` is the single downstream session to notify (per-chat under
     ``isolate: true``); ``None`` broadcasts to every active session.
     """
 
-    def __init__(
-        self, client: Any, server_name: str, *, target: ServerSession | None = None
-    ) -> None:
-        super().__init__(client)  # binds the weakref → TaskStatusNotification routing
+    def __init__(self, server_name: str, *, target: Connection | None = None) -> None:
+        super().__init__()
         self._server = server_name
         # Weakref the per-chat target so the handler never pins the downstream
         # session alive (the session's own exit tears down the per-chat client;
         # a dead ref just means "chat gone → nothing to notify"). None = broadcast.
-        self._target_ref: weakref.ref[ServerSession] | None = (
+        self._target_ref: weakref.ref[Connection] | None = (
             weakref.ref(target) if target is not None else None
         )
+
+    def targets(self, target: Connection | None) -> bool:
+        """Whether this handler already delivers to *target* (None = broadcast)."""
+        if self._target_ref is None:
+            return target is None
+        return target is not None and self._target_ref() is target
 
     async def on_resource_updated(self, message: mcp.types.ResourceUpdatedNotification) -> None:
         try:
@@ -109,13 +111,13 @@ class _ResourceNotifyHandler(TaskNotificationHandler):
                 "Failed to namespace resources/updated URI for '%s'", self._server, exc_info=True
             )
             return
-        await self._forward(lambda s: s.send_resource_updated(uri), f"resources/updated {uri}")
+        await self._forward(lambda c: c.send_resource_updated(str(uri)), f"resources/updated {uri}")
 
     async def on_resource_list_changed(
         self, message: mcp.types.ResourceListChangedNotification
     ) -> None:
         await self._forward(
-            lambda s: s.send_resource_list_changed(), f"resources/list_changed ({self._server})"
+            lambda c: c.send_resource_list_changed(), f"resources/list_changed ({self._server})"
         )
 
     async def on_tool_list_changed(self, message: mcp.types.ToolListChangedNotification) -> None:
@@ -144,19 +146,17 @@ class _ResourceNotifyHandler(TaskNotificationHandler):
                 "Failed to handle tools/list_changed for '%s'", self._server, exc_info=True
             )
 
-    async def _forward(self, send: Callable[[ServerSession], Awaitable[None]], desc: str) -> None:
+    async def _forward(self, send: Callable[[Connection], Awaitable[None]], desc: str) -> None:
         if self._target_ref is not None:
-            # Per-chat: notify only this chat's session (skip if it's gone).
+            # Per-chat: notify only this chat's connection (skip if it's gone).
             target = self._target_ref()
-            sessions: list[ServerSession] = [] if target is None else [target]
+            connections: list[Connection] = [] if target is None else [target]
         else:
             # Broadcast: shared upstream serves every chat.
-            sessions = RUNTIME.sessions.sessions()
-        for session in sessions:
-            if session is None:
-                continue
+            connections = RUNTIME.sessions.connections()
+        for connection in connections:
             try:
-                await send(session)
+                await send(connection)
             except Exception:
                 logger.debug(
                     "Failed to forward %s (%s) to a session", desc, self._server, exc_info=True
@@ -164,17 +164,15 @@ class _ResourceNotifyHandler(TaskNotificationHandler):
 
 
 def attach_resource_forwarding(
-    client: Any, server_name: str, *, target: ServerSession | None = None
+    client: Any, server_name: str, *, target: Connection | None = None
 ) -> Any:
     """Install (or re-install) resource-forwarding on *client*'s message handler.
 
-    Call after construction, before connect — the handler needs the client ref,
-    and ``Client(message_handler=…)`` is a chicken/egg, so we set it on
-    ``_session_kwargs`` exactly the way FastMCP's own clone code does.
+    Call after construction (or after a per-chat clone), before connect.
 
-    Idempotent: skips if our handler is already installed.  Re-installs over the
-    *plain* ``TaskNotificationHandler`` that ``Client.new()`` leaves after a
-    per-chat clone (undoing the downgrade).
+    Idempotent: skips if our handler is already installed *for the same
+    target*, and rebinds one bound to another target. Re-installs on a per-chat
+    clone, which ``Client.new()`` builds without it.
 
     We set ``_session_kwargs["message_handler"]`` directly — the *same* field and
     mechanism FastMCP's own clone code uses (``Client.new``).  It's a private
@@ -183,9 +181,8 @@ def attach_resource_forwarding(
 
     **Fail-safe**: this runs inside the client factory on the tool-call path, so
     it must never raise — any failure (missing ``_session_kwargs``, a changed
-    ``TaskNotificationHandler``/``Namespace`` constructor) degrades to "no
-    forwarding + warning", never a broken tool call.  The client keeps whatever
-    handler FastMCP installed, so task routing is unaffected.
+    ``Namespace`` constructor) degrades to "no forwarding + warning", never a
+    broken tool call.
     """
     try:
         kwargs = getattr(client, "_session_kwargs", None)
@@ -197,9 +194,10 @@ def attach_resource_forwarding(
                 server_name,
             )
             return client
-        if isinstance(kwargs["message_handler"], _ResourceNotifyHandler):
+        current = kwargs["message_handler"]
+        if isinstance(current, _ResourceNotifyHandler) and current.targets(target):
             return client
-        kwargs["message_handler"] = _ResourceNotifyHandler(client, server_name, target=target)
+        kwargs["message_handler"] = _ResourceNotifyHandler(server_name, target=target)
     except Exception:
         logger.warning(
             "Failed to attach resource forwarding for '%s' (FastMCP internals "
@@ -281,6 +279,13 @@ def attach_elicitation_forwarding(
     return client
 
 
+def _prepare_session(client: object) -> None:
+    """Give a handed-out upstream client the combiner's session class (fastmcp's
+    proxy factories set their own when they build or clone a client)."""
+    if isinstance(client, Client):
+        use_tolerant_session(client)
+
+
 def forwarding_factory(factory: Any, server_name: str, *, per_chat: bool) -> Any:
     """Wrap a client factory so forwarding is (re)attached at *point of use* — to
     whatever client the factory is about to hand out — then pass the result to
@@ -289,21 +294,21 @@ def forwarding_factory(factory: Any, server_name: str, *, per_chat: bool) -> Any
     covers both without ever reaching into the built proxy's attributes.
 
     This is the crux: three of four proxy paths obtain their working client via a
-    per-request ``client.new()`` clone (which downgrades our handler) or an
+    per-request ``client.new()`` clone (built without our handler) or an
     internally-built client (never attached at construction).  Attaching here —
     right before the client is used — survives all of them.  ``attach_*`` is
     idempotent, so a reused/persistent client is a no-op.
 
-    ``per_chat`` captures the requesting downstream session for per-chat routing
+    ``per_chat`` captures the requesting downstream connection for per-chat routing
     (``isolate: true``); a missing context yields ``None`` (broadcast) — the
     factory must never raise.
     """
 
-    def _target() -> ServerSession | None:
+    def _target() -> Connection | None:
         if not per_chat:
             return None
         try:
-            return get_context().session
+            return downstream_connection(get_context().session)
         except Exception:
             # An isolate server should always have a request context here; if it
             # doesn't, degrade to broadcast rather than raise — but make the
@@ -326,12 +331,14 @@ def forwarding_factory(factory: Any, server_name: str, *, per_chat: bool) -> Any
 
             async def _finish() -> Any:
                 resolved = await client
+                _prepare_session(resolved)
                 attach_elicitation_forwarding(
                     resolved, server_name, session=elicit_session, request_id=elicit_request_id
                 )
                 return attach_resource_forwarding(resolved, server_name, target=_target())
 
             return _finish()
+        _prepare_session(client)
         attach_elicitation_forwarding(
             client, server_name, session=elicit_session, request_id=elicit_request_id
         )

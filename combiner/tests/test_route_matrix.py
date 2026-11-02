@@ -27,6 +27,8 @@ from conftest import (
 from fakes import content_text
 from fastmcp import Client
 
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
+
 pytestmark = pytest.mark.e2e
 
 _SPEC = [
@@ -54,7 +56,7 @@ class TestStdioRoute:
         combiner = await procs.start_combiner(cfg)
         await combiner.wait_server_state("mockup", ("ready",))
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             names = {t.name for t in await c.list_tools()}
             assert "mockup_greet" in names
             assert await _text(c, "mockup_greet", {"who": "stdio"}) == "Hello, stdio!"
@@ -74,7 +76,7 @@ class TestStdioRoute:
         combiner = await procs.start_combiner(cfg)
         await combiner.wait_server_state("mockup", ("ready",))
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             tools = {t.name: t for t in await c.list_tools()}
             assert "mockup_broken" in tools
             assert await _text(c, "mockup_broken", {}) == "still callable"
@@ -90,7 +92,7 @@ class TestHttpRoute:
         combiner = await procs.start_combiner(cfg)
         await combiner.wait_server_state("mockup", ("ready",))
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             names = {t.name for t in await c.list_tools()}
             assert "mockup_greet" in names
             assert await _text(c, "mockup_greet", {"who": "http"}) == "Hello, http!"
@@ -140,5 +142,5 @@ class TestSharedServerRoute:
         combiner = await procs.start_combiner(cfg)
         await combiner.wait_server_state("mockup", ("ready",), timeout=60.0)
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "mockup_greet", {"who": "shared"}) == "Hello, shared!"

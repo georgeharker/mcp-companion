@@ -147,7 +147,7 @@ name, default `mcp-combiner`), `--port`/`--host`, `--grace-period`, `--pid`
 (override the shell PID the reference attaches to), `--log-file`, and `--dry-run`
 (print the sharedserver command instead of running it). `start` also forwards
 extra serve flags after `--`, e.g.
-`mcp-combiner start --config … -- --no-output-validation`.
+`mcp-combiner start --config … -- --no-input-validation`.
 
 The session filter verbs (`enable`/`disable`/`allow`/`clear`) address a chat
 by its grouping token and apply **live**: the token-keyed filter store is
@@ -1456,10 +1456,9 @@ require("mcp_companion").setup({
         token_in_url = nil,             -- nil (default) = auto: ON for ACP agents, OFF for the HTTP-adapter
                                         --   client; true = always embed token in URL; false = header-only.
                                         --   See Troubleshooting below.
-        -- Tri-state control of the combiner's JSON-schema (re)validation of proxied tool calls
-        -- (the upstream server already validates). nil = leave combiner default; false = force off;
-        -- true = force on. The meaningful win is output_validation = false, which removes the
-        -- redundant per-call output validation that is measurably slow for large structured responses.
+        -- The combiner's JSON-schema validation of proxied tool calls. nil = leave the combiner
+        -- default (input on: a malformed call is refused before any upstream round trip; output
+        -- off: the end client validates what it consumes); false / true override.
         output_validation = nil,        -- nil | false | true  (--[no-]output-validation)
         input_validation = nil,         -- nil | false | true  (--[no-]input-validation)
     },

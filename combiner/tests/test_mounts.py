@@ -24,6 +24,7 @@ import mcp_combiner.toolcache as toolcache_mod
 from mcp_combiner.config import CombinerConfig
 from mcp_combiner.meta_tools import register_meta_tools
 from mcp_combiner.mounts import drop_server_providers, mount_server_provider
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 
 def _child(name: str = "child") -> FastMCP:
@@ -119,7 +120,7 @@ async def test_restart_leaves_one_live_provider(
     mount_server_provider(combiner, _make_proxy(), "crib")
 
     try:
-        async with Client(combiner) as client:
+        async with Client(combiner, mode=CLIENT_CONNECT_MODE) as client:
             result = await client.call_tool("combiner__restart_server", {"server_name": "crib"})
             text = content_text(result)
             assert "restarted" in text

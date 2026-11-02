@@ -41,6 +41,8 @@ from conftest import (
 from fakes import content_text, json_object
 from fastmcp import Client
 
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
+
 pytestmark = pytest.mark.e2e
 
 _SPEC = [
@@ -58,7 +60,7 @@ async def _whoami(client: Client[Any], server: str = "mockup") -> dict[str, Any]
 
 
 async def _restart(combiner: CombinerHandle, server: str = "mockup") -> str:
-    async with Client(combiner.mcp_url) as c:
+    async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
         return await _text(c, "combiner__restart_server", {"server_name": server})
 
 
@@ -84,7 +86,7 @@ async def _call_until_ok(
 
     async def _try() -> str | None:
         try:
-            async with Client(combiner.mcp_url) as c:
+            async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
                 return await _text(c, tool, args)
         except Exception:
             return None
@@ -102,7 +104,7 @@ class TestRestartMetaTool:
         combiner = await procs.start_combiner(cfg, env=FAST_TIMING_ENV)
         await combiner.wait_server_state("mockup", ("ready",))
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             first = await _whoami(c)
         assert first["boot_count"] >= 1
 
@@ -110,7 +112,7 @@ class TestRestartMetaTool:
         await combiner.wait_server_state("mockup", ("ready",))
 
         # Round-trip works after restart (no stale provider), on a NEW process.
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "mockup_greet", {"who": "x"}) == "Hello, x!"
             second = await _whoami(c)
         assert second["boot_count"] > first["boot_count"]
@@ -132,7 +134,7 @@ class TestRestartMetaTool:
 
         # The combiner cannot bounce an external HTTP process: same PID,
         # but the mount must still round-trip.
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "mockup_greet", {"who": "y"}) == "Hello, y!"
             who = await _whoami(c)
         assert who["pid"] == mock.proc.pid
@@ -159,7 +161,10 @@ class TestRestartMetaTool:
 
         def _chat() -> Client[Any]:
             return Client(
-                StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token})
+                StreamableHttpTransport(
+                    combiner.mcp_url, headers={"X-MCP-Combiner-Session": token}
+                ),
+                mode=CLIENT_CONNECT_MODE,
             )
 
         async with _chat() as c:
@@ -191,13 +196,13 @@ class TestRestartMetaTool:
         combiner = await procs.start_combiner(cfg, env=FAST_TIMING_ENV)
         await combiner.wait_server_state("mockup", ("ready",), timeout=60.0)
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             first = await _whoami(c)
 
         await _restart(combiner)
         await combiner.wait_server_state("mockup", ("ready",), timeout=60.0)
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "mockup_greet", {"who": "z"}) == "Hello, z!"
             second = await _whoami(c)
         assert second["boot_count"] > first["boot_count"]
@@ -216,7 +221,7 @@ class TestCrashSelfHealing:
         combiner = await procs.start_combiner(cfg, env=FAST_TIMING_ENV)
         await combiner.wait_server_state("mockup", ("ready",))
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             await c.call_tool("mockup_mock__crash", {"delay_ms": 50})
 
         # Wait for the process to actually die, then bring a new one up on the
@@ -229,7 +234,7 @@ class TestCrashSelfHealing:
 
         text = await _call_until_ok(combiner, "mockup_greet", {"who": "back"})
         assert text == "Hello, back!"
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             who = await _whoami(c)
         assert who["boot_count"] == 2
 
@@ -242,7 +247,7 @@ class TestCrashSelfHealing:
         combiner = await procs.start_combiner(cfg, env=FAST_TIMING_ENV)
         await combiner.wait_server_state("mockup", ("ready",))
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             first = await _whoami(c)
             await c.call_tool("mockup_mock__crash", {"delay_ms": 50})
         await _wait_pid_gone(first["pid"])
@@ -250,7 +255,7 @@ class TestCrashSelfHealing:
         # stdio liveness is lazy: recovery is driven by subsequent calls.
         text = await _call_until_ok(combiner, "mockup_greet", {"who": "again"})
         assert text == "Hello, again!"
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             second = await _whoami(c)
         assert second["boot_count"] > first["boot_count"]
 
@@ -273,7 +278,7 @@ class TestCrashSelfHealing:
         combiner = await procs.start_combiner(cfg, env=FAST_TIMING_ENV)
         await combiner.wait_server_state("mockup", ("ready",), timeout=60.0)
 
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             first = await _whoami(c)
             await c.call_tool("mockup_mock__crash", {"delay_ms": 50})
 
@@ -282,7 +287,7 @@ class TestCrashSelfHealing:
         # No manual respawn here: the combiner itself must escalate.
         text = await _call_until_ok(combiner, "mockup_greet", {"who": "healed"}, timeout=90.0)
         assert text == "Hello, healed!"
-        async with Client(combiner.mcp_url) as c:
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as c:
             second = await _whoami(c)
         assert second["boot_count"] > first["boot_count"]
         assert second["pid"] != first["pid"]

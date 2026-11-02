@@ -22,15 +22,14 @@ local M = {}
 ---   it is exported as MCP_COMBINER_AUTH_TOKEN so the spawned combiner enforces it AND this plugin's
 ---   own HTTP client presents it. Leave nil to inherit MCP_COMBINER_AUTH_TOKEN from the environment
 ---   (or to run unauthenticated when neither is set — the default).
---- @field input_validation? boolean Tri-state JSON-schema validation of tool *input* arguments at the
----   combiner proxy. nil (default): leave the combiner default (off — inputs are coerced, not strictly
----   validated). true: force strict input validation on. false: force it off. Passed as
----   ``--input-validation`` / ``--no-input-validation``; omitted when nil.
---- @field output_validation? boolean Tri-state JSON-schema validation of tool *output* at the combiner proxy.
----   nil (default): leave the combiner default (on for tools that declare an outputSchema). false: force it
----   off — the upstream server already validated its structured output, so re-validating here is redundant
----   per-call work (measurably slow for large responses). true: force it on. Passed as
----   ``--output-validation`` / ``--no-output-validation``; omitted when nil.
+--- @field input_validation? boolean JSON-schema validation of proxied tool-call arguments at the combiner
+---   (a malformed call is refused without an upstream round trip). nil (default): leave the combiner
+---   default (on). false: turn it off. true: on. Passed as ``--input-validation`` /
+---   ``--no-input-validation``; omitted when nil.
+--- @field output_validation? boolean JSON-schema validation of proxied tools' structured output at the
+---   combiner. nil (default): leave the combiner default (off — the end client validates what it
+---   consumes). true: turn it on. false: off. Passed as ``--output-validation`` /
+---   ``--no-output-validation``; omitted when nil.
 --- @field stale_tool_grace? number Seconds a disconnected server keeps serving its last-known tools before
 ---   they are dropped, to ride out a transient reconnect (the health-check interval is 30s). nil = combiner
 ---   default (30s). Lower it to drop a killed/wedged server's tools sooner; raise it to tolerate longer
@@ -159,12 +158,10 @@ M.defaults = {
         --   false         → header-only everywhere (cleaner URLs; opt out of the ACP auto).
         -- The stdio/mcp-remote fallback always uses the URL regardless of this flag.
         token_in_url = nil,
-        -- Tri-state control of the combiner's JSON-schema (re)validation of proxied
-        -- tool calls. nil (default) leaves the combiner default; false forces off;
-        -- true forces on. The upstream server already validates, so the meaningful
-        -- win is output_validation = false, which removes per-call output validation
-        -- (measurably slow for large structured responses). Listed here as nil for
-        -- documentation — a nil entry is absent from the table, so no flag is passed.
+        -- The combiner's JSON-schema validation of proxied tool calls. nil (default)
+        -- leaves the combiner default (input on, output off); false/true override.
+        -- Listed here as nil for documentation — a nil entry is absent from the
+        -- table, so no flag is passed.
         input_validation = nil,
         output_validation = nil,
         -- Seconds a disconnected server keeps serving its last-known tools before

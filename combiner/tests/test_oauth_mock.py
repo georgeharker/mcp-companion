@@ -31,18 +31,20 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+import httpx2
 import pytest
 from conftest import OAuthMockFactory, ServedOAuthMock
 from fakes import content_text
 from fastmcp import Client
 from fastmcp.client.transports.http import StreamableHttpTransport
-from mcp.shared.auth import OAuthToken
+from mcp.shared.auth import AuthorizationCodeResult, OAuthClientInformationFull, OAuthToken
+from pydantic import AnyUrl
 
 from mcp_combiner.auth import _RefreshTokenOAuth, build_auth
 from mcp_combiner.mockserver import (
     MockOAuthConfig,
 )
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 # These tests bind a real loopback socket (uvicorn), which the nix build sandbox
 # forbids — so they run in the e2e tier (ci.yml, real runner), not `flake check`.
@@ -65,14 +67,15 @@ def headless_consent(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_redirect(self: _RefreshTokenOAuth, authorization_url: str) -> None:
         authorize_urls[id(self)] = authorization_url
 
-    async def fake_callback(self: _RefreshTokenOAuth) -> tuple[str, str | None]:
+    async def fake_callback(self: _RefreshTokenOAuth) -> AuthorizationCodeResult:
         url = authorize_urls[id(self)]
-        async with httpx.AsyncClient() as c:
+        async with httpx2.AsyncClient() as c:
             resp = await c.get(url, follow_redirects=False)
         assert resp.status_code == 302, f"authorize did not redirect: {resp.text}"
         query = parse_qs(urlparse(resp.headers["location"]).query)
         state = query["state"][0] if "state" in query else None
-        return query["code"][0], state
+        iss = query["iss"][0] if "iss" in query else None
+        return AuthorizationCodeResult(code=query["code"][0], state=state, iss=iss)
 
     monkeypatch.setattr(_RefreshTokenOAuth, "redirect_handler", fake_redirect)
     monkeypatch.setattr(_RefreshTokenOAuth, "callback_handler", fake_callback)
@@ -86,7 +89,7 @@ def _oauth_for(mock: ServedOAuthMock, token_dir: Path) -> _RefreshTokenOAuth:
 
 async def _call_echo(mock: ServedOAuthMock, oauth: _RefreshTokenOAuth, msg: str) -> str:
     transport = StreamableHttpTransport(url=mock.mcp_url)
-    async with Client(transport, auth=oauth) as client:
+    async with Client(transport, auth=oauth, mode=CLIENT_CONNECT_MODE) as client:
         result = await client.call_tool("echo", {"message": msg})
     return content_text(result)
 
@@ -174,9 +177,12 @@ class TestRefresh:
         meta = MagicMock()
         meta.token_endpoint = f"{mock.base_url}/oauth/token"
         ctx.oauth_metadata = meta
-        ci = MagicMock()
-        ci.client_id = "client-seed"
-        ctx.client_info = ci
+        # A real public-client registration (mcp 2 dispatches on its auth method).
+        ctx.client_info = OAuthClientInformationFull(
+            client_id="client-seed",
+            redirect_uris=[AnyUrl("http://localhost:9876/callback")],
+            token_endpoint_auth_method="none",
+        )
 
     async def test_refresh_sends_right_token_and_stores_rotated(
         self, oauth_mock: OAuthMockFactory, tmp_path: Path

@@ -25,7 +25,9 @@ import subprocess
 import sys
 from typing import Any
 
-import httpx
+import httpx2
+
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE, MAX_SSE_EVENT_BYTES
 
 
 def _base_url(args: argparse.Namespace) -> str:
@@ -47,7 +49,7 @@ def _auth_headers() -> dict[str, str]:
 async def _rest(
     args: argparse.Namespace, method: str, path: str, body: Any | None = None
 ) -> tuple[int, Any]:
-    async with httpx.AsyncClient() as http:
+    async with httpx2.AsyncClient() as http:
         r = await http.request(
             method, f"{_base_url(args)}{path}", json=body, headers=_auth_headers(), timeout=10.0
         )
@@ -77,8 +79,10 @@ async def _call_meta(args: argparse.Namespace, tool: str, tool_args: dict[str, A
         )
         timeout = 120.0
 
-    transport = StreamableHttpTransport(f"{_base_url(args)}/mcp", headers=_auth_headers())
-    async with Client(transport) as client:
+    transport = StreamableHttpTransport(
+        f"{_base_url(args)}/mcp", headers=_auth_headers(), max_sse_event_size=MAX_SSE_EVENT_BYTES
+    )
+    async with Client(transport, mode=CLIENT_CONNECT_MODE) as client:
         try:
             result = await asyncio.wait_for(client.call_tool(tool, tool_args), timeout=timeout)
         except asyncio.TimeoutError:
@@ -375,10 +379,10 @@ async def _arm_handover(host: str, port: int, path: str) -> bool:
     """
     url = f"http://{host}:{port}/handover/prepare"
     try:
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.post(url, json={"path": path}, headers=_auth_headers(), timeout=3.0)
             return r.status_code == 200
-    except httpx.HTTPError:
+    except httpx2.HTTPError:
         return False
 
 
@@ -388,13 +392,13 @@ async def _poll_health(host: str, port: int, timeout: float) -> bool:
 
     deadline = time.monotonic() + timeout
     url = f"http://{host}:{port}/health"
-    async with httpx.AsyncClient() as http:
+    async with httpx2.AsyncClient() as http:
         while time.monotonic() < deadline:
             try:
                 r = await http.get(url, timeout=2.0)
                 if r.status_code == 200:
                     return True
-            except httpx.HTTPError:
+            except httpx2.HTTPError:
                 pass
             await asyncio.sleep(0.5)
     return False
@@ -761,8 +765,12 @@ async def cmd_call(args: argparse.Namespace) -> int:
 
 async def cmd_tools(args: argparse.Namespace) -> int:
     from fastmcp import Client
+    from fastmcp.client.transports.http import StreamableHttpTransport
 
-    async with Client(f"{_base_url(args)}/mcp") as client:
+    transport = StreamableHttpTransport(
+        f"{_base_url(args)}/mcp", headers=_auth_headers(), max_sse_event_size=MAX_SSE_EVENT_BYTES
+    )
+    async with Client(transport, mode=CLIENT_CONNECT_MODE) as client:
         tools = await client.list_tools()
     if args.json:
         _emit(args, [{"name": t.name, "description": t.description} for t in tools])
@@ -1017,7 +1025,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         result: int = asyncio.run(args.func(args))
         return result
-    except httpx.ConnectError:
+    except httpx2.ConnectError:
         print(f"cannot reach combiner at {_base_url(args)}", file=sys.stderr)
         return 1
     except Exception as e:  # surfaced as a clean CLI error, not a traceback

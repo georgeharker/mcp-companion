@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import mcp.types as mt
 import pytest
 from conftest import (
@@ -31,19 +31,22 @@ from conftest import (
     poll_until,
     write_servers_config,
 )
-from fakes import content_text
+from fakes import content_text, recording_connection
 from fastmcp import Client
 from fastmcp.client.messages import MessageHandler
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
-from mcp import ClientSession
-from mcp.server.session import ServerSession
-from mcp.shared.context import RequestContext
-from mcp.shared.exceptions import McpError, UrlElicitationRequiredError
+from mcp.shared.exceptions import MCPError, UrlElicitationRequiredError
 
 from mcp_combiner import authprompt
-from mcp_combiner.auth import _RefreshTokenOAuth, authorizes_out_of_band, build_auth
+from mcp_combiner.auth import (
+    _RefreshTokenOAuth,
+    authorizes_out_of_band,
+    build_auth,
+    reload_stored_tokens,
+)
 from mcp_combiner.config import CombinerConfig, OAuthConfig, resolve_auth_prompt
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 
 @pytest.fixture(autouse=True)
@@ -55,27 +58,6 @@ def _clean_authprompt() -> Iterator[None]:
     authprompt.set_on_authorized(None)
 
 
-class _Session(ServerSession):
-    """A downstream session reduced to what authprompt reads and sends: the
-    client's declared capabilities and ``elicitation/complete``."""
-
-    def __init__(self, *, url_elicitation: bool) -> None:
-        elicitation = (
-            mt.ElicitationCapability(url=mt.UrlElicitationCapability()) if url_elicitation else None
-        )
-        self._client_params = mt.InitializeRequestParams(
-            protocolVersion=mt.LATEST_PROTOCOL_VERSION,
-            capabilities=mt.ClientCapabilities(elicitation=elicitation),
-            clientInfo=mt.Implementation(name="test", version="0"),
-        )
-        self.completed: list[str] = []
-
-    async def send_elicit_complete(
-        self, elicitation_id: str, related_request_id: mt.RequestId | None = None
-    ) -> None:
-        self.completed.append(elicitation_id)
-
-
 def _pending(
     server: str = "srv",
     *,
@@ -83,7 +65,7 @@ def _pending(
     elicit: bool = True,
     ttl: float = 60.0,
 ) -> authprompt.PendingAuthorization:
-    async def _no_exchange(code: str) -> None:
+    async def _no_exchange(code: str, iss: str | None) -> None:
         return None
 
     return authprompt.PendingAuthorization(
@@ -203,24 +185,24 @@ class TestProvider:
 class TestPromptError:
     def test_capable_client_gets_url_elicitation(self) -> None:
         pending = _pending()
-        session = _Session(url_elicitation=True)
-        err = authprompt.prompt_error(pending, session)
+        connection, _ = recording_connection(url_elicitation=True)
+        err = authprompt.prompt_error(pending, connection)
         assert isinstance(err, UrlElicitationRequiredError)
         assert err.error.code == mt.URL_ELICITATION_REQUIRED
         assert [e.url for e in err.elicitations] == [pending.url]
-        assert err.elicitations[0].elicitationId == pending.elicitation_id
-        assert session in pending.notified
+        assert err.elicitations[0].elicitation_id == pending.elicitation_id
+        assert connection in pending.notified
 
     def test_other_clients_get_the_url_in_the_tool_error(self) -> None:
         pending = _pending()
-        err = authprompt.prompt_error(pending, _Session(url_elicitation=False))
+        err = authprompt.prompt_error(pending, recording_connection()[0])
         assert isinstance(err, ToolError)
         assert pending.url in str(err)
         assert not pending.notified
 
     def test_browser_only_flow_never_hands_out_the_url(self) -> None:
         pending = _pending(elicit=False)
-        err = authprompt.prompt_error(pending, _Session(url_elicitation=True))
+        err = authprompt.prompt_error(pending, recording_connection(url_elicitation=True)[0])
         assert isinstance(err, ToolError)
         assert pending.url not in str(err)
 
@@ -230,7 +212,7 @@ class TestComplete:
         exchanged: list[str] = []
         authorized: list[str] = []
 
-        async def exchange(code: str) -> None:
+        async def exchange(code: str, iss: str | None) -> None:
             exchanged.append(code)
 
         async def on_authorized(server: str) -> None:
@@ -238,15 +220,17 @@ class TestComplete:
 
         authprompt.set_on_authorized(on_authorized)
         pending = _pending(exchange=exchange)
-        session = _Session(url_elicitation=True)
-        pending.notified.add(session)
+        connection, outbound = recording_connection(url_elicitation=True)
+        pending.notified.add(connection)
         authprompt.publish(pending)
 
         await authprompt.complete("srv", "the-code", "s1", None)
 
         assert exchanged == ["the-code"]
         assert authorized == ["srv"]
-        assert session.completed == [pending.elicitation_id]
+        assert outbound.sent("notifications/elicitation/complete") == [
+            {"elicitationId": pending.elicitation_id}
+        ]
         assert authprompt.pending_for("srv") is None
 
     @pytest.mark.parametrize(
@@ -264,7 +248,7 @@ class TestComplete:
     ) -> None:
         exchanged: list[str] = []
 
-        async def exchange(code: str) -> None:
+        async def exchange(code: str, iss: str | None) -> None:
             exchanged.append(code)
 
         authprompt.publish(_pending(exchange=exchange))
@@ -286,10 +270,10 @@ class TestComplete:
 # ── e2e: the real flow against the mock OAuth server ───────────────
 
 
-async def _follow_as_user(url: str) -> httpx.Response:
+async def _follow_as_user(url: str) -> httpx2.Response:
     """What the user's browser does: open the link and follow the redirects
     (the mock authorization server auto-consents)."""
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as http:
+    async with httpx2.AsyncClient(follow_redirects=True, timeout=30.0) as http:
         return await http.get(url)
 
 
@@ -309,7 +293,9 @@ class TestLoopbackDetachedFlow:
 
         # The connect fails fast — no waiting on the user — with the link published.
         with pytest.raises(Exception):
-            async with Client(StreamableHttpTransport(url=mock.mcp_url), auth=oauth):
+            async with Client(
+                StreamableHttpTransport(url=mock.mcp_url), auth=oauth, mode=CLIENT_CONNECT_MODE
+            ):
                 pass
         pending = authprompt.pending_for("mock")
         assert pending is not None
@@ -324,10 +310,55 @@ class TestLoopbackDetachedFlow:
         await poll_until(_tokens, timeout=15.0, desc="tokens stored after callback")
         assert authprompt.pending_for("mock") is None
 
-        async with Client(StreamableHttpTransport(url=mock.mcp_url), auth=oauth) as client:
+        async with Client(
+            StreamableHttpTransport(url=mock.mcp_url), auth=oauth, mode=CLIENT_CONNECT_MODE
+        ) as client:
             result = await client.call_tool("echo", {"message": "hi"})
         assert content_text(result) == "Echo: hi"
         assert mock.provider.audit.pkce_failures == 0
+
+    async def test_second_provider_picks_up_tokens_stored_by_the_first(
+        self, oauth_mock: OAuthMockFactory, tmp_path: Path
+    ) -> None:
+        """Two providers for one server share its token store. The link comes
+        from the first; after it completes, the second (already loaded, with no
+        tokens) must reconnect from the stored tokens rather than start another
+        authorization — the live failure this pins."""
+        mock: ServedOAuthMock = await oauth_mock()
+
+        def provider() -> _RefreshTokenOAuth:
+            auth = build_auth(
+                "mock",
+                auth_config={"oauth": {"prompt": "elicit"}},
+                server_url=mock.mcp_url,
+                token_dir=tmp_path,
+            )
+            assert isinstance(auth, _RefreshTokenOAuth)
+            return auth
+
+        first, second = provider(), provider()
+        for auth in (first, second):  # both load the (empty) store and hit the link
+            with pytest.raises(Exception):
+                async with Client(
+                    StreamableHttpTransport(url=mock.mcp_url), auth=auth, mode=CLIENT_CONNECT_MODE
+                ):
+                    pass
+        pending = authprompt.pending_for("mock")
+        assert pending is not None
+        assert (await _follow_as_user(pending.url)).status_code == 200
+
+        async def _stored() -> bool:
+            return first.context.current_tokens is not None
+
+        await poll_until(_stored, timeout=15.0, desc="tokens stored by the first provider")
+
+        reload_stored_tokens(second)
+        async with Client(
+            StreamableHttpTransport(url=mock.mcp_url), auth=second, mode=CLIENT_CONNECT_MODE
+        ) as client:
+            result = await client.call_tool("echo", {"message": "hi"})
+        assert content_text(result) == "Echo: hi"
+        assert authprompt.pending_for("mock") is None  # no second authorization
 
 
 class _Notifications(MessageHandler):
@@ -339,9 +370,9 @@ class _Notifications(MessageHandler):
 
     def elicitation_completed(self) -> list[str]:
         return [
-            n.root.params.elicitationId
+            n.params.elicitation_id
             for n in self.seen
-            if isinstance(n.root, mt.ElicitCompleteNotification)
+            if isinstance(n, mt.ElicitCompleteNotification)
         ]
 
 
@@ -349,7 +380,7 @@ async def _never_elicit(
     message: str,
     response_type: type[Any] | None,
     params: mt.ElicitRequestParams,
-    context: RequestContext[ClientSession, Any],
+    context: object,  # never read; accepts fastmcp's RequestContext
 ) -> dict[str, Any]:
     raise AssertionError(f"unexpected elicitation/create: {message}")
 
@@ -395,9 +426,12 @@ class TestCombinerPublicUrlFlow:
         notes = _Notifications()
 
         async with Client(
-            mcp_url, elicitation_handler=_never_elicit, message_handler=notes
+            mcp_url,
+            elicitation_handler=_never_elicit,
+            message_handler=notes,
+            mode=CLIENT_CONNECT_MODE,
         ) as client:
-            with pytest.raises(McpError) as caught:
+            with pytest.raises(MCPError) as caught:
                 await client.call_tool("mock_echo", {"message": "hi"})
             error = caught.value.error
             assert error.code == mt.URL_ELICITATION_REQUIRED
@@ -429,10 +463,16 @@ class TestCombinerPublicUrlFlow:
         mock = await oauth_mock()
         mcp_url = await self._start(procs, mock, tmp_path)
 
-        async with Client(mcp_url) as client:
+        async with Client(mcp_url, mode=CLIENT_CONNECT_MODE) as client:
             with pytest.raises(ToolError, match="needs authorization") as caught:
                 await client.call_tool("mock_echo", {"message": "hi"})
-        assert "/oauth/authorize?" in str(caught.value)
+        # The error carries the combiner's SHORT link, which redirects to the
+        # real authorization URL.
+        short = next(w for w in str(caught.value).split() if "/oauth/authorize/" in w)
+        async with httpx2.AsyncClient() as http:
+            r = await http.get(short, follow_redirects=False)
+        assert r.status_code == 302
+        assert "/oauth/authorize?" in r.headers["location"]
 
     async def test_bad_state_is_refused_by_the_callback(
         self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path
@@ -440,7 +480,7 @@ class TestCombinerPublicUrlFlow:
         mock = await oauth_mock()
         mcp_url = await self._start(procs, mock, tmp_path)
         base = mcp_url.removesuffix("/mcp")
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.get(f"{base}/oauth/callback/mock", params={"code": "x", "state": "y"})
         assert r.status_code == 400
         assert "state mismatch" in r.text
@@ -454,14 +494,16 @@ class TestCombinerPublicUrlFlow:
         mcp_url = await self._start(procs, mock, tmp_path, env={"MCP_COMBINER_AUTH_LINK_TTL": "2"})
 
         async def _link(client: Client[Any]) -> tuple[str, str]:
-            with pytest.raises(McpError) as caught:
+            with pytest.raises(MCPError) as caught:
                 await client.call_tool("mock_echo", {"message": "hi"})
             assert caught.value.error.code == mt.URL_ELICITATION_REQUIRED
             assert isinstance(caught.value.error.data, dict)
             (elicitation,) = caught.value.error.data["elicitations"]
             return elicitation["url"], elicitation["elicitationId"]
 
-        async with Client(mcp_url, elicitation_handler=_never_elicit) as client:
+        async with Client(
+            mcp_url, elicitation_handler=_never_elicit, mode=CLIENT_CONNECT_MODE
+        ) as client:
             first_url, first_id = await _link(client)
             await asyncio.sleep(2.5)
             second_url, second_id = await _link(client)
@@ -473,7 +515,90 @@ class TestCombinerPublicUrlFlow:
             async def _echo() -> str | None:
                 try:
                     return content_text(await client.call_tool("mock_echo", {"message": "hi"}))
-                except (ToolError, McpError):
+                except (ToolError, MCPError):
+                    return None
+
+            assert await poll_until(_echo, timeout=30.0, desc="call after auth") == "Echo: hi"
+
+    async def test_revoked_tokens_force_a_fresh_link(
+        self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path
+    ) -> None:
+        """The manual test loop: authorize, call, revoke every token at the
+        mock (POST /control/oauth/revoke), and the next call is handed a NEW
+        link — refresh fails, the flow goes out-of-band again, never inline."""
+        mock = await oauth_mock()
+        mcp_url = await self._start(procs, mock, tmp_path)
+
+        async def _link(client: Client[Any]) -> tuple[str, str]:
+            with pytest.raises(MCPError) as caught:
+                await client.call_tool("mock_echo", {"message": "hi"})
+            assert caught.value.error.code == mt.URL_ELICITATION_REQUIRED
+            assert isinstance(caught.value.error.data, dict)
+            (elicitation,) = caught.value.error.data["elicitations"]
+            return elicitation["url"], elicitation["elicitationId"]
+
+        async def _echo(client: Client[Any]) -> str | None:
+            try:
+                return content_text(await client.call_tool("mock_echo", {"message": "hi"}))
+            except (ToolError, MCPError):
+                return None
+
+        async with Client(
+            mcp_url, elicitation_handler=_never_elicit, mode=CLIENT_CONNECT_MODE
+        ) as client:
+            first_url, first_id = await _link(client)
+            assert (await _follow_as_user(first_url)).status_code == 200
+            assert await poll_until(lambda: _echo(client), timeout=30.0) == "Echo: hi"
+
+            async with httpx2.AsyncClient() as http:
+                r = await http.post(f"{mock.base_url}/control/oauth/revoke")
+            assert r.json()["revoked"]["access_tokens"] >= 1
+
+            second_url, second_id = await _link(client)
+            assert second_id != first_id
+            assert (await _follow_as_user(second_url)).status_code == 200
+            assert await poll_until(lambda: _echo(client), timeout=30.0) == "Echo: hi"
+
+
+@pytest.mark.e2e
+class TestCombinerLoopbackFlow:
+    """The local setup (no ``oauth.public_url``): the link redirects to the
+    combiner's loopback callback listener, and a completed authorization must
+    reconnect the server so the next call succeeds."""
+
+    async def test_link_completes_and_the_retry_succeeds(
+        self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path
+    ) -> None:
+        mock = await oauth_mock()
+        config = write_servers_config(
+            tmp_path / "servers.json",
+            {
+                "mock": {
+                    "url": mock.mcp_url,
+                    "transport": "http",
+                    "auth": {"oauth": {"prompt": "elicit"}},
+                }
+            },
+            oauth={"token_dir": str(tmp_path / "tokens")},
+        )
+        combiner = await procs.start_combiner(
+            config, extra_args=["--log-file", str(tmp_path / "combiner.log")]
+        )
+        await combiner.wait_server_state("mock", ("auth_failed",))
+
+        async with Client(combiner.mcp_url, mode=CLIENT_CONNECT_MODE) as client:
+            with pytest.raises(ToolError, match="needs authorization") as caught:
+                await client.call_tool("mock_echo", {"message": "hi"})
+            link = next(w for w in str(caught.value).split() if w.startswith("http"))
+            page = await _follow_as_user(link)
+            assert page.status_code == 200, page.text
+
+            await combiner.wait_server_state("mock", ("ready", "connected"), timeout=30.0)
+
+            async def _echo() -> str | None:
+                try:
+                    return content_text(await client.call_tool("mock_echo", {"message": "hi"}))
+                except ToolError:
                     return None
 
             assert await poll_until(_echo, timeout=30.0, desc="call after auth") == "Echo: hi"

@@ -17,6 +17,7 @@ from fakes import content_text
 from fastmcp import Client
 
 from mcp_combiner.mockserver import MockServer, ToolSpec, parse_tool_specs
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 
 def _spec(entries: list[dict[str, Any]]) -> list[ToolSpec]:
@@ -62,13 +63,13 @@ class TestSpecParsing:
 class TestDefaultCatalog:
     async def test_echo_add_parity(self) -> None:
         srv = MockServer("m", "http")
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "echo", {"message": "hi"}) == "Echo: hi"
             assert await _text(c, "add", {"a": 2, "b": 3}) == "Sum: 5"
 
     async def test_instrumentation_tools_present(self) -> None:
         srv = MockServer("m", "http")
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             names = {t.name for t in await c.list_tools()}
         assert {
             "mock__whoami",
@@ -86,18 +87,25 @@ class TestSchemaPublication:
     async def test_malformed_schema_published_verbatim(self) -> None:
         malformed = {"type": "object", "required": ["missing"], "properties": {"x": {}}}
         srv = MockServer("m", "http", _spec([{"name": "bad", "input_schema": malformed}]))
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             tools = {t.name: t for t in await c.list_tools()}
-        assert tools["bad"].inputSchema == malformed
+        assert tools["bad"].input_schema == malformed
 
     async def test_output_schema_published_verbatim(self) -> None:
-        out = {"type": "object", "properties": {"weird": []}}
+        # Unusual but wire-conformant: mcp 2's server refuses to SEND a
+        # non-conformant schema (e.g. a property given as []), so the mock
+        # can't publish one; test_upstream_session's raw upstream covers that.
+        out = {
+            "type": "object",
+            "properties": {"weird": {"type": ["string", "null"]}, "anything": True},
+            "x-vendor": {"note": "kept"},
+        }
         srv = MockServer(
             "m", "http", _spec([{"name": "t", "output_schema": out, "response_template": "x"}])
         )
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             tools = {t.name: t for t in await c.list_tools()}
-        assert tools["t"].outputSchema == out
+        assert tools["t"].output_schema == out
 
 
 class TestResponses:
@@ -116,7 +124,7 @@ class TestResponses:
                 ]
             ),
         )
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "s", {"q": "a"}) == "first"
             assert json.loads(await _text(c, "s", {"q": "b"})) == {"n": 1}
             with pytest.raises(Exception, match="boom"):
@@ -137,7 +145,7 @@ class TestResponses:
                 ]
             ),
         )
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             text = await _text(c, "t", {"a": 1.5, "b": 2.5})
         assert text.startswith("sum=4.0 args=")
 
@@ -147,7 +155,7 @@ class TestResponses:
             "http",
             _spec([{"name": "t", "params": {"x": "string"}, "response_template": "{nope}"}]),
         )
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             payload = json.loads(await _text(c, "t", {"x": "v"}))
         assert payload == {"tool": "t", "args": {"x": "v"}}
 
@@ -169,7 +177,7 @@ class TestFaultInjection:
                 ]
             ),
         )
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             for i in range(2):
                 with pytest.raises(Exception, match="injected error"):
                     await c.call_tool("f", {"x": i})
@@ -191,14 +199,14 @@ class TestFaultInjection:
                 ]
             ),
         )
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             assert await _text(c, "f", {"x": 1}) == "ok 1"
             with pytest.raises(Exception, match="injected error"):
                 await c.call_tool("f", {"x": 2})
 
     async def test_set_behavior_toggles_errors(self) -> None:
         srv = MockServer("m", "http")
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             await c.call_tool("mock__set_behavior", {"name": "echo", "error_mode": "always"})
             with pytest.raises(Exception, match="injected error"):
                 await c.call_tool("echo", {"message": "x"})
@@ -209,7 +217,7 @@ class TestFaultInjection:
 class TestRuntimeCatalog:
     async def test_add_call_remove(self) -> None:
         srv = MockServer("m", "http")
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             spec = {"name": "late", "params": {"z": "integer"}, "response_template": "late {z}"}
             await c.call_tool("mock__add_tool", {"spec": json.dumps(spec)})
             assert "late" in {t.name for t in await c.list_tools()}
@@ -219,14 +227,14 @@ class TestRuntimeCatalog:
 
     async def test_add_replaces_existing(self) -> None:
         srv = MockServer("m", "http")
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             spec = {"name": "echo", "params": {"message": "string"}, "response_template": "v2!"}
             await c.call_tool("mock__add_tool", {"spec": json.dumps(spec)})
             assert await _text(c, "echo", {"message": "x"}) == "v2!"
 
     async def test_push_responses(self) -> None:
         srv = MockServer("m", "http")
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             await c.call_tool(
                 "mock__push_responses",
                 {"name": "echo", "responses": json.dumps([{"text": "queued"}])},
@@ -238,7 +246,7 @@ class TestRuntimeCatalog:
 class TestInstrumentation:
     async def test_whoami_counters_and_sessions(self) -> None:
         srv = MockServer("m", "http")
-        async with Client(srv.mcp) as c:
+        async with Client(srv.mcp, mode=CLIENT_CONNECT_MODE) as c:
             await c.call_tool("echo", {"message": "1"})
             who = json.loads(await _text(c, "mock__whoami", {}))
         assert who["server_name"] == "m"

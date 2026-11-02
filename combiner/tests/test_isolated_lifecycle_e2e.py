@@ -22,7 +22,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from conftest import (
     FAST_TIMING_ENV,
@@ -36,6 +36,8 @@ from conftest import (
 from fakes import content_text
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
+
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 pytestmark = pytest.mark.e2e
 
@@ -53,12 +55,13 @@ async def _text(client: Client[Any], tool: str, args: dict[str, Any]) -> str:
 
 def _chat(combiner: CombinerHandle, token: str = TOKEN) -> Client[Any]:
     return Client(
-        StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token})
+        StreamableHttpTransport(combiner.mcp_url, headers={"X-MCP-Combiner-Session": token}),
+        mode=CLIENT_CONNECT_MODE,
     )
 
 
 async def _isolated(combiner: CombinerHandle) -> dict[str, Any]:
-    async with httpx.AsyncClient() as http:
+    async with httpx2.AsyncClient() as http:
         r = await http.get(f"{combiner.base_url}/sessions/map", timeout=5.0)
         r.raise_for_status()
         return dict(r.json())
@@ -132,7 +135,7 @@ class TestDeleteVsDrop:
             headers={"X-MCP-Combiner-Session": TOKEN},
             terminate_on_close=False,
         )
-        async with Client(transport) as c:
+        async with Client(transport, mode=CLIENT_CONNECT_MODE) as c:
             await c.call_tool("mockup_mock__remember", {"value": "doc-2"})
 
         await asyncio.sleep(3.0)
@@ -195,7 +198,7 @@ class TestDegradedModes:
         combiner = await _start(procs, tmp_path, mock.port, grace=3600.0)
 
         handover_file = tmp_path / "handover.json"
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.post(
                 f"{combiner.base_url}/handover/prepare",
                 json={"path": str(handover_file)},
@@ -239,5 +242,5 @@ class TestDegradedModes:
         # The upstream session was truly terminated: seeded resume refuses.
         bogus = ResumableStreamableHttpTransport(mock.mcp_url, resume_session_id=sid)
         with pytest.raises(Exception):
-            async with Client(bogus, auto_initialize=False) as c:
+            async with Client(bogus, auto_initialize=False, mode=CLIENT_CONNECT_MODE) as c:
                 await c.call_tool("greet", {"who": "ghost"})

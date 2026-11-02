@@ -17,16 +17,17 @@ from collections.abc import Sequence
 from typing import Any, ClassVar, TypeGuard, cast
 
 import mcp.types as mt
-from fastmcp.exceptions import NotFoundError, ToolError
+from fastmcp.exceptions import FastMCPError, NotFoundError, ToolError
 from fastmcp.server.context import Context
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
 from fastmcp.tools import Tool, ToolResult
-from mcp.server.session import ServerSession
+from mcp.server.connection import Connection
 
-from mcp_combiner import authprompt, nvim_proxy, permissions
+from mcp_combiner import authprompt, fastvalidate, nvim_proxy, permissions
 from mcp_combiner.auth import clear_oauth_cache, is_stale_client_error
 from mcp_combiner.connections import AuthenticationError
-from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME
+from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME, downstream_connection
 from mcp_combiner.schemafix import _finalize_schemas, _sanitize_tools
 from mcp_combiner.toolcache import (
     _filter_tools,
@@ -111,6 +112,26 @@ def _namespace_app_meta(tools: Sequence[Tool]) -> list[Tool]:
     return out
 
 
+class ToolErrorPassthroughMiddleware(ErrorHandlingMiddleware):
+    """fastmcp's ``ErrorHandlingMiddleware``, except fastmcp's own errors pass
+    through untransformed.
+
+    The base maps every non-MCP exception to an ``MCPError`` — including
+    ``FastMCPError`` (``ToolError``, ``NotFoundError``). fastmcp 4's
+    ``tools/call`` handler renders a ``FastMCPError`` as an ``isError`` tool
+    result the model reads, but an ``MCPError`` goes out as a ``-32603`` wire
+    error. So every tool-call failure ToolProcessingMiddleware reports (auth,
+    rate limit, transport, validation, permission) must reach the handler as
+    itself. (fastmcp 3's SDK rendered the transformed error as ``isError``
+    anyway, with an "Internal error:" prefix.)
+    """
+
+    def _transform_error(self, error: Exception, context: MiddlewareContext[Any]) -> Exception:
+        if isinstance(error, FastMCPError):
+            return error
+        return super()._transform_error(error, context)
+
+
 class ToolProcessingMiddleware(Middleware):
     """Intercept tools/list with caching and sanitization.
 
@@ -152,7 +173,8 @@ class ToolProcessingMiddleware(Middleware):
             try:
                 session = context.fastmcp_context.session
                 sid = context.fastmcp_context.session_id
-                is_new = RUNTIME.sessions.track(session)
+                connection = downstream_connection(session)
+                is_new = connection is not None and RUNTIME.sessions.track(connection)
 
                 # Publish the in-flight request for the elicitation forwarder:
                 # fastmcp runs proxy client factories outside its own server-request
@@ -168,20 +190,15 @@ class ToolProcessingMiddleware(Middleware):
                 # neovim_* calls back to the editor that owns this chat.
                 nvim_proxy.record_session_token(sid)
 
-                if is_new:
-                    try:
-                        cp = getattr(session, "client_params", None)
-                        ci = getattr(cp, "clientInfo", None) if cp else None
-                        client_name = getattr(ci, "name", None) if ci else None
-                        client_version = getattr(ci, "version", None) if ci else None
-                        logger.info(
-                            "New MCP session: id=%s client=%s version=%s",
-                            sid,
-                            client_name,
-                            client_version,
-                        )
-                    except Exception:
-                        logger.info("New MCP session: id=%s (no client info)", sid)
+                if is_new and connection is not None:
+                    cp = connection.client_params
+                    ci = cp.client_info if cp is not None else None
+                    logger.info(
+                        "New MCP session: id=%s client=%s version=%s",
+                        sid,
+                        ci.name if ci else None,
+                        ci.version if ci else None,
+                    )
 
             except (RuntimeError, AttributeError):
                 pass  # Session not yet established
@@ -464,7 +481,17 @@ class ToolProcessingMiddleware(Middleware):
                 await conns.reauthorize(call_server)
                 pending = authprompt.pending_for(call_server)
             if pending is not None:
-                raise authprompt.prompt_error(pending, _session_of(context.fastmcp_context))
+                raise authprompt.prompt_error(pending, _connection_of(context.fastmcp_context))
+
+        # Input schema gate: a call whose arguments don't match the schema the
+        # client was shown fails here, before any permission prompt or
+        # upstream round trip (validation.input, on by default).
+        published = RUNTIME.tools.published(str(tool_name)) if call_server else None
+        if published is not None and RUNTIME.input_validation:
+            arguments = context.message.arguments if context.message else None
+            problem = fastvalidate.first_error(arguments or {}, published.parameters)
+            if problem is not None:
+                raise ToolError(f"Input validation error: {problem}")
 
         # Permission policy gate (tool CALLS only — never publication). Resolve
         # the effective allow/deny/elicit policy for the owning server; deny or a
@@ -481,8 +508,16 @@ class ToolProcessingMiddleware(Middleware):
             # Protocol error — wrong tool name or server disabled. Re-raise
             # so the MCP layer returns a -32002 JSON-RPC error, not a tool result.
             raise
-        except ToolError:
-            # Already a proper tool error — re-raise unchanged.
+        except ToolError as e:
+            # Already a proper tool error — re-raise unchanged, unless the
+            # call's own 401 sent the server out-of-band: fastmcp's proxy wraps
+            # the resulting closed upstream session as a ToolError, and the
+            # caller needs the authorization link, not "Connection closed".
+            pending = authprompt.pending_for(call_server) if call_server else None
+            if pending is not None:
+                raise authprompt.prompt_error(
+                    pending, _connection_of(context.fastmcp_context)
+                ) from e
             raise
         except AuthenticationError as e:
             # Auth-failed servers: convert to ToolError immediately.
@@ -491,7 +526,9 @@ class ToolProcessingMiddleware(Middleware):
             # The server went out-of-band mid-call: hand over the link.
             pending = authprompt.pending_for(call_server) if call_server else None
             if pending is not None:
-                raise authprompt.prompt_error(pending, _session_of(context.fastmcp_context)) from e
+                raise authprompt.prompt_error(
+                    pending, _connection_of(context.fastmcp_context)
+                ) from e
             logger.warning("Tool '%s' blocked by auth failure: %s", tool_name, e)
             raise ToolError(
                 f"Tool '{tool_name}' is unavailable — the server's authentication "
@@ -506,7 +543,9 @@ class ToolProcessingMiddleware(Middleware):
             # the caller the authorization link rather than an opaque error.
             pending = authprompt.pending_for(server_name) if server_name else None
             if pending is not None:
-                raise authprompt.prompt_error(pending, _session_of(context.fastmcp_context)) from e
+                raise authprompt.prompt_error(
+                    pending, _connection_of(context.fastmcp_context)
+                ) from e
 
             # Check for rate limiting (429) — transient, caller should retry
             if (
@@ -550,6 +589,11 @@ class ToolProcessingMiddleware(Middleware):
             logger.error("Tool '%s' failed: %s", tool_name, e)
             raise ToolError(f"Error calling tool '{tool_name}': {e}") from e
         else:
+            # Output schema gate (validation.output, off by default — fastmcp
+            # relays results and the end client validates what it consumes).
+            if published is not None and RUNTIME.output_validation:
+                _check_output(published, result)
+
             # Success proves the server is alive again — clear any stale failure
             # mark so /health and combiner__status flip it back to ready. For a
             # crashed stdio server this is the recovery signal (a fresh subprocess
@@ -619,11 +663,26 @@ class ToolProcessingMiddleware(Middleware):
             return result
 
 
-def _session_of(ctx: Context | None) -> ServerSession | None:
-    """The downstream session behind *ctx*, if a request is active."""
+def _connection_of(ctx: Context | None) -> Connection | None:
+    """The downstream connection behind *ctx*, if a request is active."""
     if ctx is None:
         return None
     try:
-        return ctx.session
+        return downstream_connection(ctx.session)
     except RuntimeError:
         return None
+
+
+def _check_output(tool: Tool, result: ToolResult) -> None:
+    """Refuse a result whose structured content contradicts *tool*'s declared
+    ``outputSchema`` (the check the SDK made before mcp 2)."""
+    schema = tool.output_schema
+    if schema is None:
+        return
+    if result.structured_content is None:
+        raise ToolError(
+            "Output validation error: outputSchema defined but no structured output returned"
+        )
+    problem = fastvalidate.first_error(result.structured_content, schema)
+    if problem is not None:
+        raise ToolError(f"Output validation error: {problem}")

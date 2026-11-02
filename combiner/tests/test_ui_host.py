@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from conftest import (
     CombinerHandle,
@@ -35,6 +35,8 @@ from conftest import (
     write_tools_spec,
 )
 from fastmcp import Client
+
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 pytestmark = pytest.mark.e2e
 
@@ -62,9 +64,9 @@ async def _start_combiner(procs: ProcFactory, tmp_path: Path) -> CombinerHandle:
 
 async def _open_widget(
     combiner: CombinerHandle, token: str, resource: str
-) -> tuple[httpx.Response, str]:
+) -> tuple[httpx2.Response, str]:
     """GET the host page; return (response, widget session token)."""
-    async with httpx.AsyncClient() as http:
+    async with httpx2.AsyncClient() as http:
         r = await http.get(
             f"{combiner.base_url}/ui/{token}/",
             params={"resource": resource},
@@ -76,8 +78,8 @@ async def _open_widget(
 
 async def _proxy(
     combiner: CombinerHandle, token: str, session_token: str, route: str, params: dict[str, Any]
-) -> httpx.Response:
-    async with httpx.AsyncClient() as http:
+) -> httpx2.Response:
+    async with httpx2.AsyncClient() as http:
         return await http.post(
             f"{combiner.base_url}/ui/{token}/proxy/{route}",
             json={"token": session_token, "params": params},
@@ -97,7 +99,7 @@ def _result_text(result: Any) -> str:
 
 async def _widget_tool_name(combiner: CombinerHandle, token: str) -> str:
     """The combiner-namespaced name of the mock's widget ping tool."""
-    async with Client(f"{combiner.mcp_url}/{token}") as client:
+    async with Client(f"{combiner.mcp_url}/{token}", mode=CLIENT_CONNECT_MODE) as client:
         tools = await client.list_tools()
     matches = [t.name for t in tools if t.name.endswith("mock__widget_ping")]
     assert matches, f"widget tool not mounted: {[t.name for t in tools]}"
@@ -124,14 +126,14 @@ class TestHostPage:
     async def test_missing_resource_param_is_400(self, procs: ProcFactory, tmp_path: Path) -> None:
         combiner = await _start_combiner(procs, tmp_path)
         token = _token()
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.get(f"{combiner.base_url}/ui/{token}/", timeout=10.0)
         assert r.status_code == 400
 
     async def test_unknown_route_is_404(self, procs: ProcFactory, tmp_path: Path) -> None:
         combiner = await _start_combiner(procs, tmp_path)
         token = _token()
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.get(f"{combiner.base_url}/ui/{token}/nope", timeout=10.0)
         assert r.status_code == 404
 
@@ -188,7 +190,7 @@ class TestWidgetActions:
         assert r.status_code == 200
 
         # The retrieval loop: a chat client reads what the widget recorded.
-        async with Client(f"{combiner.mcp_url}/{token}") as client:
+        async with Client(f"{combiner.mcp_url}/{token}", mode=CLIENT_CONNECT_MODE) as client:
             sessions = await client.call_tool("combiner__ui_sessions", {"chat_id": token})
             summary = _result_text(sessions)
             messages = await client.call_tool(
@@ -221,7 +223,7 @@ class TestWidgetActions:
         assert body["ok"] is True
         assert "widget said: ping" in str(body["result"])
 
-        async with Client(f"{combiner.mcp_url}/{token}") as client:
+        async with Client(f"{combiner.mcp_url}/{token}", mode=CLIENT_CONNECT_MODE) as client:
             messages = await client.call_tool("combiner__ui_messages", {"chat_id": token})
             recorded = _result_text(messages)
         assert tool in recorded
@@ -262,7 +264,7 @@ class TestEventsAndRelay:
         combiner = await _start_combiner(procs, tmp_path)
         token = _token()
         _, session_token = await _open_widget(combiner, token, _WIDGET_URI)
-        async with httpx.AsyncClient(timeout=5.0) as http:
+        async with httpx2.AsyncClient(timeout=5.0) as http:
             async with http.stream(
                 "GET",
                 f"{combiner.base_url}/ui/{token}/events",
@@ -285,7 +287,7 @@ class TestEventsAndRelay:
         # The relay binds host-port+1 (see __main__); provider HTML is same-origin
         # with THIS origin, never with the capability-holding host page.
         relay_origin = f"http://127.0.0.1:{combiner.port + 1}"
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.get(
                 f"{relay_origin}/sandbox",
                 params={"resource": _WIDGET_URI, "pt": token},
@@ -304,7 +306,8 @@ async def _namespaced_widget_uri(
     from fastmcp.client.transports import StreamableHttpTransport
 
     async with Client(
-        StreamableHttpTransport(f"{combiner.mcp_url}/{token}", headers=authed)
+        StreamableHttpTransport(f"{combiner.mcp_url}/{token}", headers=authed),
+        mode=CLIENT_CONNECT_MODE,
     ) as client:
         resources = await client.list_resources()
     matches = [str(r.uri) for r in resources if str(r.uri).endswith("/widget")]
@@ -319,7 +322,8 @@ async def _widget_tool_name_authed(
     from fastmcp.client.transports import StreamableHttpTransport
 
     async with Client(
-        StreamableHttpTransport(f"{combiner.mcp_url}/{token}", headers=authed)
+        StreamableHttpTransport(f"{combiner.mcp_url}/{token}", headers=authed),
+        mode=CLIENT_CONNECT_MODE,
     ) as client:
         tools = await client.list_tools()
     matches = [t.name for t in tools if t.name.endswith("mock__widget_ping")]
@@ -352,7 +356,7 @@ class TestInboundAuth:
         # /mcp itself is gated (documents the middleware is actually on). The
         # positive half is covered by the authed Client below — a raw POST needs
         # a full streamable-http handshake, so 400-without-bearer is expected.
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.post(
                 f"{combiner.base_url}/mcp/{token}",
                 json={"jsonrpc": "2.0", "method": "ping", "id": 1},
@@ -375,7 +379,7 @@ class TestInboundAuth:
         assert "widget said: x" in str(r.json()["result"])
 
         # Resource content via the relay (host-page-driven path) → real HTML.
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.get(
                 f"http://127.0.0.1:{combiner.port + 1}/resource",
                 params={"resource": widget_uri, "pt": token},
@@ -401,8 +405,10 @@ class TestStage2Hold:
         combiner = await procs.start_combiner(cfg, env=env)
         await combiner.wait_server_state("mock", ("ready",))
         token = _token()
-        probe = Client(f"{combiner.mcp_url}/{token}probe-probe")  # distinct token
-        async with Client(f"{combiner.mcp_url}/{token}") as c:
+        probe = Client(
+            f"{combiner.mcp_url}/{token}probe-probe", mode=CLIENT_CONNECT_MODE
+        )  # distinct token
+        async with Client(f"{combiner.mcp_url}/{token}", mode=CLIENT_CONNECT_MODE) as c:
             tools = await c.list_tools()
         matches = [t.name for t in tools if t.name.endswith("mock__widget_open")]
         assert matches, f"widget-open tool not mounted: {[t.name for t in tools]}"
@@ -415,7 +421,7 @@ class TestStage2Hold:
         combiner, token, probe, tool = await self._held_call_setup(procs, tmp_path)
         widget_uri = await _namespaced_widget_uri(combiner, token, {})
 
-        async with probe, Client(f"{combiner.mcp_url}/{token}") as agent:
+        async with probe, Client(f"{combiner.mcp_url}/{token}", mode=CLIENT_CONNECT_MODE) as agent:
             call = asyncio.create_task(agent.call_tool(tool, {}))
 
             # The hold engages as soon as the result references the widget.
@@ -436,7 +442,7 @@ class TestStage2Hold:
             assert session_token
 
             # ...interacts (the SSE stream carries the tool result)...
-            async with httpx.AsyncClient(timeout=5.0) as http:
+            async with httpx2.AsyncClient(timeout=5.0) as http:
                 async with http.stream(
                     "GET",
                     f"{combiner.base_url}/ui/{token}/events",
@@ -476,7 +482,7 @@ class TestStage2Hold:
         r, session_token = await _open_widget(combiner, token, widget_uri)
         assert r.status_code == 200
 
-        async with probe, Client(f"{combiner.mcp_url}/{token}") as agent:
+        async with probe, Client(f"{combiner.mcp_url}/{token}", mode=CLIENT_CONNECT_MODE) as agent:
             call = asyncio.create_task(agent.call_tool(tool, {}))
             result = await asyncio.wait_for(call, timeout=15.0)
             texts = [b.text for b in result.content if b.type == "text"]

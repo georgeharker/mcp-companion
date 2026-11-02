@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any, Literal
 
 import mcp.types as mt
 from fastmcp import Client, FastMCP
@@ -18,6 +18,8 @@ from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.client.transports.sse import SSETransport
 from fastmcp.server.providers.base import Provider
 from fastmcp.tools import Tool
+from mcp.server.connection import Connection
+from mcp.shared.dispatcher import CallOptions
 
 from mcp_combiner.config import CombinerConfig, ServerConfig, Transport
 from mcp_combiner.connections import ConnectionManager, _ManagedConnection
@@ -46,7 +48,9 @@ class ScriptedClient(Client[StreamableHttpTransport | SSETransport]):
     def is_connected(self) -> bool:
         return self.connected
 
-    async def list_tools(self, max_pages: int = 250) -> list[mt.Tool]:
+    async def list_tools(
+        self, max_pages: int = 250, *, cache_mode: Literal["use", "refresh", "bypass"] = "use"
+    ) -> list[mt.Tool]:
         if self._list_tools_script is None:
             raise AssertionError("ScriptedClient.list_tools called but not scripted")
         return await self._list_tools_script()
@@ -60,7 +64,7 @@ class ScriptedClient(Client[StreamableHttpTransport | SSETransport]):
 
 def tool(name: str) -> mt.Tool:
     """A minimal real ``mcp.types.Tool``."""
-    return mt.Tool(name=name, inputSchema={"type": "object"})
+    return mt.Tool(name=name, input_schema={"type": "object"})
 
 
 def managed_conn(
@@ -223,3 +227,43 @@ def json_object(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AssertionError(f"expected a JSON object, got {type(value).__name__}: {text!r}")
     return value
+
+
+class RecordingOutbound:
+    """An mcp ``Outbound`` that records the notifications a ``Connection``
+    sends its client (the standalone channel a real client would read)."""
+
+    def __init__(self) -> None:
+        self.notifications: list[tuple[str, dict[str, Any]]] = []
+
+    async def send_raw_request(
+        self, method: str, params: Mapping[str, Any] | None, opts: CallOptions | None = None
+    ) -> dict[str, Any]:
+        raise AssertionError(f"unexpected server-to-client request: {method}")
+
+    async def notify(
+        self, method: str, params: Mapping[str, Any] | None, opts: CallOptions | None = None
+    ) -> None:
+        self.notifications.append((method, dict(params or {})))
+
+    def sent(self, method: str) -> list[dict[str, Any]]:
+        """The params of every *method* notification sent so far."""
+        return [params for name, params in self.notifications if name == method]
+
+
+def recording_connection(*, url_elicitation: bool = False) -> tuple[Connection, RecordingOutbound]:
+    """A real handshake-era downstream ``Connection`` over a recording outbound."""
+    outbound = RecordingOutbound()
+    elicitation = (
+        mt.ElicitationCapability(url=mt.UrlElicitationCapability()) if url_elicitation else None
+    )
+    connection = Connection(
+        outbound,
+        protocol_version="2025-11-25",
+        client_params=mt.InitializeRequestParams(
+            protocol_version="2025-11-25",
+            capabilities=mt.ClientCapabilities(elicitation=elicitation),
+            client_info=mt.Implementation(name="test", version="0"),
+        ),
+    )
+    return connection, outbound

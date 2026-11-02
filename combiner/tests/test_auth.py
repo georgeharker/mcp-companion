@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastmcp.client.auth.oauth import OAuth
 from key_value.aio.protocols import AsyncKeyValue
+from pydantic import AnyUrl
 
 from mcp_combiner.auth import (
     _NETWORK_ERROR_GRACE_SECONDS,
@@ -90,7 +91,7 @@ class TestBearerAuth:
 
     def test_injects_header(self) -> None:
         auth = _BearerAuth("my-token")
-        request = httpx.Request("GET", "http://example.com/api")
+        request = httpx2.Request("GET", "http://example.com/api")
         flow = auth.auth_flow(request)
         modified = next(flow)
         assert modified.headers["Authorization"] == "Bearer my-token"
@@ -108,7 +109,7 @@ class TestBuildAuth:
     def test_bearer_dict(self) -> None:
         result = build_auth("srv", auth_config={"bearer": "tok123"})
         assert isinstance(result, _BearerAuth)
-        request = httpx.Request("GET", "http://example.com")
+        request = httpx2.Request("GET", "http://example.com")
         flow = result.auth_flow(request)
         modified = next(flow)
         assert modified.headers["Authorization"] == "Bearer tok123"
@@ -222,13 +223,13 @@ class TestIsNetworkError:
     """Unit tests for the network-error classifier."""
 
     def test_httpx_connect_error(self) -> None:
-        assert _is_network_error(httpx.ConnectError("refused"))
+        assert _is_network_error(httpx2.ConnectError("refused"))
 
     def test_httpx_timeout(self) -> None:
-        assert _is_network_error(httpx.ConnectTimeout("timed out"))
+        assert _is_network_error(httpx2.ConnectTimeout("timed out"))
 
     def test_httpx_read_timeout(self) -> None:
-        assert _is_network_error(httpx.ReadTimeout("read timeout"))
+        assert _is_network_error(httpx2.ReadTimeout("read timeout"))
 
     def test_connection_error(self) -> None:
         assert _is_network_error(ConnectionError("broken pipe"))
@@ -243,9 +244,9 @@ class TestIsNetworkError:
         assert not _is_network_error(ValueError("bad value"))
 
     def test_http_status_error_401_not_network(self) -> None:
-        req = httpx.Request("GET", "https://example.com")
-        resp = httpx.Response(401, request=req)
-        assert not _is_network_error(httpx.HTTPStatusError("401", request=req, response=resp))
+        req = httpx2.Request("GET", "https://example.com")
+        resp = httpx2.Response(401, request=req)
+        assert not _is_network_error(httpx2.HTTPStatusError("401", request=req, response=resp))
 
     def test_runtime_error_not_network(self) -> None:
         assert not _is_network_error(RuntimeError("some bug"))
@@ -273,7 +274,7 @@ class TestProactiveRefreshNetworkHandling:
         """_proactive_refresh returns NETWORK_ERROR when httpx raises ConnectError."""
         import time
 
-        from mcp.shared.auth import OAuthToken
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
         oauth = self._make_oauth(tmp_path)
         # Force-initialise the context so current_tokens / client_info exist
@@ -295,19 +296,21 @@ class TestProactiveRefreshNetworkHandling:
         fake_meta.token_endpoint = "https://auth.example.com/token"
         ctx.oauth_metadata = fake_meta
 
-        # Fake client_info
-        fake_ci = MagicMock()
-        fake_ci.client_id = "client-123"
-        ctx.client_info = fake_ci
+        # A real registered public client (mcp 2 checks the auth method).
+        ctx.client_info = OAuthClientInformationFull(
+            client_id="client-123",
+            redirect_uris=[AnyUrl("http://localhost:9876/callback")],
+            token_endpoint_auth_method="none",
+        )
 
         # Patch httpx to raise a ConnectError on send() (code now uses
         # self._refresh_token() to build the request then http.send() to
         # dispatch it, rather than http.post() directly).
-        with patch("httpx.AsyncClient") as mock_cls:
+        with patch("httpx2.AsyncClient") as mock_cls:
             mock_http = AsyncMock()
             mock_http.__aenter__ = AsyncMock(return_value=mock_http)
             mock_http.__aexit__ = AsyncMock(return_value=False)
-            mock_http.send = AsyncMock(side_effect=httpx.ConnectError("refused"))
+            mock_http.send = AsyncMock(side_effect=httpx2.ConnectError("refused"))
             mock_cls.return_value = mock_http
 
             outcome = await oauth._proactive_refresh()
@@ -692,7 +695,7 @@ class TestUpstream401Suppression:
         *,
         refresh_outcome: _RefreshOutcome | None = None,
         retry_status: int | None = None,
-    ) -> tuple[list[str], httpx.Request | None]:
+    ) -> tuple[list[str], httpx2.Request | None]:
         """Run async_auth_flow against a 401 with controlled probe/refresh.
 
         :param probe_outcome: what ``_probe_token_at`` returns.
@@ -713,16 +716,16 @@ class TestUpstream401Suppression:
         sdk_yields: list[str] = []
 
         async def fake_super_flow(
-            self_inner: OAuth, request: httpx.Request
-        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+            self_inner: OAuth, request: httpx2.Request
+        ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"continued-after-{response.status_code}")
-            yield httpx.Request("GET", "https://example.com/.well-known/foo")
+            yield httpx2.Request("GET", "https://example.com/.well-known/foo")
 
-        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
-        response_401 = httpx.Response(401, request=initial)
-        retry_response = httpx.Response(retry_status or 200, request=initial)
+        initial = httpx2.Request("POST", "https://mcp.example.com/mcp")
+        response_401 = httpx2.Response(401, request=initial)
+        retry_response = httpx2.Response(retry_status or 200, request=initial)
 
         refresh_mock = AsyncMock(return_value=refresh_outcome or _RefreshOutcome.AUTH_ERROR)
 
@@ -801,7 +804,7 @@ class TestUpstream401Suppression:
         assert sdk_yields == ["initial"]
         # We yielded the retry request (same URL as original).
         assert second is not None
-        assert second.url == httpx.URL("https://mcp.example.com/mcp")
+        assert second.url == httpx2.URL("https://mcp.example.com/mcp")
 
     @pytest.mark.anyio
     async def test_invalid_probe_with_refresh_success_retry_still_401_propagates(
@@ -828,7 +831,7 @@ class TestUpstream401Suppression:
         assert sdk_yields == ["initial"]
         # Retry was yielded.
         assert second is not None
-        assert second.url == httpx.URL("https://mcp.example.com/mcp")
+        assert second.url == httpx2.URL("https://mcp.example.com/mcp")
 
     @pytest.mark.anyio
     async def test_invalid_probe_with_refresh_auth_error_falls_through(
@@ -852,7 +855,7 @@ class TestUpstream401Suppression:
         # SDK observes the 401 and proceeds with its full-flow discovery.
         assert sdk_yields == ["initial", "continued-after-401"]
         assert second is not None
-        assert second.url == httpx.URL("https://example.com/.well-known/foo")
+        assert second.url == httpx2.URL("https://example.com/.well-known/foo")
 
     @pytest.mark.anyio
     async def test_invalid_probe_with_refresh_network_error_propagates(
@@ -896,15 +899,15 @@ class TestUpstream401Suppression:
         sdk_yields: list[str] = []
 
         async def fake_super_flow(
-            self_inner: OAuth, request: httpx.Request
-        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+            self_inner: OAuth, request: httpx2.Request
+        ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"got-{response.status_code}")
             # Pretend SDK runs discovery
-            yield httpx.Request("GET", "https://example.com/.well-known/x")
+            yield httpx2.Request("GET", "https://example.com/.well-known/x")
 
-        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
+        initial = httpx2.Request("POST", "https://mcp.example.com/mcp")
 
         with (
             patch.object(fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow),
@@ -914,10 +917,10 @@ class TestUpstream401Suppression:
             first = await gen.__anext__()
             assert first.url == initial.url
 
-            response_401 = httpx.Response(401, request=initial)
+            response_401 = httpx2.Response(401, request=initial)
             second = await gen.asend(response_401)
             # SDK flow received the 401 and yielded its discovery request
-            assert second.url == httpx.URL("https://example.com/.well-known/x")
+            assert second.url == httpx2.URL("https://example.com/.well-known/x")
 
         assert sdk_yields == ["initial", "got-401"]
 
@@ -927,12 +930,12 @@ class TestUpstream401Suppression:
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
 
-        with patch("httpx.AsyncClient") as mock_cls:
+        with patch("httpx2.AsyncClient") as mock_cls:
             mock_http = AsyncMock()
             mock_http.__aenter__ = AsyncMock(return_value=mock_http)
             mock_http.__aexit__ = AsyncMock(return_value=False)
             mock_http.get = AsyncMock(
-                return_value=httpx.Response(200, json={"email": "x@example.com"})
+                return_value=httpx2.Response(200, json={"email": "x@example.com"})
             )
             mock_cls.return_value = mock_http
             outcome = await oauth._probe_token_at("https://www.googleapis.com/oauth2/v3/userinfo")
@@ -945,11 +948,11 @@ class TestUpstream401Suppression:
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
 
-        with patch("httpx.AsyncClient") as mock_cls:
+        with patch("httpx2.AsyncClient") as mock_cls:
             mock_http = AsyncMock()
             mock_http.__aenter__ = AsyncMock(return_value=mock_http)
             mock_http.__aexit__ = AsyncMock(return_value=False)
-            mock_http.get = AsyncMock(return_value=httpx.Response(401))
+            mock_http.get = AsyncMock(return_value=httpx2.Response(401))
             mock_cls.return_value = mock_http
             outcome = await oauth._probe_token_at("https://www.googleapis.com/oauth2/v3/userinfo")
 
@@ -961,11 +964,11 @@ class TestUpstream401Suppression:
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
 
-        with patch("httpx.AsyncClient") as mock_cls:
+        with patch("httpx2.AsyncClient") as mock_cls:
             mock_http = AsyncMock()
             mock_http.__aenter__ = AsyncMock(return_value=mock_http)
             mock_http.__aexit__ = AsyncMock(return_value=False)
-            mock_http.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+            mock_http.get = AsyncMock(side_effect=httpx2.ConnectError("refused"))
             mock_cls.return_value = mock_http
             outcome = await oauth._probe_token_at("https://www.googleapis.com/oauth2/v3/userinfo")
 
@@ -987,15 +990,15 @@ class TestUpstream401Suppression:
         sdk_yields: list[str] = []
 
         async def fake_super_flow(
-            self_inner: OAuth, request: httpx.Request
-        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+            self_inner: OAuth, request: httpx2.Request
+        ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"continued-after-{response.status_code}")
-            yield httpx.Request("GET", "https://example.com/.well-known/foo")
+            yield httpx2.Request("GET", "https://example.com/.well-known/foo")
 
-        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
-        response_401 = httpx.Response(401, request=initial)
+        initial = httpx2.Request("POST", "https://mcp.example.com/mcp")
+        response_401 = httpx2.Response(401, request=initial)
 
         # The probe must NOT be called.
         probe = AsyncMock(return_value=_ProbeOutcome.VALID)
@@ -1007,7 +1010,7 @@ class TestUpstream401Suppression:
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
             second = await gen.asend(response_401)
-            assert second.url == httpx.URL("https://example.com/.well-known/foo")
+            assert second.url == httpx2.URL("https://example.com/.well-known/foo")
 
         assert sdk_yields == ["initial", "continued-after-401"]
         probe.assert_not_called()
@@ -1026,15 +1029,15 @@ class TestUpstream401Suppression:
         sdk_yields: list[str] = []
 
         async def fake_super_flow(
-            self_inner: OAuth, request: httpx.Request
-        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+            self_inner: OAuth, request: httpx2.Request
+        ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
             sdk_yields.append("initial")
             response = yield request
             sdk_yields.append(f"continued-after-{response.status_code}")
-            yield httpx.Request("GET", "https://example.com/.well-known/foo")
+            yield httpx2.Request("GET", "https://example.com/.well-known/foo")
 
-        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
-        response_401 = httpx.Response(401, request=initial)
+        initial = httpx2.Request("POST", "https://mcp.example.com/mcp")
+        response_401 = httpx2.Response(401, request=initial)
 
         probe = AsyncMock(return_value=_ProbeOutcome.VALID)
         with (
@@ -1140,11 +1143,11 @@ class TestUpstream401Suppression:
         oauth = self._make_oauth(tmp_path)
         self._seed_valid_tokens(oauth)
 
-        with patch("httpx.AsyncClient") as mock_cls:
+        with patch("httpx2.AsyncClient") as mock_cls:
             mock_http = AsyncMock()
             mock_http.__aenter__ = AsyncMock(return_value=mock_http)
             mock_http.__aexit__ = AsyncMock(return_value=False)
-            mock_http.get = AsyncMock(return_value=httpx.Response(503))
+            mock_http.get = AsyncMock(return_value=httpx2.Response(503))
             mock_cls.return_value = mock_http
             outcome = await oauth._probe_token_at("https://www.googleapis.com/oauth2/v3/userinfo")
 
@@ -1161,11 +1164,11 @@ class TestUpstream401Suppression:
         self._seed_valid_tokens(oauth)
 
         async def fake_super_flow(
-            self_inner: OAuth, request: httpx.Request
-        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+            self_inner: OAuth, request: httpx2.Request
+        ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
             yield request  # one yield only — returns after asend()
 
-        initial = httpx.Request("POST", "https://mcp.example.com/mcp")
+        initial = httpx2.Request("POST", "https://mcp.example.com/mcp")
 
         with (
             patch.object(fastmcp_oauth_mod.OAuth, "async_auth_flow", new=fake_super_flow),
@@ -1174,7 +1177,7 @@ class TestUpstream401Suppression:
             before = time.time()
             gen = oauth.async_auth_flow(initial)
             await gen.__anext__()
-            response_200 = httpx.Response(200, request=initial)
+            response_200 = httpx2.Response(200, request=initial)
             with pytest.raises(StopAsyncIteration):
                 await gen.asend(response_200)
 

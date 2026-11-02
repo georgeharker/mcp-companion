@@ -20,6 +20,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE, MAX_SSE_EVENT_BYTES
+
 logger = logging.getLogger("mcp_combiner.ui_host")
 
 SESSION_TTL_SECONDS = 3600.0
@@ -105,8 +107,11 @@ async def call_as_token(
 
     async with Client(
         transport=StreamableHttpTransport(
-            url=f"{base_origin}/mcp/{token}", headers=_loopback_headers()
-        )
+            url=f"{base_origin}/mcp/{token}",
+            headers=_loopback_headers(),
+            max_sse_event_size=MAX_SSE_EVENT_BYTES,
+        ),
+        mode=CLIENT_CONNECT_MODE,
     ) as client:
         return await client.call_tool(tool, arguments or {})
 
@@ -119,8 +124,11 @@ async def read_as_token(base_origin: str, token: str, resource_uri: str) -> obje
 
     async with Client(
         transport=StreamableHttpTransport(
-            url=f"{base_origin}/mcp/{token}", headers=_loopback_headers()
-        )
+            url=f"{base_origin}/mcp/{token}",
+            headers=_loopback_headers(),
+            max_sse_event_size=MAX_SSE_EVENT_BYTES,
+        ),
+        mode=CLIENT_CONNECT_MODE,
     ) as client:
         return await client.read_resource(resource_uri)
 
