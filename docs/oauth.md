@@ -59,6 +59,18 @@ Global settings in the combiner config:
 
 Per-server `cache_tokens` overrides the global setting.
 
+## Remote authorization (`public_url`)
+
+By default the redirect goes to a loopback callback server, so authorization
+completes only in a browser on the combiner host. With `oauth.public_url` set
+(`auto`, `https://{auto}`, a literal URL, or `$MCP_COMBINER_OAUTH_PUBLIC_URL`),
+redirects come back to `<public_url>/oauth/callback/<server>` on the combiner
+itself, and the authorization link is handed to the client (`prompt`
+`elicit`/`both`) so it can be completed from any device. Configuration, the
+Tailscale recipe and Google's `https` requirement are in the README's "OAuth
+options" section. `{oauth_redirect}` in a server's own config expands to that
+callback URL.
+
 ## Token Storage
 
 ### Location

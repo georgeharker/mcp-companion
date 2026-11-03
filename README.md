@@ -291,6 +291,35 @@ handshake-era client calling a 2026 server that asks for input mid-call is asked
 live and the call is retried with the answer; a 2026-era client calling a
 handshake server that elicits mid-call has the call held open across its retry.
 
+**Sessions on 2026 servers.** A 2026 server that keeps state hands out its own
+session ids (svg-mcp: `create_session`, then `session_id` on every call). The
+combiner passes them through untouched and never injects or hides one. The id
+is the only key: any chat that knows it can use that session — handy for
+passing a drawing between chats, and the reason not to paste ids where they
+shouldn't go.
+
+**Changes between calls.** A 2026 server can only answer requests, so the
+combiner keeps one `subscriptions/listen` stream open to each 2026 upstream:
+tool, prompt and resource list changes always (a tool change refreshes that
+server's tools for every chat), and resource updates for the URIs some chat
+watches — a handshake chat's `resources/subscribe` or the URIs on a 2026
+chat's own listen stream. A dropped stream reopens with backoff. A server that
+doesn't serve `subscriptions/listen` is noted in the log and otherwise works.
+Upstreams on the handshake push over their session as before.
+
+#### Offering 2026 to clients
+
+The combiner itself answers clients on the handshake unless started with
+`MCP_COMBINER_OFFER_2026=1` — until then a client that would negotiate
+2026-07-28 (Claude Code does by default) falls back to the handshake. With the
+offer on, 2026 clients get per-chat `subscriptions/listen` streams, permission
+prompts as `InputRequiredResult`, and calls to handshake upstreams that ask
+mid-call held open for up to `MCP_COMBINER_HOLD_TIMEOUT` seconds (default 3600)
+awaiting the client's answer. Not bridged yet: an upstream's mid-call sampling
+or roots request to a 2026 client, and non-form questions (URL mode, sampling)
+from a 2026 upstream to a handshake client — those calls fail with an error
+saying so.
+
 ### isolate — per-chat sessions
 
 By default every chat shares one persistent upstream connection to an HTTP/SSE
@@ -726,6 +755,28 @@ issues a fresh one.
 `elicit` without `public_url` still works, with a startup warning: the link
 redirects to the loopback callback, so it only completes from a browser on the
 combiner host (a local chat), not from another device.
+
+#### Authorizing from another device over Tailscale
+
+Servers that register their own OAuth client (dynamic registration — most MCP
+servers, and the mock) need only `"public_url": "auto"`: their redirect is
+registered automatically. Providers with a **static** client, like Google, need
+an `https` redirect (plain `http` is accepted only for `localhost`) registered
+in advance. With Tailscale, serve the combiner's `/oauth` routes on the
+machine's tailnet name (tailnet-only; `tailscale funnel` is the public one):
+
+```sh
+tailscale serve --bg --set-path /oauth http://127.0.0.1:9741/oauth
+```
+
+```json
+"oauth": {"public_url": "https://{auto}", "prompt": "both"}
+```
+
+Then add `https://<machine>.<tailnet>.ts.net/oauth/callback/<server>` for each
+such server to the provider's allowed redirect URIs (for Google, on a **Web
+application** client). Every machine that runs the combiner registers its own
+callbacks; the config itself stays the same everywhere.
 
 ### External OAuth provider mode
 
@@ -1998,6 +2049,24 @@ combiner behavior:
 ```bash
 python -m mcp_combiner.mockserver --name mock --transport http --port 9760
 curl http://127.0.0.1:9760/stats
+```
+
+Mock options for the newer paths: `--offer-2026` (offer the 2026 revision on
+`server/discover`; by default the mock pins itself to the handshake, since it
+keeps per-connection state), `--sessions` (own sessions like a 2026 stateful
+server: `mock__create_session` / `mock__end_session` and a `session_id` on
+`mock__remember` / `mock__recall`), `--oauth` (act as its own OAuth
+authorization server; `POST /control/oauth/revoke` forces re-authorization) and
+`--issuer URL|auto` (the authorization-server URL it advertises, so a phone
+can reach its login page). `POST /control/resource-updated {"uri": ...}` emits
+a resource update in both revisions; `/stats` lists open listen streams.
+
+Live tests drive the installed Claude Code through the Agent SDK. They are
+opt-in and never run in CI:
+
+```bash
+cd combiner
+MCP_COMBINER_LIVE_CLAUDE=1 uv run --with 'claude-agent-sdk>=0.2.176' pytest tests/test_live_claude.py
 ```
 
 sharedserver-backed e2e tests run when the `sharedserver` binary is on PATH
