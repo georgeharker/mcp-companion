@@ -17,16 +17,24 @@ tagged `vX.Y.Z`.
   silently got the `elicitUnavailable` fallback.)
 - **Bind to several addresses.** `bind.host` (servers.json) takes a list, and
   `--host` / `MCP_COMBINER_HOST` a comma-separated one: e.g.
-  `["127.0.0.1", "tailscale"]` serves loopback and the tailnet but not the
-  LAN. `tailscale` resolves to this machine's tailnet address at startup; an
+  `["127.0.0.1", "auto"]` serves loopback and the tailnet but not the
+  LAN. `auto` resolves to this machine's tailnet address at startup; an
   address that isn't up is skipped with a warning (startup fails only if none
   bind); a wildcard covers the rest. The UI relay (port + 1) follows the same
   bind. Any non-loopback bind without an inbound bearer token warns. The pi
-  plugin connects to the first entry (loopback for a wildcard or `tailscale`).
+  plugin connects to the first entry (loopback for a wildcard or `auto`).
   A host name that doesn't resolve at startup is skipped like an address
   that isn't up.
-- `MCP_COMBINER_UI_ADVERTISE=tailscale`: widget URLs name this machine's
-  MagicDNS name (`tailscale status`), falling back to the tailnet IP.
+- **Portable tailnet settings.** `auto` as a whole value, or `{auto}` as the
+  host inside a URL, means this machine on its tailnet, in `bind.host`,
+  `MCP_COMBINER_UI_ADVERTISE` and `oauth.public_url`. Advertise `auto` (the
+  default) now names the MagicDNS name (`tailscale status`) rather than the
+  raw tailnet IP, falling back to the IP. `oauth.public_url: "auto"` is
+  `http://<magicdns name>:<port>`; `"https://{auto}"` suits `tailscale serve`.
+  New `MCP_COMBINER_OAUTH_PUBLIC_URL` (a literal URL) overrides the setting.
+- An explicit advertised origin keeps its own port
+  (`MCP_COMBINER_UI_ADVERTISE=http://host:443` gave `http://host:443:9741`),
+  and a bare IPv6 host is bracketed.
 - **Per-server `protocol` setting** — `auto` (default), `legacy` or `2026`:
   which MCP revision the combiner speaks to an upstream. `auto` asks the server
   (`server/discover`) before mounting it; a server listing 2026-07-28 is

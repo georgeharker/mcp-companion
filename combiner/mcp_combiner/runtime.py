@@ -389,6 +389,9 @@ class CombinerRuntime:
     # The combiner's own loopback base URL (http://127.0.0.1:<port>), set by
     # create_app — where locally-opened links (OAuth short links) point.
     local_origin: str | None = None
+    # The port the combiner serves on, set by create_app before the config is
+    # loaded (oauth.public_url "auto" without a port defaults to it).
+    serve_port: int | None = None
     conn_manager: ConnectionManager | None = None
     proc_manager: BackingProcessManager | None = None
 

@@ -2,16 +2,16 @@
 
 The bind setting (CLI ``--host`` > ``MCP_COMBINER_HOST`` > servers.json
 ``bind.host`` > ``127.0.0.1``) is a list: ``"bind": {"host": ["127.0.0.1",
-"tailscale"]}``, or comma-separated on the CLI / in the env var. Entries:
+"auto"]}``, or comma-separated on the CLI / in the env var. Entries:
 
 - an address (``127.0.0.1``, ``::1``, ``100.101.102.103``);
-- ``tailscale`` — this machine's tailnet IPv4, looked up at startup (the same
-  detection the widget URLs use, ``ui_host.advertise``);
+- ``auto`` — this machine's tailnet IPv4, looked up at startup (the tailnet
+  detection the widget URLs use, ``ui_host.advertise``; an IP, so no DNS);
 - a wildcard (``0.0.0.0`` / ``::``) — every interface; it already covers the
   specific addresses, so a list containing one keeps only the wildcards;
 - a host name — resolved when binding; one that doesn't resolve is skipped
-  like an address that isn't up. (Prefer ``tailscale`` to a MagicDNS name:
-  same address, no DNS dependency.)
+  like an address that isn't up. (Prefer ``auto`` to a MagicDNS name: same
+  address, no DNS dependency.)
 
 An address that isn't up when the combiner starts (Tailscale down, an
 interface gone) is skipped with a warning rather than failing startup; a
@@ -27,10 +27,11 @@ import logging
 import socket
 from collections.abc import Sequence
 
+from mcp_combiner.ui_host.advertise import AUTO
+
 logger = logging.getLogger("mcp-combiner")
 
 DEFAULT_HOST = "127.0.0.1"
-TAILSCALE = "tailscale"
 WILDCARDS = frozenset({"0.0.0.0", "::"})
 
 
@@ -48,11 +49,11 @@ def parse_hosts(value: str | Sequence[str] | None) -> list[str]:
 
 
 def resolve_hosts(entries: Sequence[str]) -> list[str]:
-    """Concrete addresses for *entries*: ``tailscale`` looked up, wildcards
+    """Concrete addresses for *entries*: ``auto`` looked up, wildcards
     collapsed, unavailable aliases dropped (warned). ``[]`` → the default."""
     hosts: list[str] = []
     for entry in entries or [DEFAULT_HOST]:
-        if entry.lower() == TAILSCALE:
+        if entry.lower() == AUTO:
             address = tailnet_address()
             if address is None:
                 logger.warning(
@@ -72,9 +73,9 @@ def resolve_hosts(entries: Sequence[str]) -> list[str]:
 
 def tailnet_address() -> str | None:
     """This machine's Tailscale IPv4, or ``None``."""
-    from mcp_combiner.ui_host.advertise import _interface_scan_ip, _tailscale_ip
+    from mcp_combiner.ui_host.advertise import tailnet_ip
 
-    return _tailscale_ip() or _interface_scan_ip()
+    return tailnet_ip()
 
 
 def is_loopback(host: str) -> bool:

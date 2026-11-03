@@ -29,25 +29,23 @@ def _has_ipv6_loopback() -> bool:
 class TestParseAndResolve:
     def test_parse_accepts_strings_lists_and_dedupes(self) -> None:
         assert binding.parse_hosts("127.0.0.1, ::1,127.0.0.1") == ["127.0.0.1", "::1"]
-        assert binding.parse_hosts(["127.0.0.1", " tailscale "]) == ["127.0.0.1", "tailscale"]
+        assert binding.parse_hosts(["127.0.0.1", " auto "]) == ["127.0.0.1", "auto"]
         assert binding.parse_hosts("") == []
         assert binding.parse_hosts(None) == []
 
-    def test_tailscale_resolves_to_the_tailnet_address(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_auto_resolves_to_the_tailnet_address(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(binding, "tailnet_address", lambda: "100.101.102.103")
-        assert binding.resolve_hosts(["127.0.0.1", "tailscale"]) == [
+        assert binding.resolve_hosts(["127.0.0.1", "auto"]) == [
             "127.0.0.1",
             "100.101.102.103",
         ]
 
-    def test_missing_tailscale_is_skipped_with_a_warning(
+    def test_auto_without_a_tailnet_is_skipped_with_a_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         monkeypatch.setattr(binding, "tailnet_address", lambda: None)
         with caplog.at_level(logging.WARNING, logger="mcp-combiner"):
-            assert binding.resolve_hosts(["127.0.0.1", "Tailscale"]) == ["127.0.0.1"]
+            assert binding.resolve_hosts(["127.0.0.1", "Auto"]) == ["127.0.0.1"]
         assert "no Tailscale address" in caplog.text
 
     def test_a_wildcard_covers_the_rest(self) -> None:

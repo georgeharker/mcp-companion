@@ -368,6 +368,7 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
     """
     if options is None:
         options = ServeOptions.from_env()
+    RUNTIME.serve_port = options.port
 
     combiner, proc_manager = create_combiner(
         options.config,
@@ -444,7 +445,6 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
         logger.info("auth: inbound bearer required on /mcp, /sessions, /handover")
     # The UI host's loopback clients read this to present the same bearer on
     # their /mcp/<token> calls (the middleware does not exempt loopback).
-    from mcp_combiner.runtime import RUNTIME
 
     RUNTIME.inbound_auth_token = options.auth_token
     RUNTIME.local_origin = f"http://127.0.0.1:{options.port}"

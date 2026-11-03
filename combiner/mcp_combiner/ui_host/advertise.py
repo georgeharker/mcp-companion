@@ -8,16 +8,16 @@ advertise knob changes only the origin prefix of `/ui/<token>/…` URLs.
 
 Modes (MCP_COMBINER_UI_ADVERTISE, default ``auto``):
 
-- ``auto`` — two-tier discovery: (1) ask tailscaled (``tailscale ip -4`` — the
-  authoritative answer when the daemon runs), (2) fall back to scanning
-  interface addresses for Tailscale's reserved CGNAT range (100.64.0.0/10 —
-  with the caveat that some ISPs assign CGNAT space too, which is why tier 1
-  exists), (3) neither finds a tailnet → the bind host (loopback today).
-- ``tailscale`` — this machine's MagicDNS name (``tailscale status --json``,
-  ``Self.DNSName``); falls back to the tailnet IP, then as ``auto``.
+- ``auto`` — this machine's tailnet name, by :func:`tailnet_host`: (1) its
+  MagicDNS name (``tailscale status --json``, ``Self.DNSName``), (2) its
+  tailnet IP from tailscaled (``tailscale ip -4``), (3) an interface address in
+  Tailscale's reserved CGNAT range (100.64.0.0/10 — some ISPs assign CGNAT
+  space too, which is why the daemon outranks it); none → the bind host
+  (loopback).
 - ``loopback`` — force local-only URLs (the pre-feature behavior).
-- ``http://host[:port]`` — explicit override, the only machine-specific form,
-  for the tailscale-serve (TLS/MagicDNS) variant.
+- ``http://host[:port]`` — explicit override; ``{auto}`` as the host stands for
+  the tailnet name (``https://{auto}`` for the tailscale-serve variant), so the
+  setting stays portable. Braces can't occur in a real host name.
 
 v1 resolves once at boot (tailnet IP changes are rare; a restart heals). The
 design doc notes the refinement: a TTL cache behind the URL constructors so
@@ -87,6 +87,22 @@ def _tailscale_dns_name() -> str | None:
     return name.rstrip(".") or None if isinstance(name, str) else None
 
 
+#: A setting's whole value meaning "this machine's tailnet" (bind, advertise,
+#: oauth.public_url), and the same as a host placeholder inside a URL.
+AUTO = "auto"
+AUTO_HOST = "{auto}"
+
+
+def tailnet_host() -> str | None:
+    """This machine's tailnet name for URLs: MagicDNS name, else tailnet IP."""
+    return _tailscale_dns_name() or _tailscale_ip() or _interface_scan_ip()
+
+
+def tailnet_ip() -> str | None:
+    """This machine's tailnet IPv4 (for binding: no DNS involved)."""
+    return _tailscale_ip() or _interface_scan_ip()
+
+
 def _interface_scan_ip() -> str | None:
     """Tier 2: scan interface addresses for the CGNAT range.
 
@@ -133,24 +149,23 @@ def resolve_advertised_host(bind_host: str, mode: str | None = None) -> str:
     """
     import os
 
-    advertise = (mode or os.environ.get(_ENV) or "auto").strip().lower()
-    if advertise == "tailscale":
-        name = _tailscale_dns_name()
-        if name:
-            return name
-        advertise = "auto"  # no MagicDNS name: the tailnet IP, or the bind
-    if advertise in ("", "auto"):
-        found = _tailscale_ip() or _interface_scan_ip()
-        if found:
-            return found
-        # Bind-all is a bind, not a name — never construct URLs with it.
-        return "127.0.0.1" if bind_host in ("0.0.0.0", "::", "") else bind_host
+    advertise = (mode or os.environ.get(_ENV) or AUTO).strip().lower()
+    # Bind-all is a bind, not a name — never construct URLs with it.
+    local = "127.0.0.1" if bind_host in ("0.0.0.0", "::", "") else bind_host
+    if advertise in ("", AUTO):
+        return tailnet_host() or local
     if advertise in ("loopback", "local", "none"):
         return bind_host
     # Explicit origin: accept scheme://host[:port] and a bare host alike.
     if "://" in advertise:
         advertise = advertise.split("://", 1)[1]
-    return advertise.rstrip("/") or bind_host
+    advertise = advertise.rstrip("/")
+    if AUTO_HOST in advertise:
+        name = tailnet_host()
+        if name is None:
+            return local
+        advertise = advertise.replace(AUTO_HOST, name)
+    return advertise or bind_host
 
 
 def advertised_origin(bind_host: str, port: int, mode: str | None = None) -> str:

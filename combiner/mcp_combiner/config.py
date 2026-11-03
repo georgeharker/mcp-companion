@@ -692,6 +692,12 @@ class OAuthConfig(BaseModel):
     OAuth client (for Google: a Web-application client). When unset, the
     loopback callback is used, which completes only from a browser on the
     combiner host.
+
+    ``"auto"`` keeps the config portable: this machine's Tailscale MagicDNS
+    name on the combiner's port, or unset when there is no tailnet. Inside a
+    URL, ``{auto}`` is that name (``"https://{auto}"`` for ``tailscale
+    serve``). ``$MCP_COMBINER_OAUTH_PUBLIC_URL`` (a literal URL) overrides the
+    setting. Stored resolved — see :func:`resolve_public_url`.
     """
 
     prompt: AuthPrompt | None = None
@@ -711,7 +717,7 @@ class OAuthConfig(BaseModel):
         public_url = data.get("public_url") or data.get("publicUrl")
         if public_url is not None and not isinstance(public_url, str):
             raise ValueError("oauth.public_url must be a string")
-        public_url = public_url.rstrip("/") if public_url else None
+        public_url = resolve_public_url(public_url)
         raw_prompt = data.get("prompt")
         prompt = (
             None
@@ -724,6 +730,45 @@ class OAuthConfig(BaseModel):
             public_url=public_url,
             prompt=prompt,
         )
+
+
+PUBLIC_URL_ENV = "MCP_COMBINER_OAUTH_PUBLIC_URL"
+
+
+def resolve_public_url(setting: str | None) -> str | None:
+    """The concrete ``oauth.public_url``.
+
+    ``$MCP_COMBINER_OAUTH_PUBLIC_URL``, when set, is the URL, verbatim.
+    Otherwise the *setting*: a literal URL; ``auto`` — this machine's
+    Tailscale MagicDNS name (else its tailnet IP) on the combiner's port; or a
+    URL with ``{auto}`` as its host (``https://{auto}`` for ``tailscale
+    serve``). No tailnet → ``None``: links use the loopback callback.
+    """
+    env = os.environ.get(PUBLIC_URL_ENV, "").strip()
+    if env:
+        return env.rstrip("/")
+    from mcp_combiner.ui_host.advertise import AUTO, AUTO_HOST, tailnet_host
+
+    value = (setting or "").strip().rstrip("/")
+    if not value:
+        return None
+    if value.lower() == AUTO:
+        value = f"http://{AUTO_HOST}"
+    elif "://" not in value:
+        value = f"http://{value}"
+    if AUTO_HOST not in value:
+        return value
+    name = tailnet_host()
+    if name is None:
+        logger.info("oauth.public_url %s: no tailnet here — links use the loopback callback", value)
+        return None
+    scheme, _, rest = value.partition("://")
+    authority, slash, path = rest.partition("/")
+    if authority == AUTO_HOST and scheme == "http":
+        from mcp_combiner.runtime import RUNTIME
+
+        authority = f"{AUTO_HOST}:{RUNTIME.serve_port or 9741}"
+    return f"{scheme}://{authority.replace(AUTO_HOST, name)}{slash}{path}"
 
 
 class IsolationConfig(BaseModel):
@@ -764,8 +809,8 @@ class BindConfig(BaseModel):
     ``0.0.0.0`` serves loopback + every interface (LAN + tailnet) — required
     for the remote widget leg (docs/designs/advertised-ui-origin.md).
 
-    ``host`` may be a list — ``["127.0.0.1", "tailscale"]`` listens on loopback
-    and the tailnet only (``tailscale`` resolves to this machine's tailnet
+    ``host`` may be a list — ``["127.0.0.1", "auto"]`` listens on loopback
+    and the tailnet only (``auto`` resolves to this machine's tailnet
     address at startup); see ``mcp_combiner.binding``.
     """
 

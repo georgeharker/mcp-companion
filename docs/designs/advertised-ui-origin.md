@@ -116,11 +116,11 @@ Rules:
 
 **servers.json is the durable home** — it is read fresh on every start, and
 the bind may be a **list**: loopback plus the tailnet, without the LAN.
-`tailscale` resolves to this machine's tailnet address at startup (skipped
+`auto` resolves to this machine's tailnet address at startup (skipped
 with a warning if Tailscale is down then; a restart binds it):
 
 ```json
-"bind": {"host": ["127.0.0.1", "tailscale"]}
+"bind": {"host": ["127.0.0.1", "auto"]}
 ```
 
 Precedence: `--host` > `MCP_COMBINER_HOST` > `bind.host` > `127.0.0.1` (the
@@ -128,11 +128,11 @@ first one set wins whole; the flag and env take comma-separated lists). The
 `--host` flag and the sharedserver *registration* are **not** durable: the
 registration is per-running-instance and dies with every grace-stop, after
 which a bare restart resolves fresh — observed live. The env var works too
-(`MCP_COMBINER_HOST=127.0.0.1,tailscale` in the launching shell).
+(`MCP_COMBINER_HOST=127.0.0.1,auto` in the launching shell).
 
 ```sh
 # immediate, if the current instance is bound wrong:
-mcp-combiner restart --force --host 127.0.0.1,tailscale
+mcp-combiner restart --force --host 127.0.0.1,auto
 
 # Verify BOTH healths: loopback (the extension's own client) and the tailnet
 curl http://127.0.0.1:9741/health -H "authorization: Bearer $MCP_COMBINER_AUTH_TOKEN"
@@ -149,7 +149,7 @@ state is suspect anyway").
 | bind | serves | verdict |
 |---|---|---|
 | `127.0.0.1` | desktop only | the pre-feature default; remote widget legs dead |
-| `["127.0.0.1", "tailscale"]` | loopback + tailnet | **recommended** — local clients keep loopback, remote renderers get the tailnet, the LAN gets nothing |
+| `["127.0.0.1", "auto"]` | loopback + tailnet | **recommended** — local clients keep loopback, remote renderers get the tailnet, the LAN gets nothing |
 | `0.0.0.0` | loopback + tailnet + LAN | works everywhere; `/mcp` keeps its bearer gate, the UI host is token-scoped, `/health` is open but read-only |
 | `<tailnet-ip>` | tailnet only | loopback clients (the pi extension itself) cannot reach it — use the list form instead |
 

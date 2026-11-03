@@ -865,10 +865,10 @@ function expandHome(p: string): string {
 
 /** The address to REACH the combiner at, from its bind setting: the first entry of
  *  a comma-separated list, with loopback standing in for a wildcard or the
- *  `tailscale` alias (both name where it listens, not an address to dial). */
+ *  `auto` (the tailnet) entry (both name where it listens, not an address to dial). */
 function connectHost(bind: string | undefined): string {
     const first = (bind ?? "").split(",")[0]?.trim() ?? ""
-    if (first === "" || first === "0.0.0.0" || first === "::" || first.toLowerCase() === "tailscale") {
+    if (first === "" || first === "0.0.0.0" || first === "::" || first.toLowerCase() === "auto") {
         return "127.0.0.1"
     }
     return first.includes(":") ? `[${first}]` : first

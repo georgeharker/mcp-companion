@@ -21,6 +21,8 @@ from mcp_combiner.ui_host.advertise import (
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MCP_COMBINER_UI_ADVERTISE", raising=False)
+    # No MagicDNS name unless a test gives one (never the real machine's).
+    monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: None)
 
 
 def test_cgnat_range_shape() -> None:
@@ -81,20 +83,31 @@ def test_origin_composition() -> None:
     assert advertised_origin("127.0.0.1", 9741, "loopback") == "http://127.0.0.1:9741"
 
 
-def test_tailscale_mode_names_the_magicdns_name(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_prefers_the_magicdns_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: "box.tailnet.ts.net"
     )
-    assert resolve_advertised_host("127.0.0.1", "tailscale") == "box.tailnet.ts.net"
-    assert advertised_origin("127.0.0.1", 9741, "Tailscale") == "http://box.tailnet.ts.net:9741"
-
-
-def test_tailscale_mode_without_a_name_falls_back_to_the_ip(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: None)
     monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_ip", lambda: "100.64.5.5")
-    assert resolve_advertised_host("127.0.0.1", "tailscale") == "100.64.5.5"
+    assert resolve_advertised_host("127.0.0.1") == "box.tailnet.ts.net"
+    assert advertised_origin("127.0.0.1", 9741, "AUTO") == "http://box.tailnet.ts.net:9741"
+
+
+def test_auto_placeholder_inside_an_explicit_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: "box.tailnet.ts.net"
+    )
+    assert advertised_origin("127.0.0.1", 9741, "https://{auto}:443") == (
+        "http://box.tailnet.ts.net:443"
+    )
+    assert advertised_origin("127.0.0.1", 9741, "{auto}") == "http://box.tailnet.ts.net:9741"
+    # A host that happens to be called "auto" is just a host.
+    assert advertised_origin("127.0.0.1", 9741, "http://auto:8000") == "http://auto:8000"
+
+
+def test_auto_placeholder_without_a_tailnet_is_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_ip", lambda: None)
+    monkeypatch.setattr("mcp_combiner.ui_host.advertise._interface_scan_ip", lambda: None)
+    assert resolve_advertised_host("0.0.0.0", "https://{auto}") == "127.0.0.1"
 
 
 @pytest.mark.parametrize(

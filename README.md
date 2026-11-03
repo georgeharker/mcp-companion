@@ -687,15 +687,19 @@ authorization link to the MCP client instead:
 ```json
 {
   "oauth": {
-    "public_url": "https://combiner.your-tailnet.ts.net",
+    "public_url": "auto",
     "prompt": "both"
   }
 }
 ```
 
-- **`public_url`** — the combiner's externally reachable base URL (for example
-  its `tailscale serve` address). OAuth redirects then come back to
-  `<public_url>/oauth/callback/<server>`, served by the combiner itself.
+- **`public_url`** — the combiner's externally reachable base URL. `auto` is
+  this machine's tailnet name on the combiner's port
+  (`http://box.your-tailnet.ts.net:9741`), or unset when there's no tailnet;
+  `https://{auto}` is the `tailscale serve` address; any literal URL works too.
+  `MCP_COMBINER_OAUTH_PUBLIC_URL` (a literal URL) overrides it. OAuth
+  redirects then come back to `<public_url>/oauth/callback/<server>`, served
+  by the combiner itself.
   Register that redirect URI with the OAuth client; for Google this needs a
   **Web application** client (Desktop clients only allow loopback redirects).
   The callback route needs no bearer token — the browser has none — and is
@@ -851,10 +855,10 @@ remote widget renderer over Tailscale, say — set `bind.host` in servers.json t
 an address or a **list** of them:
 
 ```json
-"bind": {"host": ["127.0.0.1", "tailscale"]}
+"bind": {"host": ["127.0.0.1", "auto"]}
 ```
 
-`tailscale` is this machine's tailnet address, looked up at startup; `0.0.0.0`
+`auto` is this machine's tailnet address, looked up at startup; `0.0.0.0`
 (or `::`) is every interface. An address that isn't up when the combiner
 starts is skipped with a warning (restart once it's back); startup fails only
 if none bind. `--host` and `MCP_COMBINER_HOST` override the config and take
@@ -862,9 +866,16 @@ comma-separated lists. Binding anything beyond loopback without a bearer token
 (below) logs a warning.
 
 Binding is about addresses; what remote widget renderers are *told* to connect
-to is separate: `MCP_COMBINER_UI_ADVERTISE` — `auto` (default: the tailnet IP if
-there is one), `tailscale` (this machine's MagicDNS name, e.g.
-`box.your-tailnet.ts.net`), `loopback`, or an explicit `http://host[:port]`.
+to is separate: `MCP_COMBINER_UI_ADVERTISE` — `auto` (default: this machine's
+MagicDNS name, e.g. `box.your-tailnet.ts.net`, else its tailnet IP, else
+loopback), `loopback`, or an explicit `http://host[:port]`.
+
+**`auto` and `{auto}`.** Every setting that names this machine on the tailnet —
+`bind.host` entries, `MCP_COMBINER_UI_ADVERTISE`, `oauth.public_url` — takes
+`auto` as its whole value, and URL-valued ones also take `{auto}` as the host
+(`https://{auto}` behind `tailscale serve`), so one servers.json works on every
+machine. Braces can't appear in a real host name, so a host that happens to be
+called `auto` is never mistaken for it.
 
 ### Inbound authentication (locking down `/mcp`)
 
