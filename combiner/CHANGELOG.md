@@ -36,6 +36,13 @@ tagged `vX.Y.Z`.
   host: `http://` and, on plain http, the combiner's port are added. A bare
   host used to become a redirect URI with no scheme, which broke the OAuth
   connection outright.
+- **`{oauth_redirect}` in server entries** expands to that server's callback,
+  `<public_url>/oauth/callback/<server>`, in `args`, `env`, `headers` and `url`
+  (and in a `sharedServers` / `externalServers` entry used by exactly one
+  server), so a server can be told its redirect URI without a machine name in
+  the config. Left as-is, with a warning, when there's no public URL.
+- `MCP_COMBINER_OAUTH_PUBLIC_URL` now applies when servers.json has no `oauth`
+  block (it was ignored then).
 - Mock server `--issuer` (`auto` = the tailnet name): the authorization server
   URL it advertises, so a phone can complete the mock's OAuth flow.
 - An explicit advertised origin keeps its own port

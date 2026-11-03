@@ -699,7 +699,10 @@ authorization link to the MCP client instead:
   `https://{auto}` is the `tailscale serve` address; any literal URL works too.
   `MCP_COMBINER_OAUTH_PUBLIC_URL` (a literal URL) overrides it. OAuth
   redirects then come back to `<public_url>/oauth/callback/<server>`, served
-  by the combiner itself.
+  by the combiner itself. A server that has to be told that URI (one set up
+  with the combiner as its OAuth client) can be given `{oauth_redirect}` in its
+  entry's `args`, `env`, `headers` or `url` — or in the `sharedServers` /
+  `externalServers` entry it uses, when only that server uses it.
   Register that redirect URI with the OAuth client; for Google this needs a
   **Web application** client (Desktop clients only allow loopback redirects).
   The callback route needs no bearer token — the browser has none — and is

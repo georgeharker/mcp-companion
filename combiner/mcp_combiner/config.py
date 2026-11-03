@@ -787,6 +787,89 @@ def resolve_public_url(setting: str | None) -> str | None:
     return f"{scheme}://{authority.replace(AUTO_HOST, name)}{slash}{path}"
 
 
+OAUTH_REDIRECT = "{oauth_redirect}"
+
+
+def oauth_redirect_uri(public_url: str, server: str) -> str:
+    """Where the combiner receives *server*'s OAuth redirect (the
+    ``/oauth/callback/<server>`` route) under *public_url*."""
+    from urllib.parse import quote
+
+    return f"{public_url}/oauth/callback/{quote(server, safe='')}"
+
+
+def _replace_in(value: Any, text: str) -> Any:
+    """*value* with ``{oauth_redirect}`` replaced by *text* in every string."""
+    if isinstance(value, str):
+        return value.replace(OAUTH_REDIRECT, text)
+    if isinstance(value, list):
+        return [_replace_in(v, text) for v in value]
+    if isinstance(value, dict):
+        return {k: _replace_in(v, text) for k, v in value.items()}
+    return value
+
+
+def _mentions(value: Any) -> bool:
+    if isinstance(value, str):
+        return OAUTH_REDIRECT in value
+    if isinstance(value, list):
+        return any(_mentions(v) for v in value)
+    if isinstance(value, dict):
+        return any(_mentions(v) for v in value.values())
+    return False
+
+
+def expand_oauth_redirects(
+    servers: dict[str, Any],
+    shared: dict[str, Any],
+    external: dict[str, Any],
+    public_url: str | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Expand ``{oauth_redirect}`` in raw config entries: a server's own entry
+    gets its callback URL (:func:`oauth_redirect_uri`); a ``sharedServers`` /
+    ``externalServers`` entry gets the callback of the one server that uses it.
+    For servers that must be told the combiner's redirect URI (an external
+    OAuth provider setup). Left as-is, with a warning, without a public URL or
+    when a backing entry serves several servers."""
+    if not any(_mentions(t) for t in (servers, shared, external)):
+        return servers, shared, external
+    if public_url is None:
+        logger.warning(
+            "{oauth_redirect} needs oauth.public_url (or %s): left unexpanded", PUBLIC_URL_ENV
+        )
+        return servers, shared, external
+    servers = {
+        name: _replace_in(entry, oauth_redirect_uri(public_url, name))
+        for name, entry in servers.items()
+    }
+
+    def backing(table: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for name, entry in table.items():
+            if not _mentions(entry):
+                out[name] = entry
+                continue
+            users = [
+                server
+                for server, srv in servers.items()
+                if isinstance(srv, dict) and any(srv.get(k) == name for k in keys)
+            ]
+            if len(users) == 1:
+                out[name] = _replace_in(entry, oauth_redirect_uri(public_url, users[0]))
+            else:
+                logger.warning(
+                    "{oauth_redirect} in '%s' is ambiguous: used by %s — left unexpanded",
+                    name,
+                    users or "no server",
+                )
+                out[name] = entry
+        return out
+
+    shared = backing(shared, ("sharedServer", "shared_server"))
+    external = backing(external, ("externalServer", "external_server"))
+    return servers, shared, external
+
+
 class IsolationConfig(BaseModel):
     """Lifecycle knobs for token-keyed isolated upstream sessions.
 
@@ -901,17 +984,26 @@ class CombinerConfig(BaseModel):
         except json.JSONDecodeError as exc:
             raise ValueError(f"Config file {path} is not valid JSON: {exc}") from exc
 
+        # Resolved first: {oauth_redirect} in server entries names its result.
+        # Always parsed, so $MCP_COMBINER_OAUTH_PUBLIC_URL applies without an
+        # "oauth" block.
+        raw_oauth: dict[str, Any] = raw.get("oauth", {})
+        oauth = OAuthConfig.from_dict(raw_oauth)
+
         raw_servers: dict[str, Any] = raw.get("servers", raw.get("mcpServers", {}))
+        raw_shared: dict[str, Any] = raw.get("sharedServers", {})
+        raw_external: dict[str, Any] = raw.get("externalServers", {})
+        raw_servers, raw_shared, raw_external = expand_oauth_redirects(
+            raw_servers, raw_shared, raw_external, oauth.public_url
+        )
         servers = {
             name: ServerConfig.from_dict(name, srv_data) for name, srv_data in raw_servers.items()
         }
 
-        raw_shared: dict[str, Any] = raw.get("sharedServers", {})
         shared_servers = {
             name: SharedServerConfig.from_dict(name, data) for name, data in raw_shared.items()
         }
 
-        raw_external: dict[str, Any] = raw.get("externalServers", {})
         external_servers = {
             name: ExternalServerConfig.from_dict(name, data) for name, data in raw_external.items()
         }
@@ -941,8 +1033,6 @@ class CombinerConfig(BaseModel):
                         field,
                     )
 
-        raw_oauth: dict[str, Any] = raw.get("oauth", {})
-        oauth = OAuthConfig.from_dict(raw_oauth) if raw_oauth else OAuthConfig()
         # Validates every server's prompt up front (a typo fails the load, not
         # the first re-auth) and flags elicitation that can't reach a remote device.
         for name, srv in servers.items():

@@ -25,7 +25,7 @@ import time
 import typing
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import anyio
 import httpx2
@@ -56,7 +56,7 @@ from mcp.shared.auth import AuthorizationCodeResult, OAuthToken
 from pydantic import AnyHttpUrl
 
 from mcp_combiner import authprompt
-from mcp_combiner.config import AuthPrompt, resolve_auth_prompt
+from mcp_combiner.config import AuthPrompt, oauth_redirect_uri, resolve_auth_prompt
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -289,9 +289,7 @@ class _RefreshTokenOAuth(OAuth):
             return
         # Redirect back to the combiner's own /oauth/callback/<server> route
         # instead of the loopback callback server the parent configured.
-        redirect = AnyHttpUrl(
-            f"{self.public_url}/oauth/callback/{quote(self.server_name, safe='')}"
-        )
+        redirect = AnyHttpUrl(oauth_redirect_uri(self.public_url, self.server_name))
         self.context.client_metadata.redirect_uris = [redirect]
         if self._static_client_info is not None:
             self._static_client_info.redirect_uris = [redirect]

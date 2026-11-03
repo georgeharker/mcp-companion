@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
+
 import pytest
 
-from mcp_combiner.config import PUBLIC_URL_ENV, OAuthConfig, resolve_public_url
+from mcp_combiner.config import (
+    PUBLIC_URL_ENV,
+    CombinerConfig,
+    OAuthConfig,
+    resolve_public_url,
+)
 from mcp_combiner.runtime import RUNTIME
 
 NAME = "box.tailnet.ts.net"
@@ -63,3 +72,75 @@ def test_auto_without_a_tailnet_means_loopback_links(monkeypatch: pytest.MonkeyP
 
 def test_the_config_stores_the_resolved_url() -> None:
     assert OAuthConfig.from_dict({"public_url": "auto"}).public_url == f"http://{NAME}:9741"
+
+
+# ── {oauth_redirect} in server entries ─────────────────────────────
+
+
+def _load(tmp_path: Path, doc: dict[str, object]) -> CombinerConfig:
+    path = tmp_path / "servers.json"
+    path.write_text(json.dumps(doc))
+    return CombinerConfig.load(str(path))
+
+
+def test_oauth_redirect_expands_per_server(tmp_path: Path) -> None:
+    config = _load(
+        tmp_path,
+        {
+            "oauth": {"public_url": "auto"},
+            "servers": {
+                "gws": {
+                    "command": "gws-mcp",
+                    "env": {"REDIRECT_URI": "{oauth_redirect}"},
+                    "args": ["--redirect", "{oauth_redirect}"],
+                },
+                "other": {"url": "http://127.0.0.1:1/mcp?cb={oauth_redirect}"},
+            },
+        },
+    )
+    gws = f"http://{NAME}:9741/oauth/callback/gws"
+    assert config.servers["gws"].env == {"REDIRECT_URI": gws}
+    assert config.servers["gws"].args == ["--redirect", gws]
+    assert config.servers["other"].url == (
+        f"http://127.0.0.1:1/mcp?cb=http://{NAME}:9741/oauth/callback/other"
+    )
+
+
+def test_oauth_redirect_in_a_backing_entry_names_its_one_user(tmp_path: Path) -> None:
+    config = _load(
+        tmp_path,
+        {
+            "oauth": {"public_url": "https://auth.example.com"},
+            "sharedServers": {
+                "gws-proc": {"command": "gws", "env": {"CB": "{oauth_redirect}"}},
+                "shared-twice": {"command": "x", "env": {"CB": "{oauth_redirect}"}},
+            },
+            "servers": {
+                "gws": {"url": "http://127.0.0.1:1/mcp", "sharedServer": "gws-proc"},
+                "a": {"url": "http://127.0.0.1:2/mcp", "sharedServer": "shared-twice"},
+                "b": {"url": "http://127.0.0.1:3/mcp", "sharedServer": "shared-twice"},
+            },
+        },
+    )
+    assert config.shared_servers["gws-proc"].env == {
+        "CB": "https://auth.example.com/oauth/callback/gws"
+    }
+    assert config.shared_servers["shared-twice"].env == {"CB": "{oauth_redirect}"}
+
+
+def test_oauth_redirect_needs_a_public_url(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="mcp-combiner"):
+        config = _load(tmp_path, {"servers": {"s": {"command": "x", "args": ["{oauth_redirect}"]}}})
+    assert config.servers["s"].args == ["{oauth_redirect}"]
+    assert "needs oauth.public_url" in caplog.text
+
+
+def test_the_env_url_applies_without_an_oauth_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(PUBLIC_URL_ENV, "https://auth.example.com")
+    config = _load(tmp_path, {"servers": {"s": {"command": "x", "args": ["{oauth_redirect}"]}}})
+    assert config.oauth.public_url == "https://auth.example.com"
+    assert config.servers["s"].args == ["https://auth.example.com/oauth/callback/s"]
