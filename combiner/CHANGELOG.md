@@ -15,6 +15,20 @@ tagged `vX.Y.Z`.
   answer. The upstream is not called until consent is given; "Allow for
   session" is remembered per chat token as before. (Before, a 2026 client
   silently got the `elicitUnavailable` fallback.)
+- **Per-server `protocol` setting** — `auto` (default), `legacy` or `2026`:
+  which MCP revision the combiner speaks to an upstream. `auto` asks the server
+  (`server/discover`) before mounting it; a server listing 2026-07-28 is
+  treated as handling its own sessions (one shared connection, `isolate`
+  ignored). Stdio, OAuth-protected and unreachable servers use the handshake.
+  **Upgrade note:** every mcp 2 server answers discover with 2026 unless it
+  pins itself, so a server that still keeps per-connection state (e.g.
+  svg-mcp 0.9.0) needs `"protocol": "legacy"` until it supports explicit
+  sessions. The bundled mock server pins itself unless `--offer-2026`.
+- **Reverse bridge:** a handshake-era client calling a 2026 upstream that asks
+  for input by returning `InputRequiredResult` is asked live
+  (`elicitation/create`), and the call is retried with the answer, repeatedly
+  if the upstream asks again (bounded). A 2026-era client reaches a 2026
+  upstream natively.
 - Era translation, part 3 (behind the same flag): **held calls**. When a
   handshake-era upstream (isolated, so it forwards elicitation) asks for
   input mid-call and the client is on the 2026 revision, the combiner keeps

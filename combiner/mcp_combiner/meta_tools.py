@@ -245,6 +245,9 @@ def register_meta_tools(
             # servers or ones already up. "Enabled" is the start trigger.
             await proc_manager.ensure_started(server_name)
 
+            from mcp_combiner import upstream_era
+
+            await upstream_era.resolve(server_name, srv)
             # Open persistent connection for HTTP/SSE servers
             if conn_manager.is_http_server(srv):
                 if conn_manager.has_connection(server_name):
@@ -372,6 +375,9 @@ def register_meta_tools(
         from mcp_combiner.proxyfactory import _create_server_proxy
 
         await proc_manager.ensure_started(server_name)
+        from mcp_combiner import upstream_era
+
+        await upstream_era.resolve(server_name, srv)
         if conn_manager.is_http_server(srv):
             if conn_manager.is_auth_failed(server_name):
                 conn_manager.reset_auth_failure(server_name)

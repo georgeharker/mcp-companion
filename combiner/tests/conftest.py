@@ -78,6 +78,7 @@ def mockserver_argv(
     port: int | None = None,
     tools_path: Path | None = None,
     state_dir: Path | None = None,
+    offer_2026: bool = False,
 ) -> list[str]:
     """Argv for `python -m mcp_combiner.mockserver` — usable directly for a
     subprocess (http mode) or as a stdio config entry's command/args."""
@@ -89,6 +90,8 @@ def mockserver_argv(
         argv += ["--tools", str(tools_path)]
     if state_dir is not None:
         argv += ["--state-dir", str(state_dir)]
+    if offer_2026:
+        argv.append("--offer-2026")
     return argv
 
 
@@ -347,10 +350,18 @@ class ProcFactory:
         tools_path: Path | None = None,
         state_dir: Path | None = None,
         wait: bool = True,
+        offer_2026: bool = False,
     ) -> MockHandle:
         port = port or free_port()
         proc = subprocess.Popen(
-            mockserver_argv(name, "http", port=port, tools_path=tools_path, state_dir=state_dir),
+            mockserver_argv(
+                name,
+                "http",
+                port=port,
+                tools_path=tools_path,
+                state_dir=state_dir,
+                offer_2026=offer_2026,
+            ),
             cwd=str(COMBINER_DIR),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

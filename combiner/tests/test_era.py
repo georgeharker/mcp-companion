@@ -31,7 +31,10 @@ from mcp.client.subscriptions import listen
 from mcp.shared.subscriptions import ToolsListChanged
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
 
+from mcp_combiner import upstream_era
+from mcp_combiner.config import ServerConfig
 from mcp_combiner.era import OFFER_2026_ENV
+from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 pytestmark = pytest.mark.e2e
 
@@ -221,3 +224,109 @@ class TestHeldCalls:
         async with Client(f"{combiner.mcp_url}/chat-held-003", elicitation_handler=slow) as c:
             with pytest.raises(ToolError, match="Call the tool again"):
                 await c.call_tool("mockup_mock__elicit_form", {})
+
+
+# ── upstream era: protocol override + the reverse bridge ───────────
+
+
+class TestUpstreamEraDecision:
+    """What protocol: auto/legacy/2026 resolves to without any probe."""
+
+    async def test_explicit_settings_win(self) -> None:
+        legacy = ServerConfig.from_dict(
+            "a", {"url": "http://127.0.0.1:1/mcp", "protocol": "legacy"}
+        )
+        modern = ServerConfig.from_dict("b", {"url": "http://127.0.0.1:1/mcp", "protocol": "2026"})
+        assert await upstream_era.resolve("a", legacy) == "legacy"
+        assert await upstream_era.resolve("b", modern) == "2026"
+        assert upstream_era.client_mode("b") == upstream_era.MODERN_CLIENT_MODE
+
+    async def test_auto_falls_back_for_unprobeable_servers(self) -> None:
+        stdio = ServerConfig.from_dict("s", {"command": "true"})
+        oauth = ServerConfig.from_dict("o", {"url": "http://127.0.0.1:1/mcp", "auth": "oauth"})
+        down = ServerConfig.from_dict("d", {"url": "http://127.0.0.1:1/mcp"})
+        for name, srv in (("s", stdio), ("o", oauth), ("d", down)):
+            assert await upstream_era.resolve(name, srv) == "legacy", name
+
+
+async def _reverse_combiner(
+    procs: ProcFactory,
+    tmp_path: Path,
+    *,
+    mock_offers_2026: bool,
+    protocol: str | None = None,
+    offer_downstream: bool = False,
+) -> CombinerHandle:
+    mock = await procs.start_http_mock("mockup", offer_2026=mock_offers_2026)
+    entry: dict[str, Any] = {**http_mock_entry(mock.port), "isolate": True}
+    if protocol is not None:
+        entry["protocol"] = protocol
+    config = write_servers_config(tmp_path / "servers.json", {"mockup": entry})
+    env = {OFFER_2026_ENV: "1"} if offer_downstream else None
+    combiner = await procs.start_combiner(
+        config, env=env, extra_args=["--log-file", str(tmp_path / "combiner.log")]
+    )
+    await combiner.wait_server_state("mockup", ("ready",))
+    return combiner
+
+
+def _upstream_era_logged(tmp_path: Path) -> str:
+    text = (tmp_path / "combiner.log").read_text()
+    found = [era for era in ("2026", "legacy") if f"Upstream 'mockup': {era} protocol" in text]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def _guard_saw(result: Any) -> dict[str, Any]:
+    text = content_text(result)
+    assert text.startswith("guard: "), text[:200]
+    return json_object(text.removeprefix("guard: "))
+
+
+class TestReverseBridge:
+    """A 2026-era upstream asks by returning InputRequiredResult."""
+
+    async def test_auto_detects_a_2026_upstream_and_bridges_a_handshake_client(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner = await _reverse_combiner(procs, tmp_path, mock_offers_2026=True)
+        assert _upstream_era_logged(tmp_path) == "2026"
+        asked: list[str] = []
+
+        async def answer(message: str, response_type: Any, params: Any, context: object) -> Any:
+            asked.append(message)
+            return ANSWER
+
+        url = f"{combiner.mcp_url}/chat-rev-0001"
+        async with Client(url, elicitation_handler=answer, mode=CLIENT_CONNECT_MODE) as c:
+            assert c.protocol_version not in MODERN_PROTOCOL_VERSIONS
+            payload = _guard_saw(await c.call_tool("mockup_mock__ask_guard", {}))
+        assert asked and "Guard confirmation" in asked[0]
+        assert payload == {"action": "accept", "content": ANSWER}
+
+    async def test_a_2026_client_reaches_a_2026_upstream_natively(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner = await _reverse_combiner(
+            procs, tmp_path, mock_offers_2026=True, offer_downstream=True
+        )
+
+        async def answer(message: str, response_type: Any, params: Any, context: object) -> Any:
+            return ANSWER
+
+        async with Client(f"{combiner.mcp_url}/chat-rev-0002", elicitation_handler=answer) as c:
+            assert c.protocol_version in MODERN_PROTOCOL_VERSIONS
+            payload = _guard_saw(await c.call_tool("mockup_mock__ask_guard", {}))
+        assert payload == {"action": "accept", "content": ANSWER}
+
+    async def test_a_pinned_upstream_stays_on_the_handshake(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        await _reverse_combiner(procs, tmp_path, mock_offers_2026=False)
+        assert _upstream_era_logged(tmp_path) == "legacy"
+
+    async def test_protocol_legacy_overrides_a_2026_upstream(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        await _reverse_combiner(procs, tmp_path, mock_offers_2026=True, protocol="legacy")
+        assert _upstream_era_logged(tmp_path) == "legacy"

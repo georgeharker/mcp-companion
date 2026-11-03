@@ -536,6 +536,10 @@ class ToolProcessingMiddleware(Middleware):
                 )
             else:
                 result = await call_next(context)
+                if fctx is not None and not era_2026:
+                    # A 2026-era upstream asks by returning InputRequiredResult,
+                    # which this handshake-era client can't take: ask it live.
+                    result = await _answer_upstream_asks(context, call_next, fctx, result)
         except NotFoundError:
             # Protocol error — wrong tool name or server disabled. Re-raise
             # so the MCP layer returns a -32002 JSON-RPC error, not a tool result.
@@ -737,3 +741,77 @@ def _chat_token() -> str | None:
         return get_http_headers().get(TOKEN_HEADER) or None
     except Exception:
         return None
+
+
+#: Bound on reverse-bridge rounds for one call (an upstream that keeps asking).
+_MAX_INPUT_ROUNDS = 8
+
+
+async def _answer_upstream_asks(
+    context: MiddlewareContext[mt.CallToolRequestParams],
+    call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    fctx: Context,
+    result: ToolResult,
+) -> ToolResult:
+    """The reverse bridge: a handshake-era client, a 2026-era upstream.
+
+    The upstream asks for input by returning an ``InputRequiredResult``. Each
+    request in it is put to this client live (``elicitation/create`` on its
+    session); the call is then repeated with the answers — fastmcp's proxy
+    forwards ``input_responses`` / ``request_state`` to a 2026-era backend —
+    until the upstream returns a real result.
+
+    The answers ride the current wire request's raw params: every fastmcp
+    ``Context`` (the mounted proxy server runs the tool under its own) parses
+    ``input_responses`` / ``request_state`` from there, so that is the one
+    place a retry's answers reach the proxy. Restored afterwards.
+    """
+    params = _raw_request_params(fctx)
+    if params is None:
+        return result  # no wire request to carry answers on: the ask stands
+    rounds = 0
+    try:
+        while isinstance(result, InputRequiredToolResult):
+            rounds += 1
+            if rounds > _MAX_INPUT_ROUNDS:
+                raise ToolError(f"The upstream asked for input more than {_MAX_INPUT_ROUNDS} times")
+            ask = result.input_required
+            answers: dict[str, Any] = {}
+            for key, request in (ask.input_requests or {}).items():
+                answer = await _ask_live(fctx, request)
+                answers[key] = answer.model_dump(by_alias=True, mode="json", exclude_none=True)
+            params["inputResponses"] = answers
+            if ask.request_state is not None:
+                params["requestState"] = ask.request_state
+            else:
+                params.pop("requestState", None)
+            result = await call_next(context)
+    finally:
+        params.pop("inputResponses", None)
+        params.pop("requestState", None)
+    return result
+
+
+def _raw_request_params(fctx: Context) -> dict[str, Any] | None:
+    """The current wire request's raw params dict (shared by every fastmcp
+    ``Context`` of this request), or ``None`` outside one."""
+    rc = fctx.request_context
+    params = rc._srctx.params if rc is not None else None
+    return params if isinstance(params, dict) else None
+
+
+async def _ask_live(fctx: Context, request: mt.InputRequest) -> mt.InputResponse:
+    """Put one upstream input request to the handshake-era client."""
+    if not isinstance(request, mt.ElicitRequest) or not isinstance(
+        request.params, mt.ElicitRequestFormParams
+    ):
+        raise ToolError(
+            "The upstream asked for input this client can't be asked for here "
+            f"({type(request).__name__}); only form elicitation is bridged"
+        )
+    answer = await fctx.session.elicit(
+        message=request.params.message,
+        requested_schema=request.params.requested_schema,
+        related_request_id=fctx.request_id,
+    )
+    return mt.ElicitResult(action=answer.action, content=answer.content)

@@ -427,6 +427,21 @@ class ServerConfig(BaseModel):
     ``permissions`` block).  ``None`` = inherit the global policy.  See
     :class:`PermissionPolicy`.  Gates tool *calls* only, never publication."""
 
+    protocol: UpstreamProtocol = "auto"
+    """Which MCP protocol era the combiner speaks to this upstream.
+
+    - ``"auto"`` (default): probe the server's ``server/discover`` before
+      mounting it. A server listing the 2026-07-28 revision is treated as
+      handling its own sessions (explicit session ids on its tools): it is
+      connected on that revision over one shared connection, and ``isolate``
+      is ignored. Otherwise — and for servers that can't be probed (stdio,
+      OAuth, unreachable) — the ``initialize`` handshake.
+    - ``"legacy"``: always the handshake (stateful ``Mcp-Session-Id``; isolation
+      and resume apply). Use for a server that answers discover with 2026 but
+      keeps per-connection state (every mcp 2 server does by default).
+    - ``"2026"``: always the 2026-07-28 revision.
+    """
+
     isolate: bool | None = None
     """Tri-state: give each downstream chat its own upstream MCP session.
 
@@ -481,6 +496,7 @@ class ServerConfig(BaseModel):
                 "tool_filter",
                 "permissions",
                 "isolate",
+                "protocol",
             },
         )
         transport_str = data.get("transport")
@@ -519,6 +535,7 @@ class ServerConfig(BaseModel):
             tool_filter=tool_filter,
             permissions=PermissionPolicy.from_dict(data.get("permissions")),
             isolate=(None if data.get("isolate") is None else bool(data["isolate"])),
+            protocol=_upstream_protocol(name, data.get("protocol")),
         )
 
 
@@ -567,6 +584,23 @@ class HealthResponse(BaseModel):
     servers: dict[str, ServerStatusInfo] = Field(default_factory=dict)
     config_path: str = ""
     pending_oauth: list[str] = Field(default_factory=list)
+
+
+UpstreamProtocol = Literal["auto", "legacy", "2026"]
+UPSTREAM_PROTOCOLS: tuple[UpstreamProtocol, ...] = ("auto", "legacy", "2026")
+
+
+def _upstream_protocol(server_name: str, raw: object) -> UpstreamProtocol:
+    """A server's ``protocol`` setting (absent = ``"auto"``)."""
+    if raw is None:
+        return "auto"
+    for choice in UPSTREAM_PROTOCOLS:
+        if raw == choice:
+            return choice
+    raise ValueError(
+        f"Server '{server_name}': protocol must be one of {', '.join(UPSTREAM_PROTOCOLS)}; "
+        f"got {raw!r}"
+    )
 
 
 AuthPrompt = Literal["elicit", "browser", "both"]

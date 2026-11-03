@@ -580,6 +580,34 @@ class MockServer:
                 raise
 
         @mcp_srv.tool(
+            name="mock__ask_guard",
+            description=(
+                "2026-era guard tool: asks for the 4-property form by RETURNING an "
+                "InputRequiredResult (no server-initiated request), then echoes the "
+                "answer the client's retry carried. Handshake-era callers can't "
+                "receive the ask \u2014 the combiner's reverse bridge answers it."
+            ),
+        )
+        async def mock__ask_guard(ctx: Context) -> Any:
+            state.record_call("mock__ask_guard", ctx.session_id)
+            answer = (ctx.input_responses or {}).get("form")
+            if isinstance(answer, mcp.types.ElicitResult) and ctx.request_state == "guard-form":
+                return "guard: " + json.dumps(
+                    {"action": answer.action, "content": answer.content}, sort_keys=False
+                )
+            return mcp.types.InputRequiredResult(
+                input_requests={
+                    "form": mcp.types.ElicitRequest(
+                        params=mcp.types.ElicitRequestFormParams(
+                            message="Guard confirmation \u2014 answer each field",
+                            requested_schema=_ELICIT_FORM_SCHEMA,
+                        )
+                    )
+                },
+                request_state="guard-form",
+            )
+
+        @mcp_srv.tool(
             name="mock__widget_ping",
             description="Target for widget-initiated tool calls (mcp-app host tests).",
         )
@@ -1233,6 +1261,15 @@ class MockOAuthProvider:
         await send({"type": "http.response.body", "body": body})
 
 
+def pin_handshake_only(mcp_srv: FastMCP) -> None:
+    """Answer server/discover with no supported versions, so a probing client
+    (and the combiner's protocol: auto) uses the handshake. HTTP only: on an
+    in-memory transport the probe would open a 2026 connection first."""
+    from mcp_combiner.era import pin_handshake_era
+
+    pin_handshake_era(mcp_srv, force=True)
+
+
 def build_server(
     name: str,
     transport: str,
@@ -1272,6 +1309,15 @@ def main(argv: list[str] | None = None) -> None:
         help="Directory for the persistent boot counter (enables boot_count tracking)",
     )
     parser.add_argument(
+        "--offer-2026",
+        action="store_true",
+        help=(
+            "Offer the 2026-07-28 revision on server/discover (HTTP). Off by default: "
+            "the mock keeps per-connection state, so it pins itself to the handshake "
+            "as session-unaware servers should."
+        ),
+    )
+    parser.add_argument(
         "--oauth",
         action="store_true",
         help=(
@@ -1297,11 +1343,15 @@ def main(argv: list[str] | None = None) -> None:
         issuer = f"http://{args.host}:{args.port}"
         provider = MockOAuthProvider(resource_url=f"{issuer}/mcp", issuer_url=issuer)
         mcp_srv, _state = build_server(args.name, args.transport, specs, state_dir, provider)
+        if not args.offer_2026:
+            pin_handshake_only(mcp_srv)
         app = provider.guard(mcp_srv.http_app())
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
         return
 
     mcp_srv, _state = build_server(args.name, args.transport, specs, state_dir)
+    if args.transport != "stdio" and not args.offer_2026:
+        pin_handshake_only(mcp_srv)
 
     if args.transport == "stdio":
         mcp_srv.run(transport="stdio")

@@ -268,6 +268,28 @@ format is supported:
 | `permissions`  | `object`           | Opt-in per-call allow/deny/elicit policy for this server's tools — see [Combiner-side tool-call permissions](#combiner-side-tool-call-permissions) |
 | `isolate`      | `boolean`          | Give each chat its own upstream MCP session (HTTP/SSE) or subprocess (stdio) — see [isolate](#isolate--per-chat-sessions)                          |
 | `externalServer` | `string`         | Name of an `externalServers` entry — a non-owned process (e.g. a `docker run` container) — see [externalServer](#externalserver--non-owned-processes)                                                           |
+| `protocol`     | `string`           | `auto` (default), `legacy` or `2026` — which MCP protocol revision the combiner speaks to this server; see [protocol](#protocol--which-mcp-revision-to-speak-upstream) |
+
+### protocol — which MCP revision to speak upstream
+
+MCP has two revisions in use: the stateful `initialize` handshake (a session per
+connection, `Mcp-Session-Id`) and the stateless 2026-07-28 revision (each request
+stands alone; a server that keeps state takes an explicit session id on its tools).
+
+- `auto` (default): before mounting the server, the combiner asks it
+  (`server/discover`). A server that lists 2026-07-28 is treated as handling its
+  own sessions and is spoken to on that revision over one shared connection —
+  `isolate` is ignored for it. Servers that can't be asked here (stdio,
+  OAuth-protected, unreachable at startup) use the handshake.
+- `legacy`: always the handshake. **Use this for a server that answers discover
+  with 2026 but still keeps per-connection state** — every server built on mcp 2
+  answers that way unless it pins itself to the handshake.
+- `2026`: always the 2026-07-28 revision.
+
+Clients and servers on different revisions are bridged both ways: a
+handshake-era client calling a 2026 server that asks for input mid-call is asked
+live and the call is retried with the answer; a 2026-era client calling a
+handshake server that elicits mid-call has the call held open across its retry.
 
 ### isolate — per-chat sessions
 

@@ -52,7 +52,8 @@ from mcp_combiner.config import (
     _interpolate_dict,
     _interpolate_str,
 )
-from mcp_combiner.runtime import CLIENT_CONNECT_MODE, MAX_SSE_EVENT_BYTES
+from mcp_combiner.runtime import MAX_SSE_EVENT_BYTES
+from mcp_combiner.upstream_era import client_mode
 from mcp_combiner.upstream_session import use_tolerant_session
 
 logger = logging.getLogger("mcp-combiner")
@@ -1053,7 +1054,7 @@ def _make_disconnected_client(
     # updates broadcast (target=None); see mcp_combiner.notifications.
     from mcp_combiner.notifications import attach_resource_forwarding
 
-    client = Client(transport, auth=auth, mode=CLIENT_CONNECT_MODE)
+    client = Client(transport, auth=auth, mode=client_mode(name))
     use_tolerant_session(client)
     attach_resource_forwarding(client, name)
     return client

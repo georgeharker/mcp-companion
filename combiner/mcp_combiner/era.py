@@ -48,14 +48,15 @@ async def _handshake_only_discover(
     return DiscoverResult(supported_versions=[], capabilities=ServerCapabilities())
 
 
-def pin_handshake_era(combiner: FastMCP[Any]) -> None:
+def pin_handshake_era(combiner: FastMCP[Any], *, force: bool = False) -> None:
     """Make ``server/discover`` list no supported versions (see module docs).
 
     Uses the mcp lowlevel server's public ``add_request_handler``, reached via
     fastmcp's ``_mcp_server`` (fastmcp's own route into it). If a fastmcp
-    upgrade moves it, the era e2e test fails loudly.
+    upgrade moves it, the era e2e test fails loudly. ``force`` pins regardless
+    of ``MCP_COMBINER_OFFER_2026`` (the mock server's own handshake pin).
     """
-    if offers_2026_era():
+    if offers_2026_era() and not force:
         logger.warning(
             "%s set: offering the 2026-07-28 revision to clients \u2014 the era "
             "translation layer is incomplete (no list_changed, no elicitation)",

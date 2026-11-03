@@ -339,6 +339,11 @@ def create_combiner(
         # fails, ConnectionManager marks _auth_failed and the factory
         # raises AuthenticationError for all subsequent calls.
         enabled = config.get_enabled_servers()
+        # Each upstream's protocol era (server/discover probes for protocol:
+        # auto, concurrently) — decided before its connection or proxy exists.
+        from mcp_combiner import upstream_era
+
+        await asyncio.gather(*(upstream_era.resolve(n, s) for n, s in enabled.items()))
         local_servers: list[str] = []
         for name, srv in enabled.items():
             # isolate now applies to BOTH transports: HTTP/SSE isolates

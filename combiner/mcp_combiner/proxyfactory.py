@@ -29,19 +29,24 @@ from mcp_combiner.connections import (
     build_http_transport,
 )
 from mcp_combiner.notifications import forwarding_factory
-from mcp_combiner.runtime import CLIENT_CONNECT_MODE, RUNTIME
+from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.upstream_era import client_mode, era_of
 
 logger = logging.getLogger("mcp-combiner")
 
 
-def _effective_isolate(srv: ServerConfig) -> bool:
+def _effective_isolate(srv: ServerConfig, name: str | None = None) -> bool:
     """Resolve the tri-state ``isolate`` into the actual per-chat isolation decision.
 
     ``isolate`` is ``None`` (absent → off), ``True`` (forced on) or ``False``
     (forced off). HTTP/SSE servers isolate per-chat **sessions** over one
     shared server instance; stdio servers isolate per-chat **subprocesses**
     (one ``command`` child per chat — a stdio subprocess IS a session).
+    A 2026-era upstream handles its own sessions, so it is never isolated
+    (see mcp_combiner.upstream_era).
     """
+    if name is not None and era_of(name) == "2026":
+        return False
     return bool(srv.isolate)
 
 
@@ -64,7 +69,7 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
     per downstream chat (one server instance, shared transport), so a stateful
     server is handed a unique ``Mcp-Session-Id`` per chat. See ``_create_isolated_proxy``.
     """
-    if _effective_isolate(srv):
+    if _effective_isolate(srv, name):
         return _create_isolated_proxy(config, name, srv)
 
     # Prefer persistent connection if available
@@ -90,7 +95,7 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
         # wrap it to re-attach point-of-use, then pass it via the PUBLIC
         # FastMCPProxy(client_factory=…) — no reach into the built proxy.
         # Broadcast (shared upstream, no per-chat).
-        client = Client(build_http_transport(srv), auth=auth, mode=CLIENT_CONNECT_MODE)
+        client = Client(build_http_transport(srv), auth=auth, mode=client_mode(name))
         factory = forwarding_factory(_create_client_factory(client), name, per_chat=False)
         return FastMCPProxy(client_factory=factory, name=name)
 
@@ -101,7 +106,7 @@ def _create_server_proxy(config: CombinerConfig, name: str, srv: ServerConfig) -
     # (which DO emit resources/updated, e.g. svg-mcp) forward correctly.
     proxy_config = config.to_fastmcp_config(name)
     base = _create_client_factory(
-        proxy_config.model_dump(exclude_none=True), mode=CLIENT_CONNECT_MODE
+        proxy_config.model_dump(exclude_none=True), mode=client_mode(name)
     )
     factory = forwarding_factory(base, name, per_chat=False)
     return FastMCPProxy(client_factory=factory, name=name)
