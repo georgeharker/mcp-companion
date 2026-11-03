@@ -4,7 +4,12 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
-## [Unreleased]
+## [0.21.0] — 2026-11-03
+
+Upgrade note: list responses are now paged (1000 items by default). Every
+client we ship follows `nextCursor`, as do Claude Code and the standard SDKs;
+for a client that doesn't, `MCP_COMBINER_LIST_PAGE_SIZE=0` restores single
+responses.
 
 ### Added
 
