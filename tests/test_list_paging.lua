@@ -75,6 +75,48 @@ looping:request_all("tools/list", "tools", function(err, items)
 end)
 ok(lerr == nil and litems and #litems == 250, "runaway cursor stops at 250 pages")
 
+-- refresh_capabilities fetches resource templates from resources/templates/list (paged)
+-- and groups them under their server, like resources.
+local updates = {}
+package.loaded["mcp_companion.state"] = {
+    update = function(key, value)
+        updates[key] = value
+    end,
+    emit = function() end,
+    field = function()
+        return nil
+    end,
+}
+local responses = {
+    ["tools/list"] = { { tools = { { name = "mockup_echo" } } } },
+    ["resources/list"] = { { resources = { { uri = "data://mockup/mock/readme" } } } },
+    ["prompts/list"] = { { prompts = {} } },
+    ["resources/templates/list"] = {
+        { resourceTemplates = { { uriTemplate = "svg://mockup/{id}/svg" } }, nextCursor = "p2" },
+        { resourceTemplates = { { uriTemplate = "notes://mockup/{name}" } } },
+    },
+}
+local caps = setmetatable({ _known_server_names = { "mockup" }, asked = {} }, { __index = Client })
+function caps:request(method, params, callback)
+    table.insert(self.asked, method)
+    local index = params and params.cursor and tonumber(params.cursor:match("^p(%d+)$")) or 1
+    callback(nil, responses[method][index])
+end
+local refreshed = false
+caps:refresh_capabilities(function()
+    refreshed = true
+end)
+ok(refreshed, "refresh completes with the templates request")
+ok(#caps.resource_templates == 2, "templates come from resources/templates/list, every page")
+local mockup
+for _, srv in ipairs(updates.servers or {}) do
+    if srv.name == "mockup" then
+        mockup = srv
+    end
+end
+ok(mockup and #mockup.resource_templates == 2, "templates grouped under their server")
+ok(mockup and #mockup.resources == 1, "resources still grouped")
+
 print(string.format("=== Results: %d passed, %d failed ===", pass, fail))
 if fail > 0 then
     vim.cmd("cq")

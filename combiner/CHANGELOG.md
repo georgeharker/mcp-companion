@@ -21,6 +21,13 @@ tagged `vX.Y.Z`.
   listed. `["ui://*"]` keeps only interactive widgets. Listing only — reading
   a resource by URI still works.
 
+### Fixed
+
+- Neovim plugin: resource templates are fetched with `resources/templates/list`
+  (paged), on connect, on refresh and on `resources/list_changed`, and grouped
+  under their server. They were read from the `resources/list` response, which
+  never carries them, so the plugin always had none.
+
 ## [0.20.0] — 2026-11-03
 
 Both MCP revisions, upstream and down. Upgrade notes: upstreams default to

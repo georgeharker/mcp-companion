@@ -649,8 +649,8 @@ function Client:connect(callback)
         -- Fetch server names and capabilities in parallel.
         -- Server names are needed by _update_server_state() which runs inside
         -- refresh_capabilities, so we collect all data first, then update.
-        -- Use a barrier: 4 tasks = 1 health + 3 capability requests.
-        local pending = 4
+        -- Use a barrier: 5 tasks = 1 health + 4 capability requests.
+        local pending = 5
         local function check_all_done()
             pending = pending - 1
             if pending == 0 then
@@ -682,12 +682,20 @@ function Client:connect(callback)
             check_all_done()
         end)
 
-        self:request_all("resources/list", "resources", function(req_err2, req_resources, req_first2)
+        self:request_all("resources/list", "resources", function(req_err2, req_resources)
             if not req_err2 and req_resources then
                 self.resources = req_resources
-                self.resource_templates = (req_first2 or {}).resourceTemplates or {}
             else
                 log.warn("resources/list failed: %s", tostring(req_err2))
+            end
+            check_all_done()
+        end)
+
+        self:request_all("resources/templates/list", "resourceTemplates", function(req_err4, req_templates)
+            if not req_err4 and req_templates then
+                self.resource_templates = req_templates
+            else
+                log.warn("resources/templates/list failed: %s", tostring(req_err4))
             end
             check_all_done()
         end)
@@ -778,8 +786,8 @@ end
 function Client:refresh_capabilities(callback)
     local state = require("mcp_companion.state")
 
-    -- Fire all three requests in parallel, collect results with a counter
-    local pending = 3
+    -- Fire all four requests in parallel, collect results with a counter
+    local pending = 4
     local function check_done()
         pending = pending - 1
         if pending == 0 then
@@ -801,12 +809,20 @@ function Client:refresh_capabilities(callback)
         check_done()
     end)
 
-    self:request_all("resources/list", "resources", function(err2, resources, first2)
+    self:request_all("resources/list", "resources", function(err2, resources)
         if not err2 and resources then
             self.resources = resources
-            self.resource_templates = (first2 or {}).resourceTemplates or {}
         else
             log.warn("resources/list failed: %s", tostring(err2))
+        end
+        check_done()
+    end)
+
+    self:request_all("resources/templates/list", "resourceTemplates", function(err4, templates)
+        if not err4 and templates then
+            self.resource_templates = templates
+        else
+            log.warn("resources/templates/list failed: %s", tostring(err4))
         end
         check_done()
     end)
@@ -910,6 +926,31 @@ function Client:_update_server_state()
             }
         end
         table.insert(server_map[assigned].resources, res)
+    end
+
+    -- Templates group the same way, by their URI template.
+    for _, tmpl in ipairs(self.resource_templates or {}) do
+        local assigned = "_combiner"
+        local uri = tmpl.uriTemplate
+        if type(uri) == "string" then
+            for name in pairs(known_server_set) do
+                if name ~= "_combiner" and uri:find("/" .. name .. "/", 1, true) then
+                    assigned = name
+                    break
+                end
+            end
+        end
+        if not server_map[assigned] then
+            server_map[assigned] = {
+                name = assigned,
+                status = "connected",
+                tools = {},
+                resources = {},
+                resource_templates = {},
+                prompts = {},
+            }
+        end
+        table.insert(server_map[assigned].resource_templates, tmpl)
     end
 
     -- Convert map to sorted array
@@ -1184,10 +1225,18 @@ function Client:_handle_sse_notification(msg)
             end)
         end)
     elseif msg.method == "notifications/resources/list_changed" then
-        self:request_all("resources/list", "resources", function(err, resources, first)
+        -- list_changed covers resource templates too.
+        self:request_all("resources/templates/list", "resourceTemplates", function(terr, templates)
+            if not terr and templates then
+                self.resource_templates = templates
+                self:_update_server_state()
+                state.emit("resource_list_changed")
+                state.emit("servers_updated")
+            end
+        end)
+        self:request_all("resources/list", "resources", function(err, resources)
             if not err and resources then
                 self.resources = resources
-                self.resource_templates = (first or {}).resourceTemplates or {}
                 self:_update_server_state()
                 state.emit("resource_list_changed")
                 state.emit("servers_updated")
