@@ -844,6 +844,23 @@ require("mcp_companion").setup({
 When you change the encryption key, existing cached tokens become unreadable and you'll
 need to re-authenticate with OAuth servers.
 
+### Bind addresses
+
+The combiner listens on `127.0.0.1` by default. To reach it from elsewhere — a
+remote widget renderer over Tailscale, say — set `bind.host` in servers.json to
+an address or a **list** of them:
+
+```json
+"bind": {"host": ["127.0.0.1", "tailscale"]}
+```
+
+`tailscale` is this machine's tailnet address, looked up at startup; `0.0.0.0`
+(or `::`) is every interface. An address that isn't up when the combiner
+starts is skipped with a warning (restart once it's back); startup fails only
+if none bind. `--host` and `MCP_COMBINER_HOST` override the config and take
+comma-separated lists. Binding anything beyond loopback without a bearer token
+(below) logs a warning.
+
 ### Inbound authentication (locking down `/mcp`)
 
 The above is backend auth (combiner → upstream servers). Separately, the combiner's

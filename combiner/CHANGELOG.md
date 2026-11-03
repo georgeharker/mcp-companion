@@ -15,6 +15,14 @@ tagged `vX.Y.Z`.
   answer. The upstream is not called until consent is given; "Allow for
   session" is remembered per chat token as before. (Before, a 2026 client
   silently got the `elicitUnavailable` fallback.)
+- **Bind to several addresses.** `bind.host` (servers.json) takes a list, and
+  `--host` / `MCP_COMBINER_HOST` a comma-separated one: e.g.
+  `["127.0.0.1", "tailscale"]` serves loopback and the tailnet but not the
+  LAN. `tailscale` resolves to this machine's tailnet address at startup; an
+  address that isn't up is skipped with a warning (startup fails only if none
+  bind); a wildcard covers the rest. The UI relay (port + 1) follows the same
+  bind. Any non-loopback bind without an inbound bearer token warns. The pi
+  plugin connects to the first entry (loopback for a wildcard or `tailscale`).
 - **Per-server `protocol` setting** — `auto` (default), `legacy` or `2026`:
   which MCP revision the combiner speaks to an upstream. `auto` asks the server
   (`server/discover`) before mounting it; a server listing 2026-07-28 is

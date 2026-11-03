@@ -863,6 +863,17 @@ function expandHome(p: string): string {
     return p
 }
 
+/** The address to REACH the combiner at, from its bind setting: the first entry of
+ *  a comma-separated list, with loopback standing in for a wildcard or the
+ *  `tailscale` alias (both name where it listens, not an address to dial). */
+function connectHost(bind: string | undefined): string {
+    const first = (bind ?? "").split(",")[0]?.trim() ?? ""
+    if (first === "" || first === "0.0.0.0" || first === "::" || first.toLowerCase() === "tailscale") {
+        return "127.0.0.1"
+    }
+    return first.includes(":") ? `[${first}]` : first
+}
+
 /** The URL the adapter should reach the combiner at — the host-owned URL if an
  *  editor supervises it, else host:port/mcp with the same defaults the extension
  *  serves on. A grouping-path token, if wanted, is preserved from any existing
@@ -870,7 +881,7 @@ function expandHome(p: string): string {
 function defaultCombinerUrl(): string {
     const explicit = env("MCP_COMPANION_COMBINER_URL")
     if (explicit) return explicit
-    const host = env("PI_MCP_COMBINER_HOST") ?? "127.0.0.1"
+    const host = connectHost(env("PI_MCP_COMBINER_HOST"))
     let port = DEFAULT_PORT
     const raw = env("PI_MCP_COMBINER_PORT")
     if (raw !== undefined) {

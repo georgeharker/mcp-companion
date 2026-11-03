@@ -150,6 +150,7 @@ def write_servers_config(
     shared_servers: dict[str, Any] | None = None,
     isolation: dict[str, Any] | None = None,
     oauth: dict[str, Any] | None = None,
+    bind: dict[str, Any] | None = None,
 ) -> Path:
     doc: dict[str, Any] = {"servers": servers}
     if shared_servers:
@@ -158,6 +159,8 @@ def write_servers_config(
         doc["isolation"] = isolation
     if oauth:
         doc["oauth"] = oauth
+    if bind:
+        doc["bind"] = bind
     path.write_text(json.dumps(doc, indent=2))
     return path
 

@@ -19,6 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response
 
+from mcp_combiner.binding import DEFAULT_HOST, parse_hosts, resolve_hosts
 from mcp_combiner.inbound_auth import BearerAuthMiddleware, resolve_auth_token
 from mcp_combiner.runtime import RUNTIME
 from mcp_combiner.server import create_combiner
@@ -75,7 +76,9 @@ class ServeOptions:
     """Everything serve mode needs, resolved from CLI args (or env fallback)."""
 
     config: str
-    host: str = "127.0.0.1"
+    #: The addresses to listen on, already resolved (``binding.resolve_hosts``);
+    #: the first is the primary, used where one address must be named.
+    hosts: list[str] = field(default_factory=lambda: [DEFAULT_HOST])
     port: int = 9741
     oauth_cache: bool | None = None
     oauth_token_dir: str | None = None
@@ -93,11 +96,16 @@ class ServeOptions:
     #: :func:`resolve_auth_token`.
     auth_token: str | None = None
 
+    @property
+    def host(self) -> str:
+        """The primary bind address."""
+        return self.hosts[0] if self.hosts else DEFAULT_HOST
+
     @classmethod
     def from_env(cls) -> ServeOptions:
         """Fallback construction from MCP_COMBINER_* env vars (factory launches).
         The bind host resolves CLI > env > config bind.host > loopback via
-        :func:`resolve_bind_host` (the config path comes from
+        :func:`resolve_bind_hosts` (the config path comes from
         ``$MCP_COMBINER_CONFIG``)."""
 
         def _tristate(name: str) -> bool | None:
@@ -111,7 +119,7 @@ class ServeOptions:
         cfg_path = os.environ["MCP_COMBINER_CONFIG"]
         return cls(
             config=cfg_path,
-            host=resolve_bind_host(None, cfg_path),
+            hosts=resolve_bind_hosts(None, cfg_path),
             oauth_cache=_tristate("MCP_COMBINER_OAUTH_CACHE"),
             oauth_token_dir=os.environ.get("MCP_COMBINER_OAUTH_TOKEN_DIR"),
             normalize_schema=os.environ.get("MCP_COMBINER_NORMALIZE_SCHEMA") == "1",
@@ -331,25 +339,25 @@ class MCPRequestLogMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def resolve_bind_host(cli_host: str | None, config_path: str) -> str:
-    """The serve bind host: CLI ``--host`` > env ``MCP_COMBINER_HOST`` > the
-    config's ``bind.host`` (servers.json) > ``127.0.0.1``.
+def resolve_bind_hosts(cli_host: str | None, config_path: str) -> list[str]:
+    """The addresses to serve on: CLI ``--host`` > env ``MCP_COMBINER_HOST`` >
+    the config's ``bind.host`` (servers.json) > ``127.0.0.1`` — the first one
+    set wins whole (CLI / env take comma-separated lists). Resolved: see
+    ``mcp_combiner.binding.resolve_hosts``.
 
     The config setting is the durable home — the sharedserver registration is
     per-running-instance and dies with every grace-stop, and env vars depend
     on the launching shell; the config file is read fresh on every start.
     """
-    if cli_host:
-        return cli_host
-    env_host = os.environ.get("MCP_COMBINER_HOST", "").strip()
-    if env_host:
-        return env_host
-    try:
-        from mcp_combiner.config import CombinerConfig
+    entries = parse_hosts(cli_host) or parse_hosts(os.environ.get("MCP_COMBINER_HOST"))
+    if not entries:
+        try:
+            from mcp_combiner.config import CombinerConfig
 
-        return CombinerConfig.load(config_path).bind.host
-    except Exception:
-        return "127.0.0.1"
+            entries = parse_hosts(CombinerConfig.load(config_path).bind.host)
+        except Exception:
+            entries = []
+    return resolve_hosts(entries) or [DEFAULT_HOST]
 
 
 def create_app(options: ServeOptions | None = None) -> Starlette:

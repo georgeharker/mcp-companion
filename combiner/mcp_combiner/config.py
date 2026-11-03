@@ -763,9 +763,13 @@ class BindConfig(BaseModel):
     ``MCP_COMBINER_HOST`` > this setting > the ``127.0.0.1`` default. Binding
     ``0.0.0.0`` serves loopback + every interface (LAN + tailnet) — required
     for the remote widget leg (docs/designs/advertised-ui-origin.md).
+
+    ``host`` may be a list — ``["127.0.0.1", "tailscale"]`` listens on loopback
+    and the tailnet only (``tailscale`` resolves to this machine's tailnet
+    address at startup); see ``mcp_combiner.binding``.
     """
 
-    host: str = "127.0.0.1"
+    host: str | list[str] = "127.0.0.1"
 
 
 class ValidationConfig(BaseModel):

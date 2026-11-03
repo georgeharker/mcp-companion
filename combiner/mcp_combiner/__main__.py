@@ -22,7 +22,7 @@ import types
 import uvicorn
 
 from mcp_combiner import ctl
-from mcp_combiner.asgi import ServeOptions, create_app, resolve_bind_host
+from mcp_combiner.asgi import ServeOptions, create_app, resolve_bind_hosts
 from mcp_combiner.inbound_auth import resolve_auth_token
 from mcp_combiner.schemafix import SCHEMA_FIXES
 from mcp_combiner.sharedserver import cleanup as cleanup_sharedservers
@@ -74,7 +74,10 @@ def _add_serve_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--host",
         default=None,
-        help="Bind host (default: $MCP_COMBINER_HOST, then the config's bind.host, then loopback)",
+        help=(
+            "Bind address(es), comma-separated; 'tailscale' = this machine's tailnet "
+            "address (default: $MCP_COMBINER_HOST, then the config's bind.host, then loopback)"
+        ),
     )
 
     # OAuth token-caching overrides (both override the config-file 'oauth' section)
@@ -257,7 +260,7 @@ def _setup_logging(log_level: str, log_file: str | None) -> None:
 def _serve(args: argparse.Namespace) -> None:
     options = ServeOptions(
         config=args.config,
-        host=resolve_bind_host(args.host, args.config),
+        hosts=resolve_bind_hosts(args.host, args.config),
         port=args.port,
         oauth_cache=args.oauth_cache,
         oauth_token_dir=args.oauth_token_dir,
@@ -282,6 +285,21 @@ def _serve(args: argparse.Namespace) -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
+    # Bind first: a port in use fails here, before any upstream is touched.
+    # Addresses that aren't up are skipped (mcp_combiner.binding).
+    from mcp_combiner.binding import bind_sockets, is_loopback
+
+    main_sockets = bind_sockets(options.hosts, options.port)
+    relay_sockets = bind_sockets(options.hosts, options.port + 1)
+    exposed = [h for h in options.hosts if not is_loopback(h)]
+    if exposed and options.auth_token is None:
+        logging.getLogger("mcp-combiner").warning(
+            "bind: serving on %s with NO inbound bearer token — anyone who can reach "
+            "these addresses can use every upstream. Set MCP_COMBINER_AUTH_TOKEN or "
+            "--auth-token-file.",
+            ", ".join(exposed),
+        )
+
     # Single worker - async handles concurrency
     app = create_app(options)
 
@@ -296,22 +314,16 @@ def _serve(args: argparse.Namespace) -> None:
 
     from mcp_combiner.ui_host import get_relay_app
 
+    relay = uvicorn.Server(uvicorn.Config(get_relay_app(options), log_level="warning"))
     relay_thread = threading.Thread(
-        target=lambda: uvicorn.run(
-            get_relay_app(options),
-            host=options.host,
-            port=options.port + 1,
-            log_level="warning",
-        ),
+        target=lambda: relay.run(sockets=relay_sockets),
         daemon=True,
         name="mcp-combiner-ui-relay",
     )
     relay_thread.start()
 
-    uvicorn.run(
+    config = uvicorn.Config(
         app,
-        host=options.host,
-        port=options.port,
         log_level="info",
         # Bound the graceful-shutdown drain. The combiner holds long-lived MCP
         # streamable-http / SSE connections that never close on their own, so the
@@ -325,6 +337,7 @@ def _serve(args: argparse.Namespace) -> None:
         # uvicorn ourselves via http_app(), so we must set it ourselves.)
         timeout_graceful_shutdown=2,
     )
+    uvicorn.Server(config).run(sockets=main_sockets)
 
 
 def main() -> None:

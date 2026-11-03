@@ -110,24 +110,29 @@ Rules:
 ## Binding — the other half of the feature
 
 `advertise` is URL construction only; reachability needs the combiner to
-**bind** an interface the tailnet routes to. The bind lives in the
-sharedserver-registered command (`--host`), not in servers.json.
+**bind** an interface the tailnet routes to.
 
 ### Changing the bind (durable)
 
-**The env var is the durable answer**: `MCP_COMBINER_HOST=0.0.0.0` in the
-launching shell (your shell profile — the ctl and the pi extension both
-resolve the command env-first on every fresh start). The `--host` flag and
-the sharedserver *registration* are **not** durable: the registration is
-per-running-instance and dies with every grace-stop, after which a bare
-restart resolves fresh from the ctl's defaults (loopback) — observed live.
+**servers.json is the durable home** — it is read fresh on every start, and
+the bind may be a **list**: loopback plus the tailnet, without the LAN.
+`tailscale` resolves to this machine's tailnet address at startup (skipped
+with a warning if Tailscale is down then; a restart binds it):
+
+```json
+"bind": {"host": ["127.0.0.1", "tailscale"]}
+```
+
+Precedence: `--host` > `MCP_COMBINER_HOST` > `bind.host` > `127.0.0.1` (the
+first one set wins whole; the flag and env take comma-separated lists). The
+`--host` flag and the sharedserver *registration* are **not** durable: the
+registration is per-running-instance and dies with every grace-stop, after
+which a bare restart resolves fresh — observed live. The env var works too
+(`MCP_COMBINER_HOST=127.0.0.1,tailscale` in the launching shell).
 
 ```sh
-# durable (shell profile / the pi launch environment):
-export MCP_COMBINER_HOST=0.0.0.0
-
 # immediate, if the current instance is bound wrong:
-mcp-combiner restart --force --host 0.0.0.0
+mcp-combiner restart --force --host 127.0.0.1,tailscale
 
 # Verify BOTH healths: loopback (the extension's own client) and the tailnet
 curl http://127.0.0.1:9741/health -H "authorization: Bearer $MCP_COMBINER_AUTH_TOKEN"
@@ -144,8 +149,12 @@ state is suspect anyway").
 | bind | serves | verdict |
 |---|---|---|
 | `127.0.0.1` | desktop only | the pre-feature default; remote widget legs dead |
-| `0.0.0.0` | loopback + tailnet + LAN | **recommended** — the extension's own client is loopback, so the tailnet-IP-only bind would break it; `/mcp` keeps its bearer gate, the UI host is token-scoped, `/health` is open but read-only |
-| `<tailnet-ip>` | tailnet only | tightest, but loopback clients (the pi extension itself) cannot reach it — not viable while the extension connects via loopback |
+| `["127.0.0.1", "tailscale"]` | loopback + tailnet | **recommended** — local clients keep loopback, remote renderers get the tailnet, the LAN gets nothing |
+| `0.0.0.0` | loopback + tailnet + LAN | works everywhere; `/mcp` keeps its bearer gate, the UI host is token-scoped, `/health` is open but read-only |
+| `<tailnet-ip>` | tailnet only | loopback clients (the pi extension itself) cannot reach it — use the list form instead |
+
+Any non-loopback bind without an inbound bearer token logs a loud warning at
+startup.
 
 `0.0.0.0` on a home LAN is a conscious choice: the sensitive routes stay
 authenticated, but the UI host's widget sessions were designed for private
