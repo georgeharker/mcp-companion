@@ -95,3 +95,17 @@ def test_tailscale_mode_without_a_name_falls_back_to_the_ip(
     monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: None)
     monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_ip", lambda: "100.64.5.5")
     assert resolve_advertised_host("127.0.0.1", "tailscale") == "100.64.5.5"
+
+
+@pytest.mark.parametrize(
+    ("mode", "origin"),
+    [
+        ("http://box.tailnet.ts.net", "http://box.tailnet.ts.net:9741"),
+        ("http://box.tailnet.ts.net:443", "http://box.tailnet.ts.net:443"),
+        ("box.tailnet.ts.net:8080/", "http://box.tailnet.ts.net:8080"),
+        ("http://[fd7a::1]:9000", "http://[fd7a::1]:9000"),
+        ("fd7a::1", "http://[fd7a::1]:9741"),
+    ],
+)
+def test_an_explicit_origin_keeps_its_own_port(mode: str, origin: str) -> None:
+    assert advertised_origin("127.0.0.1", 9741, mode) == origin

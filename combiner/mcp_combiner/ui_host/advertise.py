@@ -156,4 +156,17 @@ def resolve_advertised_host(bind_host: str, mode: str | None = None) -> str:
 def advertised_origin(bind_host: str, port: int, mode: str | None = None) -> str:
     """The full advertised origin for the UI host page (``http://<host>:<port>``)."""
     host = resolve_advertised_host(bind_host, mode)
+    if _has_port(host):
+        return f"http://{host}"  # an explicit origin's own port wins
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"  # a bare IPv6 address
     return f"http://{host}:{port}"
+
+
+def _has_port(host: str) -> bool:
+    """Whether *host* already carries ``:port`` (``name:80``, ``[::1]:80``;
+    a bare IPv6 address does not)."""
+    head, sep, tail = host.rpartition(":")
+    if not sep or not tail.isdigit():
+        return False
+    return head.endswith("]") or ":" not in head
