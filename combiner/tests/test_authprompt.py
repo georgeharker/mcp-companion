@@ -27,7 +27,7 @@ from conftest import (
     OAuthMockFactory,
     ProcFactory,
     ServedOAuthMock,
-    free_port,
+    free_port_pair,
     poll_until,
     write_servers_config,
 )
@@ -399,7 +399,7 @@ class TestCombinerPublicUrlFlow:
         env: dict[str, str] | None = None,
         protocol: str | None = None,
     ) -> str:
-        port = free_port()
+        port = free_port_pair()
         entry: dict[str, Any] = {"url": mock.mcp_url, "transport": "http", "auth": "oauth"}
         if protocol is not None:
             entry["protocol"] = protocol

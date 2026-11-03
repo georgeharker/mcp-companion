@@ -72,6 +72,22 @@ def free_port() -> int:
     return port
 
 
+def free_port_pair() -> int:
+    """A free port whose successor is free too: a combiner also serves its UI
+    relay on port + 1, which tests reach directly."""
+    for _ in range(50):
+        port = free_port()
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", port + 1))
+        except OSError:
+            continue
+        finally:
+            probe.close()
+        return port
+    raise RuntimeError("no free port pair found")
+
+
 def mockserver_argv(
     name: str,
     transport: str,
@@ -325,7 +341,7 @@ class ProcFactory:
         env: dict[str, str] | None = None,
         wait: bool = True,
     ) -> CombinerHandle:
-        port = port or free_port()
+        port = port or free_port_pair()
         argv = [
             sys.executable,
             "-m",
