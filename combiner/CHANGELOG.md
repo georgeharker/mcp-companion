@@ -4,7 +4,15 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
-## [Unreleased]
+## [0.20.0] — 2026-11-03
+
+Both MCP revisions, upstream and down. Upgrade notes: upstreams default to
+`protocol: auto`, so a server that offers the 2026-07-28 revision is connected
+on it and owns its own sessions (no per-chat isolation) — set
+`"protocol": "legacy"` for one that still keeps per-connection state (svg-mcp
+< 0.10). The combiner still answers clients on the handshake unless
+`MCP_COMBINER_OFFER_2026=1`. `bind.host` may now be a list; `auto` / `{auto}`
+name this machine on its tailnet in bind, advertise and `oauth.public_url`.
 
 ### Added
 
