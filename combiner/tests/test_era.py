@@ -627,6 +627,10 @@ class TestUpstreamListen:
                 return True if WIDGET_NAMESPACED in heard.updated else None
 
             await poll_until(_updated, timeout=15.0, desc="resources/updated from a 2026 upstream")
+            # The mock also sends a plain notification (as svg-mcp does); only
+            # the listen copy is forwarded.
+            await asyncio.sleep(1.0)
+            assert heard.updated == [WIDGET_NAMESPACED]
             await c.session.unsubscribe_resource(WIDGET_NAMESPACED)
             await _mock_listening(mock, [])
 

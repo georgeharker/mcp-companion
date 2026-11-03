@@ -111,6 +111,28 @@ class ResourceInterest:
 
 INTEREST = ResourceInterest()
 
+#: What each 2026 upstream's open listen stream delivers (the server's honored
+#: filter), so the same change arriving as a plain notification is not
+#: forwarded twice.
+_HONORED: dict[str, mcp.types.SubscriptionFilter] = {}
+
+
+def delivered_by_listen(server: str, notification: mcp.types.ServerNotification) -> bool:
+    """Whether *server*'s listen stream delivers *notification* too (forward
+    only that copy)."""
+    honored = _HONORED.get(server)
+    if honored is None:
+        return False
+    if isinstance(notification, mcp.types.ResourceUpdatedNotification):
+        return str(notification.params.uri) in (honored.resource_subscriptions or ())
+    if isinstance(notification, mcp.types.ResourceListChangedNotification):
+        return bool(honored.resources_list_changed)
+    if isinstance(notification, mcp.types.PromptListChangedNotification):
+        return bool(honored.prompts_list_changed)
+    if isinstance(notification, mcp.types.ToolListChangedNotification):
+        return bool(honored.tools_list_changed)
+    return False
+
 
 class UpstreamListener:
     """The standing ``subscriptions/listen`` stream to one 2026-era upstream."""
@@ -180,17 +202,21 @@ class UpstreamListener:
             resources_list_changed=True,
             resource_subscriptions=uris,
         ) as subscription:
+            _HONORED[self._name] = subscription.honored
             logger.info("Upstream '%s': listening (%d watched resource(s))", self._name, len(uris))
             if catch_up:
                 # Changes made while no stream was open were never sent.
                 await self._dispatch(ToolsListChanged())
-            async for event in subscription:
-                await self._dispatch(event)
+            try:
+                async for event in subscription:
+                    await self._dispatch(event)
+            finally:
+                _HONORED.pop(self._name, None)
 
     async def _dispatch(self, event: ServerEvent) -> None:
         from mcp_combiner.notifications import _ResourceNotifyHandler
 
-        handler = _ResourceNotifyHandler(self._name)  # shared upstream: every chat
+        handler = _ResourceNotifyHandler(self._name, from_listen=True)  # every chat
         try:
             if isinstance(event, ToolsListChanged):
                 await handler.on_tool_list_changed(mcp.types.ToolListChangedNotification())

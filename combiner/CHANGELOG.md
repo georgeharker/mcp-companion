@@ -41,6 +41,8 @@ tagged `vX.Y.Z`.
   combiner now serves (so it advertises `resources.subscribe`); handshake
   upstreams still push unasked and are forwarded as before. Prompt list changes
   are now forwarded too.
+- A change a 2026 upstream sends both as a plain notification and on the
+  listen stream (svg-mcp does) is forwarded once: the listen copy.
 - Mock server: serves `subscriptions/listen`, emits resource updates via
   `POST /control/resource-updated`, and reports open listen filters in `/stats`.
 - Mock server `--sessions`: `mock__create_session` / `mock__end_session` and a

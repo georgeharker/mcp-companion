@@ -93,9 +93,13 @@ class _ResourceNotifyHandler(MessageHandler):
         *,
         target: Connection | None = None,
         target_token: str | None = None,
+        from_listen: bool = False,
     ) -> None:
         super().__init__()
         self._server = server_name
+        # Plain notifications from a 2026 upstream may duplicate what its listen
+        # stream delivers; the listen copy (from_listen) is the one forwarded.
+        self._from_listen = from_listen
         # The per-chat target's chat token: its 2026-era listen streams (which
         # have no long-lived Connection) are reached through the event hub.
         self._target_token = target_token if target is not None or target_token else None
@@ -115,7 +119,16 @@ class _ResourceNotifyHandler(MessageHandler):
             return target is None
         return target is not None and self._target_ref() is target
 
+    def _duplicate(self, message: mcp.types.ServerNotification) -> bool:
+        if self._from_listen:
+            return False
+        from mcp_combiner.upstream_listen import delivered_by_listen
+
+        return delivered_by_listen(self._server, message)
+
     async def on_resource_updated(self, message: mcp.types.ResourceUpdatedNotification) -> None:
+        if self._duplicate(message):
+            return
         try:
             uri = AnyUrl(namespace_uri(str(message.params.uri), self._server))
         except Exception:
@@ -135,6 +148,8 @@ class _ResourceNotifyHandler(MessageHandler):
     async def on_resource_list_changed(
         self, message: mcp.types.ResourceListChangedNotification
     ) -> None:
+        if self._duplicate(message):
+            return
         await self._forward(
             lambda c: c.send_resource_list_changed(),
             ResourcesListChanged(),
@@ -144,6 +159,8 @@ class _ResourceNotifyHandler(MessageHandler):
     async def on_prompt_list_changed(
         self, message: mcp.types.PromptListChangedNotification
     ) -> None:
+        if self._duplicate(message):
+            return
         await self._forward(
             lambda c: c.send_prompt_list_changed(),
             PromptsListChanged(),
