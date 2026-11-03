@@ -143,6 +143,15 @@ def namespace_uri(uri: str, prefix: str) -> str:
     return f"{m.group(1)}{prefix}/{m.group(2)}" if m else uri
 
 
+def un_namespace_uri(uri: str, prefix: str) -> str | None:
+    """Invert :func:`namespace_uri`: the upstream's own URI, or ``None`` when
+    *uri* isn't under *prefix*."""
+    m = _NS_URI.match(uri)
+    if not m or not m.group(2).startswith(prefix + "/"):
+        return None
+    return m.group(1) + m.group(2).removeprefix(prefix + "/")
+
+
 def _find_server_for_tool(tool_name: str) -> tuple[str | None, str]:
     """Find which server a tool belongs to based on its name prefix.
 

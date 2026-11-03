@@ -478,6 +478,9 @@ def create_combiner(
     from mcp_combiner.listen import register_listen
 
     register_listen(combiner)
+    from mcp_combiner.upstream_listen import register_subscribe
+
+    register_subscribe(combiner)
 
     # Neovim back-channel REST API (/neovim/instances, /neovim/bind).
     nvim_proxy.register_routes(combiner, _notify_tool_list_changed)

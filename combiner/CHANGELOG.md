@@ -31,6 +31,18 @@ tagged `vX.Y.Z`.
   `initialize` did that implicitly), so an unreachable or not-yet-authorized
   2026 server is no longer reported connected; `protocol: "2026"` on an OAuth
   server goes through the normal authorization prompt.
+- **The combiner listens to 2026 upstreams.** A 2026-era server can't push
+  anything between calls unless its client opens `subscriptions/listen`, so the
+  combiner keeps one listen stream to each: tool, prompt and resource list
+  changes always (tool changes re-prime the server's cached slice), plus
+  resource updates for the URIs some chat watches. A dropped stream reopens
+  with backoff and re-primes the tool list. Watched URIs come from 2026 chats'
+  own listen streams and from handshake chats' `resources/subscribe`, which the
+  combiner now serves (so it advertises `resources.subscribe`); handshake
+  upstreams still push unasked and are forwarded as before. Prompt list changes
+  are now forwarded too.
+- Mock server: serves `subscriptions/listen`, emits resource updates via
+  `POST /control/resource-updated`, and reports open listen filters in `/stats`.
 - Mock server `--sessions`: `mock__create_session` / `mock__end_session` and a
   visible `session_id` on `mock__remember` / `mock__recall` — a stand-in for a
   2026 server that owns its sessions.

@@ -14,12 +14,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import mcp.types as mt
 import pytest
 from conftest import (
     FAST_TIMING_ENV,
     CombinerHandle,
+    MockHandle,
     ProcFactory,
     http_mock_entry,
+    poll_until,
     stdio_mock_entry,
     write_servers_config,
     write_tools_spec,
@@ -27,9 +30,10 @@ from conftest import (
 from fakes import content_text, json_object
 from fastmcp import Client
 from fastmcp.client.elicitation import ElicitResult
+from fastmcp.client.messages import MessageHandler
 from fastmcp.exceptions import ToolError
 from mcp.client.subscriptions import listen
-from mcp.shared.subscriptions import ToolsListChanged
+from mcp.shared.subscriptions import ResourceUpdated, ToolsListChanged
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
 
 from mcp_combiner import upstream_era
@@ -37,6 +41,8 @@ from mcp_combiner.config import ServerConfig
 from mcp_combiner.era import OFFER_2026_ENV
 from mcp_combiner.isolated import REGISTRY, ParkedSession
 from mcp_combiner.runtime import CLIENT_CONNECT_MODE
+from mcp_combiner.toolcache import namespace_uri, un_namespace_uri
+from mcp_combiner.upstream_listen import ResourceInterest
 
 pytestmark = pytest.mark.e2e
 
@@ -542,3 +548,128 @@ class TestSessionOwningUpstream:
             assert _text(await a.call_tool("mockup_mock__recall", {})) == "mine"
             with pytest.raises(ToolError, match="nothing remembered"):
                 await b.call_tool("mockup_mock__recall", {})
+
+
+# ── hearing a 2026 upstream between calls (subscriptions/listen upstream) ──
+
+WIDGET = "ui://mock/widget"
+WIDGET_NAMESPACED = "ui://mockup/mock/widget"
+
+
+class _Heard(MessageHandler):
+    """What a handshake-era downstream client is told between calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tools_changed = 0
+        self.updated: list[str] = []
+
+    async def on_tool_list_changed(self, message: mt.ToolListChangedNotification) -> None:
+        self.tools_changed += 1
+
+    async def on_resource_updated(self, message: mt.ResourceUpdatedNotification) -> None:
+        self.updated.append(str(message.params.uri))
+
+
+async def _listening_upstream(
+    procs: ProcFactory, tmp_path: Path, *, offer_downstream: bool = False
+) -> tuple[CombinerHandle, MockHandle]:
+    mock = await procs.start_http_mock("mockup", offer_2026=True)
+    config = write_servers_config(tmp_path / "servers.json", {"mockup": http_mock_entry(mock.port)})
+    env = {OFFER_2026_ENV: "1"} if offer_downstream else None
+    combiner = await procs.start_combiner(
+        config, env=env, extra_args=["--log-file", str(tmp_path / "combiner.log")]
+    )
+    await combiner.wait_server_state("mockup", ("ready",))
+    return combiner, mock
+
+
+async def _mock_listening(mock: MockHandle, want: list[str]) -> None:
+    """Wait until the combiner's stream to *mock* watches exactly *want*."""
+
+    async def _match() -> bool | None:
+        streams = (await mock.stats())["listening"]
+        return True if streams == [sorted(want)] else None
+
+    await poll_until(_match, timeout=15.0, desc=f"upstream listen stream watching {want}")
+
+
+class TestUpstreamListen:
+    async def test_a_tool_added_between_calls_reaches_the_chat(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner, mock = await _listening_upstream(procs, tmp_path)
+        heard = _Heard()
+        url = f"{combiner.mcp_url}/chat-hear-0001"
+        async with Client(url, message_handler=heard, mode=CLIENT_CONNECT_MODE) as c:
+            await _mock_listening(mock, [])
+            await mock.control("POST", "/control/tools", {"name": "late_tool"})
+
+            async def _seen() -> bool | None:
+                names = {t.name for t in await c.list_tools()}
+                return True if heard.tools_changed and "mockup_late_tool" in names else None
+
+            await poll_until(_seen, timeout=15.0, desc="tools/list_changed from a 2026 upstream")
+
+    async def test_a_handshake_subscription_is_listened_for_upstream(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner, mock = await _listening_upstream(procs, tmp_path)
+        heard = _Heard()
+        url = f"{combiner.mcp_url}/chat-hear-0002"
+        async with Client(url, message_handler=heard, mode=CLIENT_CONNECT_MODE) as c:
+            await _mock_listening(mock, [])
+            await c.session.subscribe_resource(WIDGET_NAMESPACED)
+            await _mock_listening(mock, [WIDGET])
+            await mock.control("POST", "/control/resource-updated", {"uri": WIDGET})
+
+            async def _updated() -> bool | None:
+                return True if WIDGET_NAMESPACED in heard.updated else None
+
+            await poll_until(_updated, timeout=15.0, desc="resources/updated from a 2026 upstream")
+            await c.session.unsubscribe_resource(WIDGET_NAMESPACED)
+            await _mock_listening(mock, [])
+
+    async def test_a_2026_chats_listen_stream_is_carried_upstream(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner, mock = await _listening_upstream(procs, tmp_path, offer_downstream=True)
+        async with Client(f"{combiner.mcp_url}/chat-hear-0003") as c:
+            assert c.protocol_version in MODERN_PROTOCOL_VERSIONS
+            await _mock_listening(mock, [])
+            async with listen(c.session, resource_subscriptions=[WIDGET_NAMESPACED]) as stream:
+                await _mock_listening(mock, [WIDGET])
+                await mock.control("POST", "/control/resource-updated", {"uri": WIDGET})
+                event = await asyncio.wait_for(anext(aiter(stream)), timeout=10.0)
+                assert event == ResourceUpdated(uri=WIDGET_NAMESPACED)
+            await _mock_listening(mock, [])
+
+    async def test_a_restarted_upstream_is_listened_to_again(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner, mock = await _listening_upstream(procs, tmp_path)
+        await _mock_listening(mock, [])
+        mock.terminate()
+        reborn = await procs.start_http_mock("mockup", port=mock.port, offer_2026=True)
+        await _mock_listening(reborn, [])
+        await combiner.wait_server_state("mockup", ("ready",))
+
+
+class TestResourceInterest:
+    def test_un_namespace_inverts_namespace(self) -> None:
+        assert un_namespace_uri(namespace_uri(WIDGET, "mockup"), "mockup") == WIDGET
+        assert un_namespace_uri(WIDGET_NAMESPACED, "other") is None
+        assert un_namespace_uri("not a uri", "mockup") is None
+
+    def test_counts_and_change_signals(self) -> None:
+        interest = ResourceInterest()
+        changes: list[frozenset[str]] = []
+        interest.on_change(lambda: changes.append(interest.watched()))
+        interest.add([WIDGET_NAMESPACED])
+        interest.add([WIDGET_NAMESPACED])  # a second watcher: no change
+        assert interest.upstream_uris("mockup") == [WIDGET]
+        interest.remove([WIDGET_NAMESPACED])  # one still watching
+        assert interest.upstream_uris("mockup") == [WIDGET]
+        interest.remove([WIDGET_NAMESPACED])
+        assert interest.upstream_uris("mockup") == []
+        assert changes == [frozenset({WIDGET_NAMESPACED}), frozenset()]

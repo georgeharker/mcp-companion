@@ -72,7 +72,7 @@ from mcp.server.subscriptions import ServerEvent
 from pydantic import AnyUrl
 
 from mcp_combiner.isolated import TOKEN_HEADER
-from mcp_combiner.listen import HUB, ResourcesListChanged, ResourceUpdated
+from mcp_combiner.listen import HUB, PromptsListChanged, ResourcesListChanged, ResourceUpdated
 from mcp_combiner.runtime import DOWNSTREAM_REQUEST, RUNTIME, downstream_connection
 from mcp_combiner.toolcache import namespace_uri
 from mcp_combiner.upstream_session import use_tolerant_session
@@ -139,6 +139,15 @@ class _ResourceNotifyHandler(MessageHandler):
             lambda c: c.send_resource_list_changed(),
             ResourcesListChanged(),
             f"resources/list_changed ({self._server})",
+        )
+
+    async def on_prompt_list_changed(
+        self, message: mcp.types.PromptListChangedNotification
+    ) -> None:
+        await self._forward(
+            lambda c: c.send_prompt_list_changed(),
+            PromptsListChanged(),
+            f"prompts/list_changed ({self._server})",
         )
 
     async def on_tool_list_changed(self, message: mcp.types.ToolListChangedNotification) -> None:

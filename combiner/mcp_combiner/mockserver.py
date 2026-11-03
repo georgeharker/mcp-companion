@@ -69,6 +69,13 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool, ToolResult
+from mcp.server.context import ServerRequestContext
+from mcp.server.subscriptions import (
+    InMemorySubscriptionBus,
+    ListenHandler,
+    ResourceUpdated,
+    ToolsListChanged,
+)
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import PrivateAttr
 
@@ -197,6 +204,10 @@ class MockState:
     # broadcast notifications/tools/list_changed (same pattern as the
     # combiner's _active_sessions WeakSet).
     sessions: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)
+    # 2026 era: change events go out on subscriptions/listen streams; the
+    # resource URIs each open stream watches, for tests to observe.
+    listen_bus: InMemorySubscriptionBus = field(default_factory=InMemorySubscriptionBus)
+    listening: dict[int, list[str]] = field(default_factory=dict)
 
     def record_call(self, tool: str, session_id: str | None) -> int:
         """Record one tool call; returns this tool's call number (1-based)."""
@@ -221,6 +232,14 @@ class MockState:
         for session in list(self.sessions):
             with contextlib.suppress(Exception):
                 await session.send_tool_list_changed()
+        await self.listen_bus.publish(ToolsListChanged())
+
+    async def notify_resource_updated(self, uri: str) -> None:
+        """Push resources/updated for *uri* in both eras."""
+        for session in list(self.sessions):
+            with contextlib.suppress(Exception):
+                await session.send_resource_updated(uri)
+        await self.listen_bus.publish(ResourceUpdated(uri=uri))
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -233,6 +252,7 @@ class MockState:
             "tool_calls": dict(self.tool_calls),
             "session_calls": dict(self.session_calls),
             "session_ids_seen": list(self.session_ids),
+            "listening": [sorted(uris) for uris in self.listening.values()],
         }
 
 
@@ -418,11 +438,32 @@ class MockServer:
         for spec in specs if specs is not None else _default_specs():
             self._add(spec)
         self._register_builtins()
+        self._register_listen()
         if sessions:
             self._register_session_tools()
         self._register_routes()
         if oauth is not None:
             oauth.register_routes(self.mcp)
+
+    def _register_listen(self) -> None:
+        """Serve ``subscriptions/listen`` (2026 era) from the state's bus."""
+        state = self.state
+        handler = ListenHandler(state.listen_bus)
+        stream_ids = itertools.count()
+
+        async def serve(
+            ctx: ServerRequestContext[Any, Any], params: mcp.types.SubscriptionsListenRequestParams
+        ) -> mcp.types.SubscriptionsListenResult:
+            stream = next(stream_ids)
+            state.listening[stream] = list(params.notifications.resource_subscriptions or ())
+            try:
+                return await handler(ctx, params)
+            finally:
+                state.listening.pop(stream, None)
+
+        self.mcp._mcp_server.add_request_handler(
+            "subscriptions/listen", mcp.types.SubscriptionsListenRequestParams, serve
+        )
 
     def _register_session_tools(self) -> None:
         """``--sessions``: model a server that owns its sessions (svg-mcp's
@@ -927,6 +968,14 @@ call('ui/initialize', {
             spec = ToolSpec.from_dict(await request.json())
             await self.add_tool(spec)
             return _JSONResponse({"added": spec.name})
+
+        @mcp_srv.custom_route("/control/resource-updated", methods=["POST"])
+        async def control_resource_updated(request: Request) -> JSONResponse:
+            from starlette.responses import JSONResponse as _JSONResponse
+
+            uri = str((await request.json())["uri"])
+            await state.notify_resource_updated(uri)
+            return _JSONResponse({"updated": uri})
 
         @mcp_srv.custom_route("/control/tools/{name}", methods=["DELETE"])
         async def control_remove_tool(request: Request) -> JSONResponse:

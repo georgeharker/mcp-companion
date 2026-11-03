@@ -31,6 +31,7 @@ from mcp.server.context import ServerRequestContext
 from mcp.server.subscriptions import (
     InMemorySubscriptionBus,
     ListenHandler,
+    PromptsListChanged,
     ResourcesListChanged,
     ResourceUpdated,
     ServerEvent,
@@ -45,6 +46,7 @@ logger = logging.getLogger("mcp-combiner")
 __all__ = [
     "HUB",
     "ChatEventHub",
+    "PromptsListChanged",
     "ResourceUpdated",
     "ResourcesListChanged",
     "ToolsListChanged",
@@ -126,7 +128,16 @@ def _listen_token() -> str | None:
 async def _serve_listen(
     ctx: ServerRequestContext[Any, Any], params: SubscriptionsListenRequestParams
 ) -> SubscriptionsListenResult:
-    return await HUB.handler_for(_listen_token())(ctx, params)
+    # The URIs this stream watches: 2026-era upstreams only send updates for
+    # URIs the combiner listens for in turn (see upstream_listen).
+    from mcp_combiner.upstream_listen import INTEREST
+
+    uris = list(params.notifications.resource_subscriptions or ())
+    INTEREST.add(uris)
+    try:
+        return await HUB.handler_for(_listen_token())(ctx, params)
+    finally:
+        INTEREST.remove(uris)
 
 
 def register_listen(combiner: FastMCP[Any]) -> None:

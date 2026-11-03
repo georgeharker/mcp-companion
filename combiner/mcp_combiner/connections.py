@@ -607,6 +607,14 @@ class ConnectionManager:
                     )
                     raise
             await _first_contact(conn.name, client)
+            if era_of(conn.name) == "2026":
+                # No standing stream on 2026: hear changes between calls by
+                # listening; the stack stops it with the connection.
+                from mcp_combiner.upstream_listen import UpstreamListener
+
+                listener = UpstreamListener(conn.name, client)
+                listener.start()
+                conn.stack.push_async_callback(listener.stop)
             conn.client_ref[0] = client
             conn._backoff = _INITIAL_BACKOFF
             conn._auth_failed = False
