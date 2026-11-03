@@ -391,9 +391,11 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
     from mcp_combiner.ui_host import attach_ui_host
     from mcp_combiner.ui_host.advertise import advertised_origin
 
+    base_origin = advertised_origin(options.host, options.port)
+    _warn_unreachable_origins(base_origin, options)
     attach_ui_host(
         combiner,
-        base_origin=advertised_origin(options.host, options.port),
+        base_origin=base_origin,
         sandbox_relay_port=options.port + 1,
         hold_timeout=_env_hold_timeout(),
     )
@@ -449,3 +451,16 @@ def create_app(options: ServeOptions | None = None) -> Starlette:
     RUNTIME.inbound_auth_token = options.auth_token
     RUNTIME.local_origin = f"http://127.0.0.1:{options.port}"
     return app
+
+
+def _warn_unreachable_origins(widget_origin: str, options: ServeOptions) -> None:
+    """Startup check: the addresses browsers are sent to (OAuth callbacks,
+    widget URLs) should be ones the combiner listens on."""
+    from mcp_combiner.binding import unreachable_origins
+
+    origins = [("widget URLs (MCP_COMBINER_UI_ADVERTISE)", widget_origin)]
+    config = RUNTIME.config
+    if config is not None and config.oauth.public_url:
+        origins.append(("oauth.public_url", config.oauth.public_url))
+    for warning in unreachable_origins(origins, options.hosts, options.port):
+        logger.warning("bind: %s", warning)

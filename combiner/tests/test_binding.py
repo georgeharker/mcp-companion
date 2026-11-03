@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx2
 import pytest
-from conftest import ProcFactory, free_port, write_servers_config
+from conftest import ProcFactory, free_port, free_port_pair, write_servers_config
 
 from mcp_combiner import binding
 from mcp_combiner.asgi import resolve_bind_hosts
@@ -150,3 +150,43 @@ def test_an_unresolvable_name_is_skipped(caplog: pytest.LogCaptureFixture) -> No
     finally:
         for s in sockets:
             s.close()
+
+
+class TestUnreachableOrigins:
+    PORT = 9741
+
+    def _check(self, url: str, hosts: list[str]) -> list[str]:
+        return binding.unreachable_origins([("oauth.public_url", url)], hosts, self.PORT)
+
+    def test_a_bound_address_is_fine(self) -> None:
+        assert self._check("http://127.0.0.1:9741", ["127.0.0.1"]) == []
+        assert self._check("http://localhost:9741", ["127.0.0.1", "::1"]) == []
+
+    def test_an_unbound_address_warns(self) -> None:
+        (warning,) = self._check(f"http://{TEST_NET}:9741", ["127.0.0.1"])
+        assert TEST_NET in warning and "listens only on 127.0.0.1" in warning
+
+    def test_an_unresolvable_name_warns(self) -> None:
+        (warning,) = self._check("http://no-such-host.invalid:9741", ["127.0.0.1"])
+        assert "doesn't resolve" in warning
+
+    def test_proxied_and_wildcard_setups_are_not_checked(self) -> None:
+        assert self._check(f"https://{TEST_NET}", ["127.0.0.1"]) == []  # e.g. tailscale serve
+        assert self._check(f"http://{TEST_NET}:8080", ["127.0.0.1"]) == []  # another port
+        assert self._check(f"http://{TEST_NET}:9741", ["0.0.0.0"]) == []  # every interface
+
+
+@pytest.mark.e2e
+async def test_startup_warns_about_an_unreachable_public_url(
+    procs: ProcFactory, tmp_path: Path
+) -> None:
+    port = free_port_pair()
+    config = write_servers_config(
+        tmp_path / "servers.json", {}, oauth={"public_url": f"http://{TEST_NET}:{port}"}
+    )
+    await procs.start_combiner(
+        config, port=port, extra_args=["--log-file", str(tmp_path / "combiner.log")]
+    )
+    log = (tmp_path / "combiner.log").read_text()
+    assert f"bind: oauth.public_url http://{TEST_NET}:{port}" in log
+    assert "add it to bind.host" in log

@@ -126,3 +126,50 @@ def _bind_one(host: str, port: int) -> socket.socket | None:
             return None
         raise
     return sock
+
+
+def unreachable_origins(
+    origins: Sequence[tuple[str, str]], hosts: Sequence[str], port: int
+) -> list[str]:
+    """Warnings for *origins* (``(what, url)``) that name an address this
+    combiner isn't listening on, so a browser sent there finds nothing.
+
+    Only plain ``http`` URLs on the combiner's own *port* are checked: anything
+    else (``https``, another port) is taken to go through a proxy such as
+    ``tailscale serve``, which this process can't see.
+    """
+    from urllib.parse import urlsplit
+
+    if any(h in WILDCARDS for h in hosts):
+        return []
+    bound = {_canonical(a) for h in hosts for a in _addresses(h)}
+    warnings: list[str] = []
+    for what, url in origins:
+        parts = urlsplit(url)
+        if parts.scheme != "http" or parts.hostname is None:
+            continue
+        if (parts.port or 80) != port:
+            continue
+        addresses = {_canonical(a) for a in _addresses(parts.hostname)}
+        if not addresses:
+            warnings.append(f"{what} {url}: {parts.hostname} doesn't resolve here")
+        elif not addresses & bound:
+            warnings.append(
+                f"{what} {url} names {', '.join(sorted(addresses))}, but the combiner "
+                f"listens only on {', '.join(hosts)} — add it to bind.host (e.g. 'auto')"
+            )
+    return warnings
+
+
+def _addresses(host: str) -> set[str]:
+    try:
+        return {str(info[4][0]) for info in socket.getaddrinfo(host, None)}
+    except OSError:
+        return set()
+
+
+def _canonical(address: str) -> str:
+    try:
+        return str(ipaddress.ip_address(address.split("%", 1)[0]))
+    except ValueError:
+        return address

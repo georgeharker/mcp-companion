@@ -4,6 +4,17 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [Unreleased]
+
+### Added
+
+- Startup warning when `oauth.public_url` or the advertised widget origin is a
+  plain `http` URL on the combiner's own port naming an address the combiner
+  isn't listening on (or a name that doesn't resolve) — OAuth redirects and
+  widget links there would land nowhere. `https` URLs and other ports are
+  taken to be proxied (e.g. `tailscale serve`) and aren't checked; a wildcard
+  bind covers everything.
+
 ## [0.21.0] — 2026-11-03
 
 Upgrade note: list responses are now paged (1000 items by default). Every
