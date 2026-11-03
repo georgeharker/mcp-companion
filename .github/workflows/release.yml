@@ -27,9 +27,9 @@ defaults:
 
 jobs:
   build:
-    # Prerelease tags (vX.Y.Z-dev.N) are the pi plugin's dev channel — the
-    # lockstep channels publish stable releases only.
-    if: ${{ !contains(github.ref_name, '-') }}
+    # Prerelease tags (vX.Y.Z-dev.N) publish too: PyPI keeps them out of
+    # default resolution (installs need --pre or an exact pin), so `latest`
+    # consumers never see them.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -54,9 +54,6 @@ jobs:
           path: combiner/dist/ # path is relative to the repo root, not working-directory
 
   publish:
-    # Prerelease tags (vX.Y.Z-dev.N) are the pi plugin's dev channel — the
-    # lockstep channels publish stable releases only.
-    if: ${{ !contains(github.ref_name, '-') }}
     needs: build
     runs-on: ubuntu-latest
     environment: pypi

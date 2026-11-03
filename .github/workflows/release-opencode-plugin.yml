@@ -25,9 +25,6 @@ on:
 
 jobs:
   publish:
-    # Prerelease tags (vX.Y.Z-dev.N) are the pi plugin's dev channel — the
-    # lockstep channels publish stable releases only.
-    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: npm
     permissions:
@@ -56,4 +53,12 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run build
       - name: Publish to npm (trusted publishing + provenance)
-        run: npm publish --provenance --access public
+        # Prerelease tags (vX.Y.Z-dev.N / -beta.N / -rc.N) publish to the `dev`
+        # dist-tag — invisible to `latest`-resolving consumers (as the pi plugin).
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "prerelease tag ${GITHUB_REF_NAME} — publishing to the dev dist-tag"
+            npm publish --provenance --access public --tag dev
+          else
+            npm publish --provenance --access public
+          fi
