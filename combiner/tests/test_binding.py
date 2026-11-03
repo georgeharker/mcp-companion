@@ -121,3 +121,22 @@ async def test_a_combiner_serves_on_every_listed_address(
         relay = await http.get(f"http://[::1]:{combiner.port + 1}/")
         assert relay.status_code < 500
     assert f"{TEST_NET}:{combiner.port} isn't available" in (tmp_path / "combiner.log").read_text()
+
+
+@pytest.mark.e2e
+async def test_a_busy_relay_port_does_not_stop_the_combiner(
+    procs: ProcFactory, tmp_path: Path
+) -> None:
+    """The UI relay (port + 1) only serves widgets: losing it must not keep the
+    combiner from serving — as before the relay was bound up front."""
+    port = free_port()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as squatter:
+        squatter.bind(("127.0.0.1", port + 1))
+        squatter.listen(1)
+        config = write_servers_config(tmp_path / "servers.json", {})
+        combiner = await procs.start_combiner(
+            config, port=port, extra_args=["--log-file", str(tmp_path / "combiner.log")]
+        )
+        async with httpx2.AsyncClient(timeout=5.0) as http:
+            assert (await http.get(f"http://127.0.0.1:{combiner.port}/health")).status_code == 200
+    assert "UI relay: can't listen" in (tmp_path / "combiner.log").read_text()

@@ -290,7 +290,17 @@ def _serve(args: argparse.Namespace) -> None:
     from mcp_combiner.binding import bind_sockets, is_loopback
 
     main_sockets = bind_sockets(options.hosts, options.port)
-    relay_sockets = bind_sockets(options.hosts, options.port + 1)
+    try:
+        relay_sockets = bind_sockets(options.hosts, options.port + 1)
+    except OSError as exc:
+        # The relay only serves interactive widgets; a busy port+1 must not
+        # keep the combiner itself from serving (it never did).
+        relay_sockets = []
+        logging.getLogger("mcp-combiner").warning(
+            "UI relay: can't listen on port %d (%s) — interactive widgets won't load",
+            options.port + 1,
+            exc,
+        )
     exposed = [h for h in options.hosts if not is_loopback(h)]
     if exposed and options.auth_token is None:
         logging.getLogger("mcp-combiner").warning(
@@ -314,13 +324,14 @@ def _serve(args: argparse.Namespace) -> None:
 
     from mcp_combiner.ui_host import get_relay_app
 
-    relay = uvicorn.Server(uvicorn.Config(get_relay_app(options), log_level="warning"))
-    relay_thread = threading.Thread(
-        target=lambda: relay.run(sockets=relay_sockets),
-        daemon=True,
-        name="mcp-combiner-ui-relay",
-    )
-    relay_thread.start()
+    if relay_sockets:
+        relay = uvicorn.Server(uvicorn.Config(get_relay_app(options), log_level="warning"))
+        relay_thread = threading.Thread(
+            target=lambda: relay.run(sockets=relay_sockets),
+            daemon=True,
+            name="mcp-combiner-ui-relay",
+        )
+        relay_thread.start()
 
     config = uvicorn.Config(
         app,
