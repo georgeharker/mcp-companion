@@ -64,6 +64,15 @@ async def resolve(name: str, srv: ServerConfig) -> Era:
             "so isolate is ignored (set protocol: legacy to keep per-chat sessions)",
             name,
         )
+    if era == "2026":
+        # Per-chat handshake sessions restored by a handover (or left from before
+        # a protocol change) can never be used again: drop them now rather than
+        # holding them until their park TTL.
+        from mcp_combiner.isolated import REGISTRY
+
+        stale = await REGISTRY.evict_server(name)
+        if stale:
+            logger.info("Upstream '%s': dropped %d stale per-chat session(s)", name, stale)
     return era
 
 

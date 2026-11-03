@@ -34,6 +34,7 @@ from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSI
 from mcp_combiner import upstream_era
 from mcp_combiner.config import ServerConfig
 from mcp_combiner.era import OFFER_2026_ENV
+from mcp_combiner.isolated import REGISTRY, ParkedSession
 from mcp_combiner.runtime import CLIENT_CONNECT_MODE
 
 pytestmark = pytest.mark.e2e
@@ -240,6 +241,22 @@ class TestUpstreamEraDecision:
         assert await upstream_era.resolve("a", legacy) == "legacy"
         assert await upstream_era.resolve("b", modern) == "2026"
         assert upstream_era.client_mode("b") == upstream_era.MODERN_CLIENT_MODE
+
+    async def test_a_2026_upstream_drops_stale_per_chat_sessions(self) -> None:
+        # A handover restores parked handshake sessions before eras resolve; a
+        # server that turns out to be 2026 must not keep them.
+        parked = ParkedSession(session_id="sid-old", protocol_version=None, url="http://x/mcp")
+        REGISTRY.restore_parked("e26", "tok-stale", parked)
+        REGISTRY.restore_parked("eleg", "tok-stale", parked)
+        try:
+            modern = ServerConfig.from_dict("e26", {"url": "http://x/mcp", "protocol": "2026"})
+            legacy = ServerConfig.from_dict("eleg", {"url": "http://x/mcp", "protocol": "legacy"})
+            await upstream_era.resolve("e26", modern)
+            await upstream_era.resolve("eleg", legacy)
+            assert REGISTRY.pop_parked("e26", "tok-stale") is None
+            assert REGISTRY.pop_parked("eleg", "tok-stale") is not None
+        finally:
+            await REGISTRY.evict_server("eleg")
 
     async def test_auto_falls_back_for_unprobeable_servers(self) -> None:
         stdio = ServerConfig.from_dict("s", {"command": "true"})
