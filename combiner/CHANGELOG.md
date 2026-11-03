@@ -23,6 +23,10 @@ tagged `vX.Y.Z`.
   bind); a wildcard covers the rest. The UI relay (port + 1) follows the same
   bind. Any non-loopback bind without an inbound bearer token warns. The pi
   plugin connects to the first entry (loopback for a wildcard or `tailscale`).
+  A host name that doesn't resolve at startup is skipped like an address
+  that isn't up.
+- `MCP_COMBINER_UI_ADVERTISE=tailscale`: widget URLs name this machine's
+  MagicDNS name (`tailscale status`), falling back to the tailnet IP.
 - **Per-server `protocol` setting** — `auto` (default), `legacy` or `2026`:
   which MCP revision the combiner speaks to an upstream. `auto` asks the server
   (`server/discover`) before mounting it; a server listing 2026-07-28 is

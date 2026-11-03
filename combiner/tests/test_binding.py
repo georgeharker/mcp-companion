@@ -140,3 +140,15 @@ async def test_a_busy_relay_port_does_not_stop_the_combiner(
         async with httpx2.AsyncClient(timeout=5.0) as http:
             assert (await http.get(f"http://127.0.0.1:{combiner.port}/health")).status_code == 200
     assert "UI relay: can't listen" in (tmp_path / "combiner.log").read_text()
+
+
+def test_an_unresolvable_name_is_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    port = free_port()
+    with caplog.at_level(logging.WARNING, logger="mcp-combiner"):
+        sockets = binding.bind_sockets(["127.0.0.1", "no-such-host.invalid"], port)
+    try:
+        assert len(sockets) == 1
+        assert "no-such-host.invalid" in caplog.text
+    finally:
+        for s in sockets:
+            s.close()

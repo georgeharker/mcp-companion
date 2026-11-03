@@ -79,3 +79,19 @@ def test_origin_composition() -> None:
         advertised_origin("127.0.0.1", 9741, "combiner.example") == "http://combiner.example:9741"
     )
     assert advertised_origin("127.0.0.1", 9741, "loopback") == "http://127.0.0.1:9741"
+
+
+def test_tailscale_mode_names_the_magicdns_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: "box.tailnet.ts.net"
+    )
+    assert resolve_advertised_host("127.0.0.1", "tailscale") == "box.tailnet.ts.net"
+    assert advertised_origin("127.0.0.1", 9741, "Tailscale") == "http://box.tailnet.ts.net:9741"
+
+
+def test_tailscale_mode_without_a_name_falls_back_to_the_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: None)
+    monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_ip", lambda: "100.64.5.5")
+    assert resolve_advertised_host("127.0.0.1", "tailscale") == "100.64.5.5"

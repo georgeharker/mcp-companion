@@ -8,7 +8,10 @@ The bind setting (CLI ``--host`` > ``MCP_COMBINER_HOST`` > servers.json
 - ``tailscale`` — this machine's tailnet IPv4, looked up at startup (the same
   detection the widget URLs use, ``ui_host.advertise``);
 - a wildcard (``0.0.0.0`` / ``::``) — every interface; it already covers the
-  specific addresses, so a list containing one keeps only the wildcards.
+  specific addresses, so a list containing one keeps only the wildcards;
+- a host name — resolved when binding; one that doesn't resolve is skipped
+  like an address that isn't up. (Prefer ``tailscale`` to a MagicDNS name:
+  same address, no DNS dependency.)
 
 An address that isn't up when the combiner starts (Tailscale down, an
 interface gone) is skipped with a warning rather than failing startup; a
@@ -112,7 +115,12 @@ def _bind_one(host: str, port: int) -> socket.socket | None:
         sock.listen(2048)
     except OSError as exc:
         sock.close()
-        if exc.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+        # gaierror: a name that doesn't resolve (yet) — e.g. a MagicDNS name
+        # while Tailscale is down.
+        if isinstance(exc, socket.gaierror) or exc.errno in (
+            errno.EADDRNOTAVAIL,
+            errno.EAFNOSUPPORT,
+        ):
             logger.warning("bind: %s:%d isn't available here (%s) — skipped", host, port, exc)
             return None
         raise

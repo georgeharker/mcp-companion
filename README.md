@@ -861,6 +861,11 @@ if none bind. `--host` and `MCP_COMBINER_HOST` override the config and take
 comma-separated lists. Binding anything beyond loopback without a bearer token
 (below) logs a warning.
 
+Binding is about addresses; what remote widget renderers are *told* to connect
+to is separate: `MCP_COMBINER_UI_ADVERTISE` — `auto` (default: the tailnet IP if
+there is one), `tailscale` (this machine's MagicDNS name, e.g.
+`box.your-tailnet.ts.net`), `loopback`, or an explicit `http://host[:port]`.
+
 ### Inbound authentication (locking down `/mcp`)
 
 The above is backend auth (combiner → upstream servers). Separately, the combiner's

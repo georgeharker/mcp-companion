@@ -13,6 +13,8 @@ Modes (MCP_COMBINER_UI_ADVERTISE, default ``auto``):
   interface addresses for Tailscale's reserved CGNAT range (100.64.0.0/10 —
   with the caveat that some ISPs assign CGNAT space too, which is why tier 1
   exists), (3) neither finds a tailnet → the bind host (loopback today).
+- ``tailscale`` — this machine's MagicDNS name (``tailscale status --json``,
+  ``Self.DNSName``); falls back to the tailnet IP, then as ``auto``.
 - ``loopback`` — force local-only URLs (the pre-feature behavior).
 - ``http://host[:port]`` — explicit override, the only machine-specific form,
   for the tailscale-serve (TLS/MagicDNS) variant.
@@ -62,6 +64,29 @@ def _tailscale_ip() -> str | None:
     return None
 
 
+def _tailscale_dns_name() -> str | None:
+    """This machine's MagicDNS name from the tailscale daemon, or ``None``
+    (daemon absent, MagicDNS off)."""
+    import json
+
+    if shutil.which("tailscale") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["tailscale", "status", "--json", "--peers=false"],
+            capture_output=True,
+            text=True,
+            timeout=_TIER1_TIMEOUT_S,
+            check=False,
+        )
+        status = json.loads(out.stdout or "{}")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    me = status.get("Self") if isinstance(status, dict) else None
+    name = me.get("DNSName") if isinstance(me, dict) else None
+    return name.rstrip(".") or None if isinstance(name, str) else None
+
+
 def _interface_scan_ip() -> str | None:
     """Tier 2: scan interface addresses for the CGNAT range.
 
@@ -109,6 +134,11 @@ def resolve_advertised_host(bind_host: str, mode: str | None = None) -> str:
     import os
 
     advertise = (mode or os.environ.get(_ENV) or "auto").strip().lower()
+    if advertise == "tailscale":
+        name = _tailscale_dns_name()
+        if name:
+            return name
+        advertise = "auto"  # no MagicDNS name: the tailnet IP, or the bind
     if advertise in ("", "auto"):
         found = _tailscale_ip() or _interface_scan_ip()
         if found:
