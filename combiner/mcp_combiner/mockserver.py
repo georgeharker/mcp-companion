@@ -1391,6 +1391,21 @@ class MockOAuthProvider:
         await send({"type": "http.response.body", "body": body})
 
 
+def _issuer_url(setting: str | None, local_host: str, port: int) -> str:
+    """The mock's advertised issuer: *setting* (``auto`` = the tailnet name),
+    else ``http://<local_host>:<port>``."""
+    if setting is None:
+        return f"http://{local_host}:{port}"
+    if setting.strip().lower() == "auto":
+        from mcp_combiner.ui_host.advertise import tailnet_host
+
+        name = tailnet_host()
+        if name is None:
+            raise SystemExit("--issuer auto: no tailnet on this machine")
+        return f"http://{name}:{port}"
+    return setting.rstrip("/")
+
+
 def pin_handshake_only(mcp_srv: FastMCP) -> None:
     """Answer server/discover with no supported versions, so a probing client
     (and the combiner's protocol: auto) uses the handshake. HTTP only: on an
@@ -1457,6 +1472,17 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--issuer",
+        default=None,
+        metavar="URL",
+        help=(
+            "With --oauth: the authorization server URL the mock advertises, where "
+            "browsers are sent to log in (default: http://<host>:<port>). 'auto' = "
+            "this machine's tailnet name on --port, so a phone can authorize; bind "
+            "--host to every interface (or the tailnet address) to serve it."
+        ),
+    )
+    parser.add_argument(
         "--oauth",
         action="store_true",
         help=(
@@ -1479,8 +1505,13 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("--oauth requires --transport http")
         import uvicorn
 
-        issuer = f"http://{args.host}:{args.port}"
-        provider = MockOAuthProvider(resource_url=f"{issuer}/mcp", issuer_url=issuer)
+        from mcp_combiner.binding import WILDCARDS
+
+        local = "127.0.0.1" if args.host in WILDCARDS else args.host
+        issuer = _issuer_url(args.issuer, local, args.port)
+        provider = MockOAuthProvider(
+            resource_url=f"http://{local}:{args.port}/mcp", issuer_url=issuer
+        )
         mcp_srv, _state = build_server(
             args.name, args.transport, specs, state_dir, provider, args.sessions
         )

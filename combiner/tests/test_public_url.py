@@ -30,6 +30,9 @@ def _tailnet(monkeypatch: pytest.MonkeyPatch) -> None:
         ("https://auto", "https://auto"),  # a host named auto is just a host
         ("https://combiner.example.com/", "https://combiner.example.com"),
         ("combiner.example.com:9741", "http://combiner.example.com:9741"),
+        ("combiner.example.com", "http://combiner.example.com:9741"),
+        ("http://[fd7a::1]", "http://[fd7a::1]:9741"),
+        ("http://[fd7a::1]:80", "http://[fd7a::1]:80"),
         ("", None),
         (None, None),
     ],
@@ -44,6 +47,9 @@ def test_the_env_var_is_a_literal_url_and_wins(monkeypatch: pytest.MonkeyPatch) 
     assert OAuthConfig.from_dict({}).public_url == "https://auth.example.com"
     monkeypatch.setenv(PUBLIC_URL_ENV, "https://{auto}")  # not special in the env
     assert resolve_public_url(None) == "https://{auto}"
+    # A bare host (as easily typed into a shell profile) is completed.
+    monkeypatch.setenv(PUBLIC_URL_ENV, "box.example.ts.net")
+    assert resolve_public_url(None) == "http://box.example.ts.net:9741"
 
 
 def test_auto_without_a_tailnet_means_loopback_links(monkeypatch: pytest.MonkeyPatch) -> None:

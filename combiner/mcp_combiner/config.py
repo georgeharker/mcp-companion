@@ -735,6 +735,22 @@ class OAuthConfig(BaseModel):
 PUBLIC_URL_ENV = "MCP_COMBINER_OAUTH_PUBLIC_URL"
 
 
+def _complete_url(value: str) -> str:
+    """A bare host becomes a URL: ``http://`` when there's no scheme, and the
+    combiner's port on plain ``http`` with none (``https`` keeps 443)."""
+    if "://" not in value:
+        value = f"http://{value}"
+    scheme, _, rest = value.partition("://")
+    authority, slash, path = rest.partition("/")
+    from mcp_combiner.ui_host.advertise import _has_port
+
+    if scheme == "http" and not _has_port(authority):
+        from mcp_combiner.runtime import RUNTIME
+
+        authority = f"{authority}:{RUNTIME.serve_port or 9741}"
+    return f"{scheme}://{authority}{slash}{path}"
+
+
 def resolve_public_url(setting: str | None) -> str | None:
     """The concrete ``oauth.public_url``.
 
@@ -744,9 +760,9 @@ def resolve_public_url(setting: str | None) -> str | None:
     URL with ``{auto}`` as its host (``https://{auto}`` for ``tailscale
     serve``). No tailnet → ``None``: links use the loopback callback.
     """
-    env = os.environ.get(PUBLIC_URL_ENV, "").strip()
+    env = os.environ.get(PUBLIC_URL_ENV, "").strip().rstrip("/")
     if env:
-        return env.rstrip("/")
+        return _complete_url(env)
     from mcp_combiner.ui_host.advertise import AUTO, AUTO_HOST, tailnet_host
 
     value = (setting or "").strip().rstrip("/")
@@ -757,7 +773,7 @@ def resolve_public_url(setting: str | None) -> str | None:
     elif "://" not in value:
         value = f"http://{value}"
     if AUTO_HOST not in value:
-        return value
+        return _complete_url(value)
     name = tailnet_host()
     if name is None:
         logger.info("oauth.public_url %s: no tailnet here — links use the loopback callback", value)

@@ -32,6 +32,12 @@ tagged `vX.Y.Z`.
   raw tailnet IP, falling back to the IP. `oauth.public_url: "auto"` is
   `http://<magicdns name>:<port>`; `"https://{auto}"` suits `tailscale serve`.
   New `MCP_COMBINER_OAUTH_PUBLIC_URL` (a literal URL) overrides the setting.
+- `MCP_COMBINER_OAUTH_PUBLIC_URL` (and a literal `public_url`) may be a bare
+  host: `http://` and, on plain http, the combiner's port are added. A bare
+  host used to become a redirect URI with no scheme, which broke the OAuth
+  connection outright.
+- Mock server `--issuer` (`auto` = the tailnet name): the authorization server
+  URL it advertises, so a phone can complete the mock's OAuth flow.
 - An explicit advertised origin keeps its own port
   (`MCP_COMBINER_UI_ADVERTISE=http://host:443` gave `http://host:443:9741`),
   and a bare IPv6 host is bracketed.
