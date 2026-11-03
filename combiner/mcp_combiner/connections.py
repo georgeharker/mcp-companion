@@ -53,7 +53,7 @@ from mcp_combiner.config import (
     _interpolate_str,
 )
 from mcp_combiner.runtime import MAX_SSE_EVENT_BYTES
-from mcp_combiner.upstream_era import client_mode
+from mcp_combiner.upstream_era import check_alive, client_mode, era_of
 from mcp_combiner.upstream_session import use_tolerant_session
 
 logger = logging.getLogger("mcp-combiner")
@@ -606,6 +606,7 @@ class ConnectionManager:
                         _CONNECT_TIMEOUT,
                     )
                     raise
+            await _first_contact(conn.name, client)
             conn.client_ref[0] = client
             conn._backoff = _INITIAL_BACKOFF
             conn._auth_failed = False
@@ -861,7 +862,9 @@ class ConnectionManager:
                 # catches a genuinely dropped socket, so this branch is only for
                 # slow / stale-but-open sessions where patience is warranted.
                 try:
-                    await asyncio.wait_for(client.ping(), timeout=_HEALTH_PING_TIMEOUT)
+                    await asyncio.wait_for(
+                        check_alive(conn.name, client), timeout=_HEALTH_PING_TIMEOUT
+                    )
                 except Exception as e:
                     conn._consec_ping_failures += 1
                     if conn._consec_ping_failures < _HEALTH_FAILURES_BEFORE_RECONNECT:
@@ -962,6 +965,26 @@ def _is_local_upstream(srv: ServerConfig) -> bool:
         return False
     host = urlparse(_interpolate_str(srv.url)).hostname or ""
     return host in ("127.0.0.1", "localhost", "::1")
+
+
+async def _first_contact(name: str, client: HttpClient) -> None:
+    """Make a 2026-era connection prove itself before it counts as open.
+
+    The handshake's ``initialize`` is the first request, so entering the client
+    reaches the server (and runs OAuth). A 2026-era client sends nothing on
+    entry; ping instead, bounded. When that fails because an authorization is
+    pending, the transport reports only a closed connection — re-raise as the
+    pending authorization so the caller's auth handling applies.
+    """
+    if era_of(name) != "2026":
+        return
+    try:
+        await asyncio.wait_for(check_alive(name, client), timeout=_CONNECT_TIMEOUT)
+    except Exception as exc:
+        pending = authprompt.pending_for(name)
+        if pending is not None:
+            raise authprompt.AuthorizationPending(pending) from exc
+        raise
 
 
 def _is_auth_error(exc: BaseException) -> bool:

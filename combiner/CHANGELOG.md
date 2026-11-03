@@ -24,6 +24,16 @@ tagged `vX.Y.Z`.
   pins itself, so a server that still keeps per-connection state (e.g.
   svg-mcp 0.9.0) needs `"protocol": "legacy"` until it supports explicit
   sessions. The bundled mock server pins itself unless `--offer-2026`.
+- **2026 upstreams are health-checked with `server/discover`.** `ping` exists
+  only on the handshake revisions, so a 2026 server answered every health
+  check with `Method not found` and was reconnected every few intervals. A 2026
+  connection also now makes first contact when it opens (the handshake's
+  `initialize` did that implicitly), so an unreachable or not-yet-authorized
+  2026 server is no longer reported connected; `protocol: "2026"` on an OAuth
+  server goes through the normal authorization prompt.
+- Mock server `--sessions`: `mock__create_session` / `mock__end_session` and a
+  visible `session_id` on `mock__remember` / `mock__recall` — a stand-in for a
+  2026 server that owns its sessions.
 - **Reverse bridge:** a handshake-era client calling a 2026 upstream that asks
   for input by returning `InputRequiredResult` is asked live
   (`elicitation/create`), and the call is retried with the answer, repeatedly

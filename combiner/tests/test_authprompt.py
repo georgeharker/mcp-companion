@@ -397,11 +397,15 @@ class TestCombinerPublicUrlFlow:
         mock: ServedOAuthMock,
         tmp_path: Path,
         env: dict[str, str] | None = None,
+        protocol: str | None = None,
     ) -> str:
         port = free_port()
+        entry: dict[str, Any] = {"url": mock.mcp_url, "transport": "http", "auth": "oauth"}
+        if protocol is not None:
+            entry["protocol"] = protocol
         config = write_servers_config(
             tmp_path / "servers.json",
-            {"mock": {"url": mock.mcp_url, "transport": "http", "auth": "oauth"}},
+            {"mock": entry},
             oauth={
                 "public_url": f"http://127.0.0.1:{port}",
                 "prompt": "elicit",
@@ -456,6 +460,49 @@ class TestCombinerPublicUrlFlow:
                     return None
 
             assert await poll_until(_echo, timeout=30.0, desc="call after auth") == "Echo: hi"
+
+    async def test_protocol_2026_on_an_oauth_upstream(
+        self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path
+    ) -> None:
+        """auto can't probe an OAuth server (it would be refused), so 2026 is
+        forced: authorization still runs, and calls then ride the 2026 era."""
+        mock = await oauth_mock()
+        mcp_url = await self._start(procs, mock, tmp_path, protocol="2026")
+        log = (tmp_path / "combiner.log").read_text()
+        assert "Upstream 'mock': 2026 protocol (setting '2026')" in log
+        notes = _Notifications()
+
+        async def answer(
+            message: str,
+            response_type: type[Any] | None,
+            params: mt.ElicitRequestParams,
+            context: object,
+        ) -> dict[str, Any]:
+            if not isinstance(params, mt.ElicitRequestFormParams):
+                raise AssertionError(f"unexpected elicitation: {message}")
+            return {"environment": "prod", "confirm": True, "ticket": "T-1", "replicas": 3}
+
+        async with Client(
+            mcp_url, elicitation_handler=answer, message_handler=notes, mode=CLIENT_CONNECT_MODE
+        ) as client:
+            with pytest.raises(MCPError) as caught:
+                await client.call_tool("mock_echo", {"message": "hi"})
+            assert isinstance(caught.value.error.data, dict)
+            (elicitation,) = caught.value.error.data["elicitations"]
+            page = await _follow_as_user(elicitation["url"])
+            assert page.status_code == 200, page.text
+
+            async def _echo() -> str | None:
+                try:
+                    return content_text(await client.call_tool("mock_echo", {"message": "hi"}))
+                except (ToolError, MCPError):
+                    return None
+
+            assert await poll_until(_echo, timeout=30.0, desc="call after auth") == "Echo: hi"
+            # The guard asks by returning InputRequiredResult, which exists only
+            # on a 2026 connection: its answer coming back proves the era.
+            guard = content_text(await client.call_tool("mock_mock__ask_guard", {}))
+            assert guard.startswith("guard: ") and '"action": "accept"' in guard
 
     async def test_client_without_url_elicitation_gets_the_link_as_text(
         self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path

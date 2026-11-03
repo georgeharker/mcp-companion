@@ -58,6 +58,7 @@ import json
 import os
 import sys
 import time
+import uuid
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +69,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool, ToolResult
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import PrivateAttr
 
 if TYPE_CHECKING:
@@ -189,6 +191,8 @@ class MockState:
     # stateful server's session-scoped state (svg-mcp's current document, a
     # jupyter kernel). In-memory ON PURPOSE — it must die with the process.
     session_memory: dict[str, str] = field(default_factory=dict)
+    # --sessions: memory per minted session id (value None = minted, empty).
+    minted_sessions: dict[str, str | None] = field(default_factory=dict)
     # Live ServerSessions, recorded per request so catalog mutations can
     # broadcast notifications/tools/list_changed (same pattern as the
     # combiner's _active_sessions WeakSet).
@@ -398,6 +402,7 @@ class MockServer:
         specs: list[ToolSpec] | None = None,
         state_dir: Path | None = None,
         oauth: MockOAuthProvider | None = None,
+        sessions: bool = False,
     ) -> None:
         self.state = MockState(server_name=name, transport=transport, state_dir=state_dir)
         if state_dir is not None:
@@ -413,9 +418,85 @@ class MockServer:
         for spec in specs if specs is not None else _default_specs():
             self._add(spec)
         self._register_builtins()
+        if sessions:
+            self._register_session_tools()
         self._register_routes()
         if oauth is not None:
             oauth.register_routes(self.mcp)
+
+    def _register_session_tools(self) -> None:
+        """``--sessions``: model a server that owns its sessions (svg-mcp's
+        2026 contract). ``mock__create_session`` mints an id; ``mock__remember``
+        / ``mock__recall`` take it as a visible ``session_id``. Without one, a
+        2026-era request is refused with guidance (its connection lives for one
+        request) and a handshake-era request keeps the per-connection memory."""
+        mcp_srv, state = self.mcp, self.state
+        for name in ("mock__remember", "mock__recall"):
+            mcp_srv.local_provider.remove_tool(name)
+
+        def is_stateless(ctx: Context) -> bool:
+            rc = ctx.request_context
+            return rc is not None and rc.protocol_version in MODERN_PROTOCOL_VERSIONS
+
+        def memory_key(ctx: Context, session_id: str | None) -> tuple[str, bool]:
+            """(key, minted?) for this call's memory; raises when it has none."""
+            if session_id is not None:
+                if session_id not in state.minted_sessions:
+                    raise ToolError(
+                        f"unknown session_id {session_id!r}: never created "
+                        "(call mock__create_session) or already ended"
+                    )
+                return session_id, True
+            if is_stateless(ctx):
+                raise ToolError(
+                    "no session on this stateless (2026-era) connection: call "
+                    "mock__create_session and pass its id as the session_id argument"
+                )
+            return ctx.session_id or "<none>", False
+
+        @mcp_srv.tool(
+            name="mock__create_session",
+            description="Mint a session id; pass it as session_id to keep state between calls.",
+        )
+        async def mock__create_session(ctx: Context) -> dict[str, str]:
+            state.record_call("mock__create_session", ctx.session_id)
+            session_id = uuid.uuid4().hex
+            state.minted_sessions[session_id] = None
+            return {"session_id": session_id}
+
+        @mcp_srv.tool(name="mock__end_session", description="End a minted session.")
+        async def mock__end_session(ctx: Context, session_id: str) -> str:
+            state.record_call("mock__end_session", ctx.session_id)
+            if state.minted_sessions.pop(session_id, "absent") == "absent":
+                raise ToolError(f"unknown session_id {session_id!r}")
+            return "session ended"
+
+        @mcp_srv.tool(
+            name="mock__remember",
+            description="Store a value in a session (session_id from mock__create_session).",
+        )
+        async def mock__remember(ctx: Context, value: str, session_id: str | None = None) -> str:
+            state.record_session(ctx)
+            state.record_call("mock__remember", ctx.session_id)
+            key, minted = memory_key(ctx, session_id)
+            if minted:
+                state.minted_sessions[key] = value
+            else:
+                state.session_memory[key] = value
+            return f"remembered in session {key[:8]}"
+
+        @mcp_srv.tool(
+            name="mock__recall",
+            description="Recall a session's value (session_id from mock__create_session).",
+        )
+        async def mock__recall(ctx: Context, session_id: str | None = None) -> str:
+            state.record_session(ctx)
+            state.record_call("mock__recall", ctx.session_id)
+            key, minted = memory_key(ctx, session_id)
+            value = state.minted_sessions.get(key) if minted else state.session_memory.get(key)
+            if value is None:
+                raise ToolError("nothing remembered in this session")
+            return value
 
     # -- catalog control ----------------------------------------------------
 
@@ -1276,9 +1357,10 @@ def build_server(
     specs: list[ToolSpec] | None = None,
     state_dir: Path | None = None,
     oauth: MockOAuthProvider | None = None,
+    sessions: bool = False,
 ) -> tuple[FastMCP, MockState]:
     """Assemble the mock server; returns (FastMCP instance, observable state)."""
-    server = MockServer(name, transport, specs, state_dir, oauth)
+    server = MockServer(name, transport, specs, state_dir, oauth, sessions)
     return server.mcp, server.state
 
 
@@ -1318,6 +1400,14 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--sessions",
+        action="store_true",
+        help=(
+            "Own sessions like a 2026-era stateful server: adds mock__create_session / "
+            "mock__end_session and a visible session_id on mock__remember / mock__recall."
+        ),
+    )
+    parser.add_argument(
         "--oauth",
         action="store_true",
         help=(
@@ -1342,14 +1432,18 @@ def main(argv: list[str] | None = None) -> None:
 
         issuer = f"http://{args.host}:{args.port}"
         provider = MockOAuthProvider(resource_url=f"{issuer}/mcp", issuer_url=issuer)
-        mcp_srv, _state = build_server(args.name, args.transport, specs, state_dir, provider)
+        mcp_srv, _state = build_server(
+            args.name, args.transport, specs, state_dir, provider, args.sessions
+        )
         if not args.offer_2026:
             pin_handshake_only(mcp_srv)
         app = provider.guard(mcp_srv.http_app())
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
         return
 
-    mcp_srv, _state = build_server(args.name, args.transport, specs, state_dir)
+    mcp_srv, _state = build_server(
+        args.name, args.transport, specs, state_dir, sessions=args.sessions
+    )
     if args.transport != "stdio" and not args.offer_2026:
         pin_handshake_only(mcp_srv)
 

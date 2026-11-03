@@ -20,6 +20,7 @@ import logging
 from typing import Any, Literal
 
 import httpx2
+from fastmcp import Client
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from mcp_combiner.config import ServerConfig, Transport, _interpolate_dict, _interpolate_str
@@ -45,6 +46,17 @@ def era_of(name: str) -> Era:
 def client_mode(name: str) -> str:
     """The fastmcp ``Client(mode=...)`` for connections to upstream *name*."""
     return MODERN_CLIENT_MODE if era_of(name) == "2026" else CLIENT_CONNECT_MODE
+
+
+async def check_alive(name: str, client: Client[Any]) -> None:
+    """Prove upstream *name* answers; raises when it doesn't. ``ping`` exists
+    only on the handshake revisions: a 2026-era server is asked
+    ``server/discover`` instead (it answers ``Method not found`` to ping)."""
+    if era_of(name) == "2026":
+        # send_discover, not discover(): the latter answers from its cache.
+        await client.session.send_discover(client.protocol_version or MODERN_CLIENT_MODE)
+    else:
+        await client.ping()
 
 
 def reset() -> None:
@@ -120,9 +132,15 @@ async def _discover(srv: ServerConfig) -> list[str]:
     }
     async with httpx2.AsyncClient(timeout=_PROBE_TIMEOUT_S) as http:
         response = await http.post(url, headers=headers, json=body)
-    if response.status_code >= 400:
+    return parse_discover(response.status_code, response.text)
+
+
+def parse_discover(status_code: int, text: str) -> list[str]:
+    """The versions a ``server/discover`` HTTP response lists; ``[]`` for an
+    error status, a JSON-RPC error, or a body that isn't a discover result."""
+    if status_code >= 400:
         return []
-    message = _first_json_message(response.text)
+    message = _first_json_message(text)
     result = message.get("result") if isinstance(message, dict) else None
     supported = result.get("supportedVersions") if isinstance(result, dict) else None
     return [v for v in supported if isinstance(v, str)] if isinstance(supported, list) else []

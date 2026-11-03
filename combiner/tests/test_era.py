@@ -10,6 +10,7 @@ difference: the same client then negotiates 2026-07-28.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -273,8 +274,9 @@ async def _reverse_combiner(
     mock_offers_2026: bool,
     protocol: str | None = None,
     offer_downstream: bool = False,
+    sessions: bool = False,
 ) -> CombinerHandle:
-    mock = await procs.start_http_mock("mockup", offer_2026=mock_offers_2026)
+    mock = await procs.start_http_mock("mockup", offer_2026=mock_offers_2026, sessions=sessions)
     entry: dict[str, Any] = {**http_mock_entry(mock.port), "isolate": True}
     if protocol is not None:
         entry["protocol"] = protocol
@@ -347,3 +349,196 @@ class TestReverseBridge:
     ) -> None:
         await _reverse_combiner(procs, tmp_path, mock_offers_2026=True, protocol="legacy")
         assert _upstream_era_logged(tmp_path) == "legacy"
+
+    async def test_health_checks_keep_a_2026_upstream_connected(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """ping exists only on the handshake revisions; a 2026 server must be
+        health-checked with server/discover, or it is reconnected every few
+        intervals (seen live against svg-mcp)."""
+        mock = await procs.start_http_mock("mockup", offer_2026=True)
+        config = write_servers_config(
+            tmp_path / "servers.json", {"mockup": http_mock_entry(mock.port)}
+        )
+        combiner = await procs.start_combiner(
+            config, env=FAST_TIMING_ENV, extra_args=["--log-file", str(tmp_path / "combiner.log")]
+        )
+        await combiner.wait_server_state("mockup", ("ready",))
+        await asyncio.sleep(5)  # five health intervals at FAST_TIMING_ENV
+        log = (tmp_path / "combiner.log").read_text()
+        assert "Upstream 'mockup': 2026 protocol" in log
+        misses = [line for line in log.splitlines() if "Health-check" in line]
+        assert not misses, misses[:3]
+        assert "Reconnecting to 'mockup'" not in log
+        async with Client(f"{combiner.mcp_url}/chat-health-1", mode=CLIENT_CONNECT_MODE) as c:
+            assert content_text(await c.call_tool("mockup_mock__whoami", {}))
+
+    async def test_protocol_2026_reaches_an_upstream_that_pins_itself(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """cribsheet's shape: discover lists nothing, yet a forced 2026 entry
+        connects on that revision (the pin only steers auto-negotiation)."""
+        combiner = await _reverse_combiner(procs, tmp_path, mock_offers_2026=False, protocol="2026")
+        assert _upstream_era_logged(tmp_path) == "2026"
+
+        async def answer(message: str, response_type: Any, params: Any, context: object) -> Any:
+            return ANSWER
+
+        url = f"{combiner.mcp_url}/chat-pin-0001"
+        async with Client(url, elicitation_handler=answer, mode=CLIENT_CONNECT_MODE) as c:
+            # The guard can only ask on a 2026 connection: success proves the era.
+            payload = _guard_saw(await c.call_tool("mockup_mock__ask_guard", {}))
+        assert payload == {"action": "accept", "content": ANSWER}
+
+
+# ── discover responses the probe must survive ─────────────────────
+
+
+class TestParseDiscover:
+    MODERN = sorted(MODERN_PROTOCOL_VERSIONS)[-1]
+
+    def _result(self, versions: object) -> str:
+        return json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"supportedVersions": versions}})
+
+    def test_json_and_sse_bodies(self) -> None:
+        body = self._result([self.MODERN, "2025-11-25"])
+        assert upstream_era.parse_discover(200, body) == [self.MODERN, "2025-11-25"]
+        sse = f"event: message\ndata: {body}\n\n"
+        assert upstream_era.parse_discover(200, sse) == [self.MODERN, "2025-11-25"]
+
+    @pytest.mark.parametrize(
+        ("status", "text"),
+        [
+            (404, "not found"),
+            (500, '{"jsonrpc": "2.0", "id": 1, "result": {"supportedVersions": ["x"]}}'),
+            (200, "<html>hello</html>"),
+            (200, "{not json"),
+            (200, "data: {not json"),
+            (200, ""),
+            (200, '{"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "nope"}}'),
+            (200, '{"jsonrpc": "2.0", "id": 1, "result": {}}'),
+            (200, '{"jsonrpc": "2.0", "id": 1, "result": {"supportedVersions": "2026-07-28"}}'),
+            (200, '["not", "an", "object"]'),
+        ],
+    )
+    def test_odd_responses_list_nothing(self, status: int, text: str) -> None:
+        assert upstream_era.parse_discover(status, text) == []
+
+    def test_non_string_versions_are_dropped(self) -> None:
+        assert upstream_era.parse_discover(200, self._result([self.MODERN, 7, None])) == [
+            self.MODERN
+        ]
+
+    async def test_auto_needs_a_modern_version_listed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        srv = ServerConfig.from_dict("probe", {"url": "http://127.0.0.1:1/mcp"})
+
+        async def handshake_only(_srv: ServerConfig) -> list[str]:
+            return ["2025-11-25", "2025-06-18"]
+
+        async def modern(_srv: ServerConfig) -> list[str]:
+            return ["2025-11-25", self.MODERN]
+
+        monkeypatch.setattr(upstream_era, "_discover", handshake_only)
+        assert await upstream_era.resolve("probe", srv) == "legacy"
+        monkeypatch.setattr(upstream_era, "_discover", modern)
+        assert await upstream_era.resolve("probe", srv) == "2026"
+
+
+# ── an upstream that owns its sessions (mock --sessions) ──────────
+
+
+def _text(result: Any) -> str:
+    return content_text(result)
+
+
+async def _mint(client: Client[Any]) -> str:
+    result = await client.call_tool("mockup_mock__create_session", {})
+    minted = result.structured_content
+    if not isinstance(minted, dict) or not isinstance(minted.get("session_id"), str):
+        raise AssertionError(f"create_session returned {minted!r}")
+    return str(minted["session_id"])
+
+
+class TestSessionOwningUpstream:
+    """The 2026 contract end to end: the upstream mints session ids, the model
+    passes them, and the combiner neither isolates nor touches them."""
+
+    async def _start(self, procs: ProcFactory, tmp_path: Path) -> CombinerHandle:
+        return await _reverse_combiner(
+            procs, tmp_path, mock_offers_2026=True, offer_downstream=True, sessions=True
+        )
+
+    async def test_detected_shared_and_session_id_visible(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner = await self._start(procs, tmp_path)
+        assert _upstream_era_logged(tmp_path) == "2026"
+        assert "isolate is ignored" in (tmp_path / "combiner.log").read_text()
+        async with Client(f"{combiner.mcp_url}/chat-own-0001") as c:
+            tools = {t.name: t for t in await c.list_tools()}
+        assert "mockup_mock__create_session" in tools
+        for name in ("mockup_mock__remember", "mockup_mock__recall"):
+            assert "session_id" in tools[name].input_schema["properties"], name
+
+    async def test_chats_on_either_era_keep_their_own_sessions(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner = await self._start(procs, tmp_path)
+        old = Client(f"{combiner.mcp_url}/chat-own-old1", mode=CLIENT_CONNECT_MODE)
+        new = Client(f"{combiner.mcp_url}/chat-own-new1")
+        async with old as a, new as b:
+            assert a.protocol_version not in MODERN_PROTOCOL_VERSIONS
+            assert b.protocol_version in MODERN_PROTOCOL_VERSIONS
+            sid_a, sid_b = await _mint(a), await _mint(b)
+            await a.call_tool("mockup_mock__remember", {"value": "alpha", "session_id": sid_a})
+            await b.call_tool("mockup_mock__remember", {"value": "beta", "session_id": sid_b})
+            assert _text(await a.call_tool("mockup_mock__recall", {"session_id": sid_a})) == "alpha"
+            assert _text(await b.call_tool("mockup_mock__recall", {"session_id": sid_b})) == "beta"
+
+    async def test_no_session_is_guided_and_ended_ids_are_refused(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        combiner = await self._start(procs, tmp_path)
+        async with Client(f"{combiner.mcp_url}/chat-own-0002") as c:
+            # Upstream connection is 2026, so without an id there is nowhere to keep state.
+            with pytest.raises(ToolError, match="call mock__create_session"):
+                await c.call_tool("mockup_mock__remember", {"value": "lost"})
+            sid = await _mint(c)
+            await c.call_tool("mockup_mock__remember", {"value": "kept", "session_id": sid})
+            await c.call_tool("mockup_mock__end_session", {"session_id": sid})
+            with pytest.raises(ToolError, match="unknown session_id"):
+                await c.call_tool("mockup_mock__recall", {"session_id": sid})
+
+    async def test_sessions_survive_a_combiner_restart(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """What owning sessions upstream buys: the combiner holds nothing, so a
+        new combiner process serves the same session."""
+        combiner = await self._start(procs, tmp_path)
+        async with Client(f"{combiner.mcp_url}/chat-own-0003") as c:
+            sid = await _mint(c)
+            await c.call_tool("mockup_mock__remember", {"value": "durable", "session_id": sid})
+        combiner.terminate()
+        reborn = await procs.start_combiner(combiner.config_path, env={OFFER_2026_ENV: "1"})
+        await reborn.wait_server_state("mockup", ("ready",))
+        async with Client(f"{reborn.mcp_url}/chat-own-0003") as c:
+            assert _text(await c.call_tool("mockup_mock__recall", {"session_id": sid})) == "durable"
+
+    async def test_protocol_legacy_keeps_per_connection_state(
+        self, procs: ProcFactory, tmp_path: Path
+    ) -> None:
+        """Control: the same server forced to the handshake keeps state per
+        chat without an id (isolate applies again)."""
+        combiner = await _reverse_combiner(
+            procs, tmp_path, mock_offers_2026=True, protocol="legacy", sessions=True
+        )
+        assert _upstream_era_logged(tmp_path) == "legacy"
+        one = Client(f"{combiner.mcp_url}/chat-leg-0001", mode=CLIENT_CONNECT_MODE)
+        two = Client(f"{combiner.mcp_url}/chat-leg-0002", mode=CLIENT_CONNECT_MODE)
+        async with one as a, two as b:
+            await a.call_tool("mockup_mock__remember", {"value": "mine"})
+            assert _text(await a.call_tool("mockup_mock__recall", {})) == "mine"
+            with pytest.raises(ToolError, match="nothing remembered"):
+                await b.call_tool("mockup_mock__recall", {})
