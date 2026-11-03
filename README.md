@@ -265,10 +265,31 @@ format is supported:
 | `auth`         | `string\|object`   | Authentication config (see below)                                                                                                                  |
 | `sharedServer` | `string`           | Name of a `sharedServers` entry to start before connecting (see below)                                                                             |
 | `toolFilter`   | `string[]`         | Glob patterns; only matching tool names are exposed (empty = all)                                                                                  |
+| `resourceFilter` | `string[]`       | Glob patterns on resource URIs (templates: URI templates) as the server names them; only matching ones are listed (empty = all). `["ui://*"]` keeps just interactive widgets — see [Large lists](#large-lists-paging-and-resourcefilter) |
 | `permissions`  | `object`           | Opt-in per-call allow/deny/elicit policy for this server's tools — see [Combiner-side tool-call permissions](#combiner-side-tool-call-permissions) |
 | `isolate`      | `boolean`          | Give each chat its own upstream MCP session (HTTP/SSE) or subprocess (stdio) — see [isolate](#isolate--per-chat-sessions)                          |
 | `externalServer` | `string`         | Name of an `externalServers` entry — a non-owned process (e.g. a `docker run` container) — see [externalServer](#externalserver--non-owned-processes)                                                           |
 | `protocol`     | `string`           | `auto` (default), `legacy` or `2026` — which MCP protocol revision the combiner speaks to this server; see [protocol](#protocol--which-mcp-revision-to-speak-upstream) |
+
+### Large lists: paging and resourceFilter
+
+Some servers list thousands of resources — a metrics server exposing one per
+metric. The combiner pages its aggregate `tools/list`, `resources/list`,
+`resources/templates/list` and `prompts/list` responses at
+`MCP_COMBINER_LIST_PAGE_SIZE` items (default 1000; `0` turns paging off), so no
+single response grows past a client's limit; clients follow `nextCursor`
+(the Neovim plugin, pi, Claude Code and OpenCode all do). The later pages of a
+`resources/list` walk come from the first page's listing, so upstreams are
+asked once per walk.
+
+Paging keeps the response sizes bounded but still moves every entry to every
+client. For a server whose resources aren't useful as context, list fewer:
+
+```json
+"gcloud-prometheus": {"url": "…", "resourceFilter": ["ui://*"]}
+```
+
+Its tools are unaffected, and a resource read by URI still works.
 
 ### protocol — which MCP revision to speak upstream
 

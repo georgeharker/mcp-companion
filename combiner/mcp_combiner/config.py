@@ -422,6 +422,14 @@ class ServerConfig(BaseModel):
     Examples: ``["gmail_*", "calendar_*"]`` to only include Gmail and Calendar tools.
     """
 
+    resource_filter: list[str] = Field(default_factory=list)
+    """Glob patterns choosing which of this server's resources (and resource
+    templates) are listed. Empty (default) lists all. Patterns match the URI as
+    the server names it (templates: their URI template), e.g. ``["ui://*"]``
+    keeps only interactive widgets — for a server that lists thousands of
+    resources (one per metric) its tools already cover. Listing only: a
+    resource read by URI still works."""
+
     permissions: PermissionPolicy | None = None
     """Per-call permission policy for this server (overrides/extends the global
     ``permissions`` block).  ``None`` = inherit the global policy.  See
@@ -494,6 +502,8 @@ class ServerConfig(BaseModel):
                 "external_server",
                 "toolFilter",
                 "tool_filter",
+                "resourceFilter",
+                "resource_filter",
                 "permissions",
                 "isolate",
                 "protocol",
@@ -518,6 +528,7 @@ class ServerConfig(BaseModel):
         shared_server = data.get("sharedServer") or data.get("shared_server")
         external_server = data.get("externalServer") or data.get("external_server")
         tool_filter = data.get("toolFilter") or data.get("tool_filter") or []
+        resource_filter = data.get("resourceFilter") or data.get("resource_filter") or []
 
         return cls(
             name=name,
@@ -533,6 +544,7 @@ class ServerConfig(BaseModel):
             shared_server=shared_server,
             external_server=external_server,
             tool_filter=tool_filter,
+            resource_filter=resource_filter,
             permissions=PermissionPolicy.from_dict(data.get("permissions")),
             isolate=(None if data.get("isolate") is None else bool(data["isolate"])),
             protocol=_upstream_protocol(name, data.get("protocol")),

@@ -19,6 +19,7 @@ SELF_CONTAINED=(
     test_project
     test_cc_resolve_session
     test_acp_tools_filter
+    test_list_paging
 )
 
 run_one() {

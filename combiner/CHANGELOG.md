@@ -4,6 +4,23 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [Unreleased]
+
+### Added
+
+- **List paging.** `tools/list`, `resources/list`, `resources/templates/list`
+  and `prompts/list` are paged at `MCP_COMBINER_LIST_PAGE_SIZE` items (default
+  1000; `0` = off). A server listing thousands of resources (13k from two
+  metrics servers in one setup) made a single ~17 MB response, past pi's 16 MiB
+  SSE event limit, so interactive-resource discovery failed. The later pages of
+  a `resources/list` walk are served from the first page's listing (one
+  upstream fan-out per walk, consistent pages). The Neovim plugin now follows
+  `nextCursor` for all list calls.
+- **`resourceFilter`** (per server): glob patterns on resource URIs (and
+  template URI templates) as the server names them; only matching ones are
+  listed. `["ui://*"]` keeps only interactive widgets. Listing only — reading
+  a resource by URI still works.
+
 ## [0.20.0] — 2026-11-03
 
 Both MCP revisions, upstream and down. Upgrade notes: upstreams default to

@@ -442,6 +442,48 @@ end
 -- JSON-RPC over MCP Streamable HTTP
 -------------------------------------------------------------------------------
 
+--- Most pages a paginated list is followed for (a runaway-cursor guard).
+local LIST_MAX_PAGES = 250
+
+--- Fetch a paginated MCP list (tools/list, resources/list, prompts/list) in full,
+--- following `nextCursor`. The combiner pages large aggregate lists (one SSE event
+--- per page keeps each response bounded), so a single request may hold only part.
+--- @param method string e.g. "resources/list"
+--- @param field string the result's item array, e.g. "resources"
+--- @param callback fun(err?: string, items?: table[], first?: table) items from
+---   every page; `first` is the first page's raw result (for side fields)
+function Client:request_all(method, field, callback)
+    local items = {} --- @type table[]
+    local first = nil --- @type table|nil
+    local pages = 0
+    local function fetch(cursor)
+        pages = pages + 1
+        local params = cursor and { cursor = cursor } or {}
+        self:request(method, params, function(err, result)
+            if err or not result then
+                callback(err or "empty response", nil, nil)
+                return
+            end
+            first = first or result
+            for _, item in ipairs(result[field] or {}) do
+                items[#items + 1] = item
+            end
+            local next_cursor = result.nextCursor
+            if type(next_cursor) == "string" and next_cursor ~= "" then
+                if pages >= LIST_MAX_PAGES then
+                    log.warn("%s: stopped after %d pages (%d items)", method, pages, #items)
+                    callback(nil, items, first)
+                    return
+                end
+                fetch(next_cursor)
+            else
+                callback(nil, items, first)
+            end
+        end)
+    end
+    fetch(nil)
+end
+
 --- Send a JSON-RPC request (new TCP connection per request).
 --- @param method string MCP method (e.g. "tools/list")
 --- @param params? table
@@ -631,28 +673,28 @@ function Client:connect(callback)
         self:_fetch_server_names(check_all_done)
 
         -- Capability requests (parallel) — skip internal _update_server_state
-        self:request("tools/list", {}, function(req_err, req_result)
-            if not req_err and req_result then
-                self.tools = req_result.tools or {}
+        self:request_all("tools/list", "tools", function(req_err, req_tools)
+            if not req_err and req_tools then
+                self.tools = req_tools
             else
                 log.warn("tools/list failed: %s", tostring(req_err))
             end
             check_all_done()
         end)
 
-        self:request("resources/list", {}, function(req_err2, req_result2)
-            if not req_err2 and req_result2 then
-                self.resources = req_result2.resources or {}
-                self.resource_templates = req_result2.resourceTemplates or {}
+        self:request_all("resources/list", "resources", function(req_err2, req_resources, req_first2)
+            if not req_err2 and req_resources then
+                self.resources = req_resources
+                self.resource_templates = (req_first2 or {}).resourceTemplates or {}
             else
                 log.warn("resources/list failed: %s", tostring(req_err2))
             end
             check_all_done()
         end)
 
-        self:request("prompts/list", {}, function(req_err3, req_result3)
-            if not req_err3 and req_result3 then
-                self.prompts = req_result3.prompts or {}
+        self:request_all("prompts/list", "prompts", function(req_err3, req_prompts)
+            if not req_err3 and req_prompts then
+                self.prompts = req_prompts
             else
                 log.warn("prompts/list failed: %s", tostring(req_err3))
             end
@@ -750,28 +792,28 @@ function Client:refresh_capabilities(callback)
         end
     end
 
-    self:request("tools/list", {}, function(err, result)
-        if not err and result then
-            self.tools = result.tools or {}
+    self:request_all("tools/list", "tools", function(err, tools)
+        if not err and tools then
+            self.tools = tools
         else
             log.warn("tools/list failed: %s", tostring(err))
         end
         check_done()
     end)
 
-    self:request("resources/list", {}, function(err2, result2)
-        if not err2 and result2 then
-            self.resources = result2.resources or {}
-            self.resource_templates = result2.resourceTemplates or {}
+    self:request_all("resources/list", "resources", function(err2, resources, first2)
+        if not err2 and resources then
+            self.resources = resources
+            self.resource_templates = (first2 or {}).resourceTemplates or {}
         else
             log.warn("resources/list failed: %s", tostring(err2))
         end
         check_done()
     end)
 
-    self:request("prompts/list", {}, function(err3, result3)
-        if not err3 and result3 then
-            self.prompts = result3.prompts or {}
+    self:request_all("prompts/list", "prompts", function(err3, prompts)
+        if not err3 and prompts then
+            self.prompts = prompts
         else
             log.warn("prompts/list failed: %s", tostring(err3))
         end
@@ -1131,9 +1173,9 @@ function Client:_handle_sse_notification(msg)
         -- /health first so _update_server_state merges the new state, not
         -- the connect-time snapshot.
         self:_refresh_server_health(function()
-            self:request("tools/list", {}, function(err, result)
-                if not err and result then
-                    self.tools = result.tools or {}
+            self:request_all("tools/list", "tools", function(err, tools)
+                if not err and tools then
+                    self.tools = tools
                     self:_update_server_state()
                     state.emit("tool_list_changed")
                     state.emit("servers_updated")
@@ -1142,10 +1184,10 @@ function Client:_handle_sse_notification(msg)
             end)
         end)
     elseif msg.method == "notifications/resources/list_changed" then
-        self:request("resources/list", {}, function(err, result)
-            if not err and result then
-                self.resources = result.resources or {}
-                self.resource_templates = result.resourceTemplates or {}
+        self:request_all("resources/list", "resources", function(err, resources, first)
+            if not err and resources then
+                self.resources = resources
+                self.resource_templates = (first or {}).resourceTemplates or {}
                 self:_update_server_state()
                 state.emit("resource_list_changed")
                 state.emit("servers_updated")
@@ -1153,9 +1195,9 @@ function Client:_handle_sse_notification(msg)
             end
         end)
     elseif msg.method == "notifications/prompts/list_changed" then
-        self:request("prompts/list", {}, function(err, result)
-            if not err and result then
-                self.prompts = result.prompts or {}
+        self:request_all("prompts/list", "prompts", function(err, prompts)
+            if not err and prompts then
+                self.prompts = prompts
                 state.emit("prompt_list_changed")
                 state.emit("servers_updated")
                 log.debug("SSE: prompts refreshed (%d prompts)", #self.prompts)

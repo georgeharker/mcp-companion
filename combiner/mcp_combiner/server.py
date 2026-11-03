@@ -20,6 +20,7 @@ from mcp_combiner.config import (
     CombinerConfig,  # noqa: PLC2701
 )
 from mcp_combiner.connections import ConnectionManager
+from mcp_combiner.listpaging import ResourceListPagingMiddleware, list_page_size
 from mcp_combiner.middleware import (  # noqa: F401 (ToolProcessingMiddleware re-export)
     ToolErrorPassthroughMiddleware,
     ToolProcessingMiddleware,
@@ -445,6 +446,8 @@ def create_combiner(
             "server's tools online."
         ),
         dereference_schemas=False,  # Disabled: circular $ref causes infinite recursion
+        # Large aggregate lists are paged (mcp_combiner.listpaging).
+        list_page_size=list_page_size(),
         middleware=[
             # Outermost: catch-all safety net for any unhandled exception
             # (tool-visible errors pass through as isError results).
@@ -458,6 +461,8 @@ def create_combiner(
                 retry_exceptions=(ConnectionError, TimeoutError),
                 logger=logger,
             ),
+            # Later pages of a resources/list walk come from its first page's listing.
+            ResourceListPagingMiddleware(),
             # Innermost: caching, filtering, sanitization, domain error handling
             ToolProcessingMiddleware(),
         ],

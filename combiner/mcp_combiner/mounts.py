@@ -51,7 +51,9 @@ class BoundedListProvider(Provider):
     fires for them and call routing would silently break ("Unknown tool").
     """
 
-    def __init__(self, inner: Any, timeout: float | None = None) -> None:
+    def __init__(
+        self, inner: Any, timeout: float | None = None, server_name: str | None = None
+    ) -> None:
         super().__init__()
         if timeout is None:
             from mcp_combiner.toolcache import UPSTREAM_TOOL_LIST_TIMEOUT
@@ -59,6 +61,7 @@ class BoundedListProvider(Provider):
             timeout = UPSTREAM_TOOL_LIST_TIMEOUT
         self._inner = inner
         self._timeout = timeout
+        self._server_name = server_name
 
     def __getattr__(self, name: str) -> Any:
         # Only reached for names not found locally or on Provider — delegate
@@ -114,10 +117,10 @@ class BoundedListProvider(Provider):
         return await self._bounded("get_app_tool", app_name, tool_name)
 
     async def list_resources(self) -> Any:
-        return await self._bounded("list_resources") or []
+        return self._filtered(await self._bounded("list_resources") or [], "uri")
 
     async def _list_resources(self) -> Any:
-        return await self._bounded("list_resources") or []
+        return self._filtered(await self._bounded("list_resources") or [], "uri")
 
     async def get_resource(self, uri: str, version: Any = None) -> Any:
         return await self._bounded("get_resource", uri, version)
@@ -126,10 +129,28 @@ class BoundedListProvider(Provider):
         return await self._bounded("get_resource", uri, version)
 
     async def list_resource_templates(self) -> Any:
-        return await self._bounded("list_resource_templates") or []
+        return self._filtered(await self._bounded("list_resource_templates") or [], "uri_template")
 
     async def _list_resource_templates(self) -> Any:
-        return await self._bounded("list_resource_templates") or []
+        return self._filtered(await self._bounded("list_resource_templates") or [], "uri_template")
+
+    def _filtered(self, items: Any, attr: str) -> Any:
+        """*items* narrowed by the server's ``resourceFilter`` (read per listing,
+        so a config reload applies without a remount)."""
+        from mcp_combiner.runtime import RUNTIME
+
+        config = RUNTIME.config
+        srv = config.servers.get(self._server_name) if config and self._server_name else None
+        if srv is None or not srv.resource_filter:
+            return items
+        import fnmatch
+
+        patterns = srv.resource_filter
+        return [
+            item
+            for item in items
+            if any(fnmatch.fnmatchcase(str(getattr(item, attr, "")), p) for p in patterns)
+        ]
 
     async def get_resource_template(self, uri: str, version: Any = None) -> Any:
         return await self._bounded("get_resource_template", uri, version)
@@ -208,7 +229,7 @@ def mount_server_provider(combiner: FastMCP, proxy: Any, server_name: str) -> No
 
     raw = FastMCPProvider(proxy) if isinstance(proxy, FastMCP) else proxy
     before = list(combiner.providers)
-    combiner.add_provider(BoundedListProvider(raw), namespace=server_name)
+    combiner.add_provider(BoundedListProvider(raw, server_name=server_name), namespace=server_name)
     added = [p for p in combiner.providers if not any(p is q for q in before)]
     if not added:
         logger.warning(
