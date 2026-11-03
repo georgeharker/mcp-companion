@@ -572,26 +572,33 @@ class _Heard(MessageHandler):
 
 
 async def _listening_upstream(
-    procs: ProcFactory, tmp_path: Path, *, offer_downstream: bool = False
+    procs: ProcFactory,
+    tmp_path: Path,
+    *,
+    offer_downstream: bool = False,
+    fast: bool = False,
 ) -> tuple[CombinerHandle, MockHandle]:
     mock = await procs.start_http_mock("mockup", offer_2026=True)
     config = write_servers_config(tmp_path / "servers.json", {"mockup": http_mock_entry(mock.port)})
-    env = {OFFER_2026_ENV: "1"} if offer_downstream else None
+    env = {
+        **({OFFER_2026_ENV: "1"} if offer_downstream else {}),
+        **(FAST_TIMING_ENV if fast else {}),
+    }
     combiner = await procs.start_combiner(
-        config, env=env, extra_args=["--log-file", str(tmp_path / "combiner.log")]
+        config, env=env or None, extra_args=["--log-file", str(tmp_path / "combiner.log")]
     )
     await combiner.wait_server_state("mockup", ("ready",))
     return combiner, mock
 
 
-async def _mock_listening(mock: MockHandle, want: list[str]) -> None:
+async def _mock_listening(mock: MockHandle, want: list[str], timeout: float = 15.0) -> None:
     """Wait until the combiner's stream to *mock* watches exactly *want*."""
 
     async def _match() -> bool | None:
         streams = (await mock.stats())["listening"]
         return True if streams == [sorted(want)] else None
 
-    await poll_until(_match, timeout=15.0, desc=f"upstream listen stream watching {want}")
+    await poll_until(_match, timeout=timeout, desc=f"upstream listen stream watching {want}")
 
 
 class TestUpstreamListen:
@@ -651,11 +658,13 @@ class TestUpstreamListen:
     async def test_a_restarted_upstream_is_listened_to_again(
         self, procs: ProcFactory, tmp_path: Path
     ) -> None:
-        combiner, mock = await _listening_upstream(procs, tmp_path)
+        # Fast health checks: a slow restart can outlast the listener's own
+        # backoff, and the health monitor's reconnect opens a fresh stream too.
+        combiner, mock = await _listening_upstream(procs, tmp_path, fast=True)
         await _mock_listening(mock, [])
         mock.terminate()
         reborn = await procs.start_http_mock("mockup", port=mock.port, offer_2026=True)
-        await _mock_listening(reborn, [])
+        await _mock_listening(reborn, [], timeout=45.0)
         await combiner.wait_server_state("mockup", ("ready",))
 
 
