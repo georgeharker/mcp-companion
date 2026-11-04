@@ -37,7 +37,7 @@ project:
 from: markdown+gfm_auto_identifiers
 
 website:
-  title: "mcp-companion"
+  title: "mcp-combiner"
   favicon: docs/assets/logo.svg
   image: docs/assets/logo.svg
   search: true
@@ -46,7 +46,7 @@ website:
     logo: docs/assets/logo.svg
     tools:
       - icon: github
-        href: https://github.com/georgeharker/mcp-companion
+        href: https://github.com/georgeharker/mcp-combiner
         text: GitHub repository
     contents:
       - text: "Home"

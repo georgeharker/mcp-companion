@@ -11,7 +11,7 @@ name: Release (pi-mcp-combiner)
 #
 #   One-time setup at https://www.npmjs.com/ → the package → Settings → Trusted
 #   Publisher (or create the publisher first if the package is new), with:
-#       repository:   georgeharker/mcp-companion
+#       repository:   georgeharker/mcp-combiner
 #       workflow:     release-pi-plugin.yml
 #       environment:  npm
 #   Reuses the same GitHub environment named "npm" the OpenCode release uses.

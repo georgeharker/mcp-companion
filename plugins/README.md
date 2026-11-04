@@ -9,9 +9,9 @@ The plugins live **in this repo** (previously separate repos, now retired):
 
 | plugin                          | dir                                                                                            | for                                                                                       |
 | ------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `mcp-combiner`                  | [`plugins/claude`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude)     | Claude Code                                                                               |
-| `@geohar/opencode-mcp-combiner` | [`plugins/opencode`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode) | OpenCode                                                                                  |
-| `@geohar/pi-mcp-combiner`       | [`plugins/pi`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi)             | Pi (standalone — or alongside [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)) |
+| `mcp-combiner`                  | [`plugins/claude`](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/claude)     | Claude Code                                                                               |
+| `@geohar/opencode-mcp-combiner` | [`plugins/opencode`](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/opencode) | OpenCode                                                                                  |
+| `@geohar/pi-mcp-combiner`       | [`plugins/pi`](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/pi)             | Pi (standalone — or alongside [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)) |
 
 Both attach to (or start) the combiner under the sharedserver name
 `mcp-combiner`, so every client shares one refcounted process. When the host
@@ -85,7 +85,7 @@ launch — the host owns the lifecycle at its matching version.
 Installed from this repo's marketplace, inside a Claude Code session:
 
 ```
-/plugin marketplace add georgeharker/mcp-companion
+/plugin marketplace add georgeharker/mcp-combiner
 /plugin install mcp-combiner@mcp-companion
 ```
 

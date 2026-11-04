@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="976" height="560" viewBox="46 0 488 280" role="img" aria-label="mcp-companion: terminal and chat interfaces funnel through a hub into managed mcp servers">
+<svg xmlns="http://www.w3.org/2000/svg" width="976" height="560" viewBox="46 0 488 280" role="img" aria-label="mcp-combiner: terminal and chat interfaces funnel through a hub into managed mcp servers">
   <defs>
     <marker id="arrowhead" markerWidth="22" markerHeight="13" refX="20" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L22,6.5 L0,13 Z" fill="#8636C3"/>

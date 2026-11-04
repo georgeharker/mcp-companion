@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" alt="mcp-companion logo" width="440" height="252">
+  <img src="docs/assets/logo.svg" alt="mcp-combiner logo" width="440" height="252">
 </p>
 
-# mcp-companion
+# mcp-combiner
 
 An MCP aggregator (combiner) and editor integration that aggregates multiple
 [Model Context Protocol](https://modelcontextprotocol.io) servers behind a
@@ -14,15 +14,21 @@ connect to it over HTTP. The Lua plugin layer adds Neovim-specific features:
 tool registration, editor context, slash commands, ACP forwarding, and a status
 UI.
 
-> ⚠️ **The combiner was renamed `mcp-bridge` → [`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/combiner).** The Python package,
+> ⚠️ **The combiner was renamed `mcp-bridge` → [`mcp-combiner`](https://github.com/georgeharker/mcp-combiner/tree/main/combiner).** The Python package,
 > command, and import are now `mcp-combiner` / `mcp-combiner` / `mcp_combiner`; its admin tools are
 > `combiner__*`; config env vars are `MCP_COMBINER_*` (and `MCP_COMPANION_COMBINER_URL` →
 > `MCP_COMPANION_COMBINER_URL`). If you ran an earlier build, see
-> [`combiner/README.md`](https://github.com/georgeharker/mcp-companion/blob/main/combiner/README.md) to migrate (reinstall + a one-off OAuth re-auth). The
-> `mcp-companion` repo and Neovim plugin keep their name.
+> [`combiner/README.md`](https://github.com/georgeharker/mcp-combiner/blob/main/combiner/README.md) to migrate (reinstall + a one-off OAuth re-auth).
+
+> ℹ️ **The repository is now `mcp-combiner`** (formerly `mcp-companion`; GitHub
+> redirects the old URLs). Update plugin specs to `georgeharker/mcp-combiner` when
+> convenient. The Neovim plugin's Lua module is still `mcp_companion`, so
+> `require("mcp_companion")`, existing configs, `.mcp-companion.json` project
+> files and the Claude Code marketplace name (`mcp-combiner@mcp-companion`) are
+> unchanged.
 
 > 📖 Rendered documentation:
-> [docs.georgeharker.com/mcp-companion](https://docs.georgeharker.com/mcp-companion/)
+> [docs.georgeharker.com/mcp-combiner](https://docs.georgeharker.com/mcp-combiner/)
 
 ## Overview
 
@@ -78,7 +84,7 @@ owned by `runtime.CombinerRuntime` and mutated only through its methods.
 The `mcp-combiner` CLI is a pure client of the management plane; the
 `mockserver` module is the instrumentable test upstream. Full internal
 design notes live in
-[`docs/design.md`](https://github.com/georgeharker/mcp-companion/blob/main/docs/design.md).
+[`docs/design.md`](https://github.com/georgeharker/mcp-combiner/blob/main/docs/design.md).
 
 ### Control CLI
 
@@ -185,7 +191,7 @@ curl -X POST http://127.0.0.1:9741/mcp \
 
 Outside CodeCompanion, install a plugin so your agent runs and registers the
 combiner itself (one refcounted process shared across clients). All three plugins live
-in this repo — **[`plugins/`](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)**.
+in this repo — **[`plugins/`](https://github.com/georgeharker/mcp-combiner/blob/main/plugins/README.md)**.
 
 Prerequisites (once, for any plugin): [`uv`](https://docs.astral.sh/uv/),
 `cargo install sharedserver`, and a `servers.json` at
@@ -194,7 +200,7 @@ Prerequisites (once, for any plugin): [`uv`](https://docs.astral.sh/uv/),
 **You do not need to install the combiner itself** — with `uv` present the plugins fetch a
 pinned release from PyPI on demand. Then:
 
-- **Claude Code:** `/plugin marketplace add georgeharker/mcp-companion` →
+- **Claude Code:** `/plugin marketplace add georgeharker/mcp-combiner` →
   `/plugin install mcp-combiner@mcp-companion` → restart the session; verify
   with `/mcp` (an `mcp-combiner` server with prefixed tools).
 - **OpenCode:** add `"@geohar/opencode-mcp-combiner@latest"` to your `opencode.json`
@@ -204,9 +210,9 @@ pinned release from PyPI on demand. Then:
   the combiner **and speaks MCP to it itself** (no second package).
   [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter) is optional — the
   extension auto-defers when it's present (see
-  [`plugins/pi/README.md`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi#readme)).
+  [`plugins/pi/README.md`](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/pi#readme)).
 
-See **[plugins/README.md](https://github.com/georgeharker/mcp-companion/blob/main/plugins/README.md)** for the full walkthrough (config discovery order, env
+See **[plugins/README.md](https://github.com/georgeharker/mcp-combiner/blob/main/plugins/README.md)** for the full walkthrough (config discovery order, env
 knobs, troubleshooting) and the host-owned (`MCP_COMPANION_COMBINER_URL`)
 behaviour.
 
@@ -1043,9 +1049,9 @@ binary automatically on first sync.
 
 ### Installation (lazy.nvim)
 
-Install sharedserver and mcp-companion as separate top-level plugin entries so
+Install sharedserver and mcp-combiner as separate top-level plugin entries so
 lazy.nvim runs the build steps independently, then declare sharedserver as a
-dependency of mcp-companion so load order is correct:
+dependency of mcp-combiner so load order is correct:
 
 ```lua
 -- sharedserver: builds the Rust binary that manages combiner process lifecycle
@@ -1055,9 +1061,9 @@ dependency of mcp-companion so load order is correct:
     lazy = false,
 },
 
--- mcp-companion: the combiner + Neovim plugin
+-- mcp-combiner: the combiner + Neovim plugin
 {
-    "georgeharker/mcp-companion",
+    "georgeharker/mcp-combiner",
     lazy = false,
     dependencies = {
         "olimorris/codecompanion.nvim",
@@ -1129,7 +1135,7 @@ reinstall; `:MCPInstall /path/to/venv` targets a specific venv).
 
 **Sharing the combiner with standalone Claude Code.** Only relevant if you opt into a shared
 `combiner.venv`. Put its `bin/` on `PATH` (or `uv tool install <plugin>/combiner` for a global
-`mcp-combiner`), and the [`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude)
+`mcp-combiner`), and the [`mcp-combiner`](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/claude)
 plugin will find `mcp-combiner` directly — Neovim and standalone Claude then share one combiner
 process.
 
@@ -1826,7 +1832,7 @@ actually needs.
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/docs/schemas/project.schema.json",
+  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-combiner/main/docs/schemas/project.schema.json",
   "allowed_servers": ["github", "gws"]
 }
 ```
@@ -1835,7 +1841,7 @@ Or hide specific servers from an otherwise-default project:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/docs/schemas/project.schema.json",
+  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-combiner/main/docs/schemas/project.schema.json",
   "disabled_servers": ["clickup"]
 }
 ```
@@ -1851,7 +1857,7 @@ Example with per-adapter overrides:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/docs/schemas/project.schema.json",
+  "$schema": "https://raw.githubusercontent.com/georgeharker/mcp-combiner/main/docs/schemas/project.schema.json",
   "allowed_servers": ["github", "gws"],
   "adapters": {
     "moonshot-ai": {
@@ -2033,7 +2039,7 @@ combiner = {
 Setting `token_in_url = true` forces the URL token everywhere (including the
 HTTP-adapter client), i.e. belt-and-braces. If an ACP agent still fails to see
 tools with the auto default, please open an issue at
-<https://github.com/georgeharker/mcp-companion/issues> with the agent name and
+<https://github.com/georgeharker/mcp-combiner/issues> with the agent name and
 version.
 
 ---

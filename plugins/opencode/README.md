@@ -6,7 +6,7 @@ aggregator available to OpenCode: it starts the combiner (supervised by
 HTTP MCP endpoint with OpenCode.
 
 It is the OpenCode counterpart of the Claude Code plugin
-[`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude), and
+[`mcp-combiner`](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/claude), and
 shares the same combiner and the same `sharedserver` instance — so OpenCode,
 Claude Code, and Neovim can all talk to **one** refcounted combiner process.
 

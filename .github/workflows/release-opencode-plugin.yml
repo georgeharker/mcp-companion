@@ -12,7 +12,7 @@ name: Release (opencode-mcp-combiner)
 #
 #   One-time setup at https://www.npmjs.com/ → the package → Settings → Trusted
 #   Publisher, with:
-#       repository:   georgeharker/mcp-companion
+#       repository:   georgeharker/mcp-combiner
 #       workflow:     release-opencode-plugin.yml
 #       environment:  npm
 #   Then create a GitHub environment named "npm" (repo Settings → Environments).

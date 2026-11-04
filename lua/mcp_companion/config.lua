@@ -46,7 +46,7 @@ local M = {}
 --- @field file? boolean|string Default true (= default path).
 --- @field token_in_url? boolean For HTTP ACP agents, also embed the session token in the URL path (/mcp/<token>) in addition to the X-MCP-Combiner-Session header. Tri-state, default nil = auto: ON for ACP agents (many drop custom HTTP headers, which silently breaks header-only correlation so injected tools never surface), OFF for mcp-companion's own header-forwarding HTTP-adapter client. Set true for belt-and-braces everywhere; set false to force header-only everywhere (cleaner URLs, per ACP spec — relies on the agent forwarding the header). The stdio/mcp-remote fallback always uses the URL regardless of this flag.
 ---   If tools fail in a specific agent, try enabling this and please report at
----   https://github.com/georgeharker/mcp-companion/issues with the agent name.
+---   https://github.com/georgeharker/mcp-combiner/issues with the agent name.
 
 --- @class MCPCompanion.CCAdapterConfig
 --- @field auto_http_tools? boolean|string[] Per-adapter override for auto_http_tools (same semantics).

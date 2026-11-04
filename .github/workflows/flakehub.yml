@@ -1,6 +1,6 @@
 name: flakehub
 
-# Publishes the flake to FlakeHub (https://flakehub.com/flake/georgeharker/mcp-companion).
+# Publishes the flake to FlakeHub (https://flakehub.com/flake/georgeharker/mcp-combiner).
 # Authenticates via GitHub OIDC (no token/secret).
 #
 #   * push a `v*` tag  -> a semver release (same tags that publish to PyPI, release.yml)

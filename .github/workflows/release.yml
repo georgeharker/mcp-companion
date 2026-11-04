@@ -10,7 +10,7 @@ name: Release (mcp-combiner)
 #   A) Trusted Publishing (OIDC) — DEFAULT, no secrets. PyPI setup at
 #      https://pypi.org/manage/account/publishing/ (pending publisher):
 #         PyPI project:  mcp-combiner
-#         owner/repo:    georgeharker/mcp-companion
+#         owner/repo:    georgeharker/mcp-combiner
 #         workflow:      release.yml
 #         environment:   pypi
 #   B) API token — set repo secret PYPI_API_TOKEN and uncomment the `password:` line.

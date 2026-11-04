@@ -35,8 +35,8 @@ carry across combiner restarts by handover, and `combiner__status` reports what 
 boot restored.
 
 It is the Pi counterpart of the
-[Claude Code](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude)
-and [OpenCode](https://github.com/georgeharker/mcp-companion/tree/main/plugins/opencode)
+[Claude Code](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/claude)
+and [OpenCode](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/opencode)
 plugins, and shares the same combiner and the same `sharedserver` instance.
 
 ## How it fits together
@@ -75,7 +75,7 @@ Install only this extension. Nothing else needed — the client half connects to
 combiner and registers everything:
 
 ```sh
-pi install /path/to/mcp-companion/plugins/pi     # local checkout
+pi install /path/to/mcp-combiner/plugins/pi     # local checkout
 # or the published package under settings.json "packages"
 ```
 

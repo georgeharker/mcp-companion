@@ -9,7 +9,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/georgeharker/mcp-companion/main/plugins/pi/assets/preview.png"
+    "image": "https://raw.githubusercontent.com/georgeharker/mcp-combiner/main/plugins/pi/assets/preview.png"
   },
   "files": [
     "src",
@@ -43,13 +43,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/georgeharker/mcp-companion.git",
+    "url": "git+https://github.com/georgeharker/mcp-combiner.git",
     "directory": "plugins/pi"
   },
   "bugs": {
-    "url": "https://github.com/georgeharker/mcp-companion/issues"
+    "url": "https://github.com/georgeharker/mcp-combiner/issues"
   },
-  "homepage": "https://github.com/georgeharker/mcp-companion/tree/main/plugins/pi#readme",
+  "homepage": "https://github.com/georgeharker/mcp-combiner/tree/main/plugins/pi#readme",
   "publishConfig": {
     "access": "public"
   },

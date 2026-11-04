@@ -3,8 +3,8 @@
 An **MCP aggregator** — fronts multiple MCP servers behind a single Streamable HTTP endpoint, so
 one connection exposes every backend server's tools. Built on
 [FastMCP](https://github.com/jlowin/fastmcp). Shareable across clients (via `sharedserver`), it
-powers the [mcp-companion](https://github.com/georgeharker/mcp-companion) Neovim plugin and the
-[`mcp-combiner`](https://github.com/georgeharker/mcp-companion/tree/main/plugins/claude) Claude Code plugin, and works standalone with any MCP client.
+powers the [mcp-combiner](https://github.com/georgeharker/mcp-combiner) Neovim plugin and the
+[`mcp-combiner`](https://github.com/georgeharker/mcp-combiner/tree/main/plugins/claude) Claude Code plugin, and works standalone with any MCP client.
 
 > PyPI package · command · import package: **`mcp-combiner`** / `mcp-combiner` / `mcp_combiner`.
 
@@ -24,11 +24,11 @@ Needs only [uv](https://docs.astral.sh/uv/) — `uvx` fetches and runs it, no ve
 ```bash
 uvx mcp-combiner --help                                                # once published to PyPI
 # before PyPI (or to track main) — the package lives in the combiner/ subdirectory:
-uvx --from "git+https://github.com/georgeharker/mcp-companion#subdirectory=combiner" mcp-combiner
+uvx --from "git+https://github.com/georgeharker/mcp-combiner#subdirectory=combiner" mcp-combiner
 ```
 
 Or install it: `uv pip install mcp-combiner` (PyPI), or from the repo subdir
-`uv pip install "git+https://github.com/georgeharker/mcp-companion#subdirectory=combiner"`.
+`uv pip install "git+https://github.com/georgeharker/mcp-combiner#subdirectory=combiner"`.
 
 ## Usage
 
