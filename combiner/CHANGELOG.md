@@ -4,6 +4,14 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [0.21.3] — 2026-11-04
+
+### Fixed
+
+- Pi plugin: with a combiner owned by another host (Neovim) or not managed by
+  pi, every reconnect threw a `ReferenceError` (`attachCombiner` called before
+  it is declared on that path); it is now skipped there.
+
 ## [0.21.2] — 2026-11-04
 
 ### Changed
