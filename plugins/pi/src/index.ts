@@ -477,8 +477,10 @@ export default function mcpCombiner(pi: ExtensionAPI): void {
                 // sharedserver reference was attached to, and nothing else re-takes
                 // ownership until the next session_start — an orphaned combiner then
                 // grace-stops 30m later (sharedserver `use` is idempotent per pid, so
-                // re-attaching on every connect is safe and cheap).
-                if (state === "connected") attachCombiner(clientLog)
+                // re-attaching on every connect is safe and cheap). Host-owned / unmanaged
+                // combiners have nothing to attach to, and the factory returns before
+                // `attachCombiner` is declared — calling it there is a TDZ ReferenceError.
+                if (state === "connected" && !hostOwned && manage) attachCombiner(clientLog)
                 refreshFooter()
             },
             // Stage 2: the widget hold announces its UI URL mid-call — open it.

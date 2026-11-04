@@ -6,6 +6,13 @@ tagged `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+
+- When the combiner is owned by another host (Neovim, via
+  `MCP_COMPANION_COMBINER_URL`) or not managed by pi (`PI_MCP_COMBINER_MANAGE=false`),
+  a connect no longer calls `attachCombiner`, which isn't declared on that path:
+  the call threw a `ReferenceError` (temporal dead zone) on every reconnect.
+
 ### Changed
 
 - **Tool-result truncation spills instead of cutting** (`client/render.ts`): text over the
