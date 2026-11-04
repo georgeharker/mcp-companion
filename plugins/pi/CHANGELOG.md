@@ -4,7 +4,7 @@ All notable changes to the Pi extension are documented here. The version moves
 in lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
-## [Unreleased]
+## [0.21.3] — 2026-11-04
 
 ### Fixed
 
@@ -12,6 +12,34 @@ tagged `vX.Y.Z`.
   `MCP_COMPANION_COMBINER_URL`) or not managed by pi (`PI_MCP_COMBINER_MANAGE=false`),
   a connect no longer calls `attachCombiner`, which isn't declared on that path:
   the call threw a `ReferenceError` (temporal dead zone) on every reconnect.
+
+## [0.21.2] — 2026-11-03
+
+### Changed
+
+- Package metadata (`repository`, `bugs`, `homepage`, preview image) points at the
+  renamed repository, `georgeharker/mcp-combiner`.
+
+## [0.20.0] — 2026-11-03
+
+### Changed
+
+- The URL the extension dials comes from `PI_MCP_COMBINER_HOST` read as the
+  combiner's bind setting: the first entry of a comma-separated list, loopback for a
+  wildcard (`0.0.0.0` / `::`) or `auto` (tailnet), and IPv6 addresses bracketed.
+
+## [0.18.0] — 2026-11-01
+
+### Added
+
+- **`structuredContent` passthrough**: an upstream tool's `outputSchema` is declared
+  on the native tool (pi ≥ 1.2), and its `structuredContent` rides the tool result, so
+  codemode scripts get typed values instead of re-parsing text. Older hosts ignore it.
+
+Other releases from 0.17.0 to 0.21.2 changed only the combiner (see
+`combiner/CHANGELOG.md`).
+
+## [0.17.0] — 2026-10-08
 
 ### Changed
 
