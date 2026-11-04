@@ -4,6 +4,18 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [0.21.2] — 2026-11-04
+
+### Changed
+
+- The repository is now `georgeharker/mcp-combiner` (was `mcp-companion`;
+  GitHub redirects the old URLs). Docs moved to
+  `docs.georgeharker.com/mcp-combiner`; the FlakeHub flake is now
+  `georgeharker/mcp-combiner` (`…/mcp-companion` stays at 0.21.1). Package
+  metadata, docs and install instructions point at the new name. Unchanged:
+  the Lua module `mcp_companion`, `.mcp-companion.json`, and the Claude Code
+  marketplace name.
+
 ## [0.21.1] — 2026-11-03
 
 ### Added
