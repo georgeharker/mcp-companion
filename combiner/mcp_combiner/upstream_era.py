@@ -34,7 +34,8 @@ Era = Literal["legacy", "2026"]
 #: directly, no probe of its own.
 MODERN_CLIENT_MODE = "2026-07-28"
 
-_PROBE_TIMEOUT_S = 3.0
+#: An unreachable upstream holds up startup by at most this.
+_PROBE_TIMEOUT_S = 1.5
 _eras: dict[str, Era] = {}
 
 

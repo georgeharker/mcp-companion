@@ -27,7 +27,7 @@ import logging
 import socket
 from collections.abc import Sequence
 
-from mcp_combiner.ui_host.advertise import AUTO
+from mcp_combiner.tailnet import AUTO
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -73,7 +73,7 @@ def resolve_hosts(entries: Sequence[str]) -> list[str]:
 
 def tailnet_address() -> str | None:
     """This machine's Tailscale IPv4, or ``None``."""
-    from mcp_combiner.ui_host.advertise import tailnet_ip
+    from mcp_combiner.tailnet import tailnet_ip
 
     return tailnet_ip()
 

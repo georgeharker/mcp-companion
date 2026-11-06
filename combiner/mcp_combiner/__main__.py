@@ -19,12 +19,20 @@ import signal
 import sys
 import types
 
-import uvicorn
+# Serve mode looks up this machine's tailnet name/address (bind 'auto',
+# advertise, oauth.public_url) — slow on some platforms. Start it now, so it
+# overlaps the imports below rather than adding to startup.
+if "--mcp" in sys.argv:
+    from mcp_combiner.tailnet import prefetch_tailnet_info
 
-from mcp_combiner import ctl
-from mcp_combiner.asgi import ServeOptions, create_app, resolve_bind_hosts
-from mcp_combiner.inbound_auth import resolve_auth_token
-from mcp_combiner.schemafix import SCHEMA_FIXES
+    prefetch_tailnet_info()
+
+import uvicorn  # noqa: E402
+
+from mcp_combiner import ctl  # noqa: E402
+from mcp_combiner.asgi import ServeOptions, create_app, resolve_bind_hosts  # noqa: E402
+from mcp_combiner.inbound_auth import resolve_auth_token  # noqa: E402
+from mcp_combiner.schemafix import SCHEMA_FIXES  # noqa: E402
 from mcp_combiner.sharedserver import cleanup as cleanup_sharedservers
 
 logger = logging.getLogger(__name__)

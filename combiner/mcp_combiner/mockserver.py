@@ -1397,7 +1397,7 @@ def _issuer_url(setting: str | None, local_host: str, port: int) -> str:
     if setting is None:
         return f"http://{local_host}:{port}"
     if setting.strip().lower() == "auto":
-        from mcp_combiner.ui_host.advertise import tailnet_host
+        from mcp_combiner.tailnet import tailnet_host
 
         name = tailnet_host()
         if name is None:

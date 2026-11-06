@@ -4,6 +4,22 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [Unreleased]
+
+### Changed
+
+- **Faster startup.** The tailnet lookups behind bind `auto`, the advertised
+  widget origin and `oauth.public_url: auto` were separate `tailscale` CLI calls,
+  repeated per setting and per config load (~0.3–0.5 s each on macOS, where the
+  CLI is the Tailscale app binary): ~1.5 s before the combiner served. Now one
+  `tailscale status --json --peers=false` per process (`mcp_combiner.tailnet`),
+  started in the background before the heavy imports, so it costs ~nothing;
+  skipped entirely without a `tailscale` CLI. Measured: 2.15 s → 0.6 s to serve.
+- Upstream protocol probes (`protocol: auto`) time out after 1.5 s (was 3 s), so
+  an unreachable upstream holds up startup less.
+- The per-client "elicit capture" diagnostics log at DEBUG (they logged at INFO
+  once a second for the first ~20 s after startup).
+
 ## [0.21.3] — 2026-11-04
 
 ### Fixed

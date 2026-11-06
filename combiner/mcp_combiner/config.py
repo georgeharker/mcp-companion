@@ -775,7 +775,7 @@ def resolve_public_url(setting: str | None) -> str | None:
     env = os.environ.get(PUBLIC_URL_ENV, "").strip().rstrip("/")
     if env:
         return _complete_url(env)
-    from mcp_combiner.ui_host.advertise import AUTO, AUTO_HOST, tailnet_host
+    from mcp_combiner.tailnet import AUTO, AUTO_HOST, tailnet_host
 
     value = (setting or "").strip().rstrip("/")
     if not value:

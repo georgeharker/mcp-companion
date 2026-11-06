@@ -15,6 +15,7 @@ from mcp_combiner.config import (
     resolve_public_url,
 )
 from mcp_combiner.runtime import RUNTIME
+from mcp_combiner.ui_host.advertise import reset_tailnet_info
 
 NAME = "box.tailnet.ts.net"
 
@@ -22,7 +23,8 @@ NAME = "box.tailnet.ts.net"
 @pytest.fixture(autouse=True)
 def _tailnet(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(PUBLIC_URL_ENV, raising=False)
-    monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: NAME)
+    monkeypatch.setattr("mcp_combiner.tailnet._tailscale_status", lambda: (NAME, None))
+    reset_tailnet_info()
     monkeypatch.setattr(RUNTIME, "serve_port", 9741)
 
 
@@ -62,9 +64,10 @@ def test_the_env_var_is_a_literal_url_and_wins(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_auto_without_a_tailnet_means_loopback_links(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_dns_name", lambda: None)
-    monkeypatch.setattr("mcp_combiner.ui_host.advertise._tailscale_ip", lambda: None)
-    monkeypatch.setattr("mcp_combiner.ui_host.advertise._interface_scan_ip", lambda: None)
+    monkeypatch.setattr("mcp_combiner.tailnet._tailscale_status", lambda: (None, None))
+    monkeypatch.setattr("mcp_combiner.tailnet._tailscale_ip", lambda: None)
+    monkeypatch.setattr("mcp_combiner.tailnet._interface_scan_ip", lambda: None)
+    reset_tailnet_info()
     assert resolve_public_url("auto") is None
     config = OAuthConfig.from_dict({"public_url": "auto"})
     assert config.public_url is None and config.prompt is None

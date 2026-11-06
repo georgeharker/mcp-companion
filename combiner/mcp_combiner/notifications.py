@@ -291,7 +291,7 @@ def _capture_downstream_request() -> tuple[ServerSession | None, Any]:
         # readable even where fastmcp's private server ctxvar is not.
         snap = DOWNSTREAM_REQUEST.get()
         if snap is not None:
-            logger.info(
+            logger.debug(
                 "elicit capture (middleware ctxvar): session=%s request_id=%s",
                 "yes" if snap[0] is not None else "NO",
                 snap[1],
@@ -299,14 +299,14 @@ def _capture_downstream_request() -> tuple[ServerSession | None, Any]:
             return snap
         ctx = get_context()
         snap = (ctx.session, ctx.request_id)
-        logger.info(
+        logger.debug(
             "elicit capture (fastmcp ctxvar): session=%s request_id=%s",
             "yes" if snap[0] is not None else "NO",
             snap[1],
         )
         return snap
     except Exception as exc:
-        logger.info("elicit capture FAILED (no downstream request ctxvar active): %s", exc)
+        logger.debug("elicit capture FAILED (no downstream request ctxvar active): %s", exc)
         return None, None
 
 
