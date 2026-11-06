@@ -54,6 +54,13 @@ FAST_TIMING_ENV = {
 }
 
 
+@pytest.fixture
+def anyio_backend() -> str:
+    """``@pytest.mark.anyio`` tests run on asyncio only: the combiner is
+    asyncio-only (uvicorn, fastmcp), so a trio run tests nothing real."""
+    return "asyncio"
+
+
 @pytest.fixture(autouse=True)
 def _no_ambient_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep an ambient ``MCP_COMBINER_AUTH_TOKEN`` (from the developer's shell or

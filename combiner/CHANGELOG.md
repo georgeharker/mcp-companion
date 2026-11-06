@@ -4,7 +4,7 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
-## [Unreleased]
+## [0.21.4] — 2026-11-05
 
 ### Changed
 
@@ -17,6 +17,10 @@ tagged `vX.Y.Z`.
   skipped entirely without a `tailscale` CLI. Measured: 2.15 s → 0.6 s to serve.
 - Upstream protocol probes (`protocol: auto`) time out after 1.5 s (was 3 s), so
   an unreachable upstream holds up startup less.
+- Tests: `@pytest.mark.anyio` tests run on asyncio only (an `anyio_backend`
+  fixture); dropped the trio extra and the `pytest-anyio` 0.0.0 placeholder
+  from the dev dependencies. The combiner is asyncio-only, so the trio runs
+  tested nothing; 69 fewer test runs.
 - The per-client "elicit capture" diagnostics log at DEBUG (they logged at INFO
   once a second for the first ~20 s after startup).
 
