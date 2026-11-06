@@ -1215,6 +1215,12 @@ def _interpolate(value: str) -> str:
     return re.sub(r"\$\{([^}]+)\}", _replace, value)
 
 
+def interpolate_value(value: str) -> str:
+    """Public env interpolation for auth fields (oauth client_id/secret,
+    bearer tokens read at auth-build time — see auth.build_auth)."""
+    return _interpolate(value)
+
+
 def _interpolate_str(value: str) -> str:
     """Interpolate a single string value."""
     return _interpolate(value)

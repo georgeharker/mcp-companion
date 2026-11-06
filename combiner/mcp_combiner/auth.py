@@ -56,7 +56,12 @@ from mcp.shared.auth import AuthorizationCodeResult, OAuthToken
 from pydantic import AnyHttpUrl
 
 from mcp_combiner import authprompt
-from mcp_combiner.config import AuthPrompt, oauth_redirect_uri, resolve_auth_prompt
+from mcp_combiner.config import (
+    AuthPrompt,
+    interpolate_value,
+    oauth_redirect_uri,
+    resolve_auth_prompt,
+)
 
 logger = logging.getLogger("mcp-combiner")
 
@@ -1273,7 +1278,7 @@ def build_auth(
         token = auth_config["bearer"]
         if not isinstance(token, str):
             raise ValueError(f"Server '{server_name}': bearer token must be a string")
-        return _BearerAuth(token)
+        return _BearerAuth(interpolate_value(token))
 
     # {"oauth": {scopes: [...], client_id: "...", ...}}
     if "oauth" in auth_config:
@@ -1291,9 +1296,15 @@ def build_auth(
             server_url=server_url,
             base_dir=base_dir,
             scopes=oauth_opts.get("scopes"),
-            client_id=oauth_opts.get("client_id"),
-            client_secret=oauth_opts.get("client_secret"),
-            client_metadata_url=oauth_opts.get("client_metadata_url"),
+            client_id=interpolate_value(oauth_opts["client_id"])
+            if isinstance(oauth_opts.get("client_id"), str)
+            else oauth_opts.get("client_id"),
+            client_secret=interpolate_value(oauth_opts["client_secret"])
+            if isinstance(oauth_opts.get("client_secret"), str)
+            else oauth_opts.get("client_secret"),
+            client_metadata_url=interpolate_value(oauth_opts["client_metadata_url"])
+            if isinstance(oauth_opts.get("client_metadata_url"), str)
+            else oauth_opts.get("client_metadata_url"),
             callback_port=oauth_opts.get("callback_port"),
             cache_tokens=effective_cache,
             prompt=resolve_auth_prompt(server_name, oauth_opts.get("prompt"), prompt, public_url),
