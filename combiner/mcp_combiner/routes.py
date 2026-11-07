@@ -88,7 +88,7 @@ def register_routes(
         server = request.path_params["server"]
         query = request.query_params
         try:
-            await authprompt.complete(
+            completed = await authprompt.complete(
                 server,
                 query.get("code"),
                 query.get("state"),
@@ -102,7 +102,9 @@ def register_routes(
             return authpages.failed_page(
                 server, "The service rejected the token exchange.", status=502
             )
-        return authpages.authorized_page(server)
+        return authpages.authorized_page(
+            server, account=completed.account, login_hint=completed.login_hint
+        )
 
     # The general session map: every correlation the combiner holds around a
     # chat token — downstream wire session, nvim instance bind, and the

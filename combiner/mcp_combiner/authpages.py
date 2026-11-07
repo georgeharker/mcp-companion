@@ -81,6 +81,7 @@ code {
 }
 .button[aria-disabled="true"] { opacity: .45; pointer-events: none; }
 .meta { font-size: 14px; color: var(--muted); text-align: center; margin: 0; }
+.warning { color: var(--warn); margin: 12px 0 0; }
 .account {
   color: var(--text); background: var(--bg); border: 1px solid var(--line);
   border-radius: 12px; padding: 10px 14px; margin: 0;
@@ -172,11 +173,31 @@ def gone_page() -> HTMLResponse:
     return _page("Link expired", body, status=404)
 
 
-def authorized_page(server: str) -> HTMLResponse:
+def authorized_page(
+    server: str, account: str | None = None, login_hint: str | None = None
+) -> HTMLResponse:
+    """After the provider redirects back: done, and as whom. The account is
+    the one the provider named (id_token) when it did, else the configured
+    hint — labelled as such, since nothing confirmed it."""
     name = html.escape(server)
+    if account:
+        who = f'<p class="account">Signed in as <strong>{html.escape(account)}</strong></p>'
+        if login_hint and account.lower() != login_hint.lower():
+            who += (
+                f'<p class="warning">That isn\'t the expected account '
+                f"(<strong>{html.escape(login_hint)}</strong>). If it's wrong, "
+                "authorize again and pick that one.</p>"
+            )
+    elif login_hint:
+        who = (
+            f'<p class="account">Requested account: <strong>{html.escape(login_hint)}</strong></p>'
+        )
+    else:
+        who = ""
     body = (
         '<div class="status ok"><span class="dot"></span>Authorized</div>'
         f"<h1><code>{name}</code> is connected</h1>"
+        f"{who}"
         "<p>You can close this page and return to your app. If a request was waiting "
         "on this, retry it.</p>"
     )

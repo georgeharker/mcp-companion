@@ -41,7 +41,7 @@ from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import MCPError, UrlElicitationRequiredError
 
-from mcp_combiner import authprompt
+from mcp_combiner import authpages, authprompt
 from mcp_combiner.auth import (
     _RefreshTokenOAuth,
     authorizes_out_of_band,
@@ -796,3 +796,29 @@ class TestAuthorizeServerTool:
         button = _AUTHORIZE_BUTTON.search(page.text)
         assert button is not None
         assert "login_hint=george%40example.com" in html.unescape(button.group(1))
+
+        # The provider signs that account in and names it: the completion page says so.
+        done = await _follow_as_user(elicitation["url"])
+        assert "Signed in as <strong>george@example.com</strong>" in done.text
+
+
+class TestAuthorizedPage:
+    def test_names_the_account_the_provider_signed_in(self) -> None:
+        page = bytes(authpages.authorized_page("gws", account="me@x.com").body).decode()
+        assert "Signed in as <strong>me@x.com</strong>" in page
+        assert "expected account" not in page
+
+    def test_warns_when_a_different_account_signed_in(self) -> None:
+        page = authpages.authorized_page("gws", account="other@x.com", login_hint="me@x.com")
+        text = bytes(page.body).decode()
+        assert "Signed in as <strong>other@x.com</strong>" in text
+        assert "isn't the expected account" in text and "me@x.com" in text
+
+    def test_falls_back_to_the_requested_account(self) -> None:
+        text = bytes(authpages.authorized_page("gws", login_hint="me@x.com").body).decode()
+        assert "Requested account: <strong>me@x.com</strong>" in text
+        assert "Signed in as" not in text
+
+    def test_says_nothing_about_accounts_without_either(self) -> None:
+        text = bytes(authpages.authorized_page("gws").body).decode()
+        assert "Signed in as" not in text and "Requested account" not in text

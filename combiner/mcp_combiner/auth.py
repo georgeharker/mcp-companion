@@ -354,10 +354,10 @@ class _RefreshTokenOAuth(OAuth):
 
         verifier = pkce.code_verifier
 
-        async def exchange(code: str, iss: str | None) -> None:
+        async def exchange(code: str, iss: str | None) -> str | None:
             # RFC 9207: the redirect's issuer must be the server we sent it to.
             validate_authorization_response_iss(iss, self.context.oauth_metadata)
-            await self._exchange_code(code, verifier)
+            return await self._exchange_code(code, verifier)
 
         pending = authprompt.PendingAuthorization(
             server=self.server_name,
@@ -394,14 +394,17 @@ class _RefreshTokenOAuth(OAuth):
         if response.status_code not in (200, 302, 303, 307, 308):
             raise RuntimeError(f"Unexpected authorization response: {response.status_code}")
 
-    async def _exchange_code(self, code: str, code_verifier: str) -> None:
-        """Exchange an out-of-band authorization code and store the tokens."""
+    async def _exchange_code(self, code: str, code_verifier: str) -> str | None:
+        """Exchange an out-of-band authorization code and store the tokens;
+        returns the signed-in account when the response says (see
+        :func:`_account_from_token_response`)."""
         async with self.context.lock:
             request = await self._exchange_token_authorization_code(code, code_verifier)
             async with self.httpx_client_factory() as client:
                 response = await client.send(request)
             await self._handle_token_response(response)
             self._initialized = True
+            return _account_from_token_response(response)
 
     async def _serve_loopback_callback(self, pending: authprompt.PendingAuthorization) -> None:
         """Receive a detached flow's redirect on the loopback callback port."""
@@ -1176,6 +1179,32 @@ def _link_ttl() -> float:
 
 
 _PENDING_AUTHORIZATION_TTL = _link_ttl()
+
+
+def _account_from_token_response(response: httpx2.Response) -> str | None:
+    """The account an OpenID token response names: the ``id_token``'s
+    ``email`` (else ``preferred_username``). For display on the completion
+    page only — read without verification, never trusted for anything else.
+    ``None`` when there is no ``id_token`` (no ``openid`` scope) or it doesn't
+    parse."""
+    import base64
+    import json
+
+    try:
+        id_token = response.json().get("id_token")
+        if not isinstance(id_token, str) or id_token.count(".") != 2:
+            return None
+        payload = id_token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    for key in ("email", "preferred_username"):
+        value = claims.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _with_login_hint(authorization_url: str, login_hint: str | None) -> str:

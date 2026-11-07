@@ -1094,6 +1094,16 @@ class MockOAuthAudit:
         return [t for t in self.bearer_seen if t is not None]
 
 
+def _unsigned_id_token(claims: dict[str, Any]) -> str:
+    """An ``alg: none`` JWT carrying *claims* (the mock signs nothing)."""
+
+    def part(obj: dict[str, Any]) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{part({'alg': 'none', 'typ': 'JWT'})}.{part(claims)}."
+
+
 def _s256_challenge(code_verifier: str) -> str:
     """Compute the S256 PKCE challenge for a verifier (base64url, no padding)."""
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
@@ -1252,6 +1262,9 @@ class MockOAuthProvider:
                 "client_id": params.get("client_id", ""),
                 "code_challenge": params.get("code_challenge", ""),
                 "redirect_uri": redirect_uri,
+                # Like an OpenID provider honouring login_hint: that account
+                # signs in, and the token response names it (id_token).
+                "login_hint": params.get("login_hint", ""),
             }
             sep = "&" if "?" in redirect_uri else "?"
             location = f"{redirect_uri}{sep}code={code}"
@@ -1325,6 +1338,10 @@ class MockOAuthProvider:
         payload = self._token_payload(
             "authorization_code", issue_refresh=self.config.issue_refresh_token
         )
+        if pending.get("login_hint"):
+            payload["id_token"] = _unsigned_id_token(
+                {"iss": self.issuer_url, "email": pending["login_hint"]}
+            )
         return _JSONResponse(payload)
 
     def _grant_refresh_token(self, form: dict[str, str]) -> JSONResponse:

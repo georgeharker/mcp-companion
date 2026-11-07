@@ -43,7 +43,9 @@ logger = logging.getLogger("mcp-combiner")
 
 #: Exchanges an authorization code (with the redirect's RFC 9207 ``iss``, when
 #: the server sent one) for tokens and stores them.
-CodeExchange = Callable[[str, str | None], Awaitable[None]]
+#: Returns the signed-in account when the provider says (an ``id_token``
+#: email), else ``None``.
+CodeExchange = Callable[[str, str | None], Awaitable[str | None]]
 
 
 @dataclass
@@ -166,6 +168,16 @@ class CallbackRejected(Exception):
     """The callback does not match the server's pending authorization."""
 
 
+@dataclass(frozen=True)
+class Completed:
+    """What a finished authorization can tell the user."""
+
+    #: the account the provider says signed in, when it says (id_token email).
+    account: str | None
+    #: the configured auth.oauth.login_hint, if any.
+    login_hint: str | None
+
+
 async def complete(
     server: str,
     code: str | None,
@@ -173,7 +185,7 @@ async def complete(
     error: str | None,
     *,
     iss: str | None = None,
-) -> None:
+) -> Completed:
     """Finish *server*'s pending authorization from its OAuth redirect.
 
     Raises :class:`CallbackRejected` for a redirect that isn't the pending one
@@ -190,7 +202,7 @@ async def complete(
         raise CallbackRejected(f"authorization was not granted: {error}")
     if not code:
         raise CallbackRejected("the redirect carried no authorization code")
-    await pending.exchange(code, iss)
+    account = await pending.exchange(code, iss)
     logger.info("OAuth authorization completed for '%s'", server)
     if _on_authorized is not None:
         await _on_authorized(server)
@@ -200,6 +212,7 @@ async def complete(
         await connection.notify(
             "notifications/elicitation/complete", {"elicitationId": pending.elicitation_id}
         )
+    return Completed(account=account, login_hint=pending.login_hint)
 
 
 def reset() -> None:

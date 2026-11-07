@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +17,7 @@ from mcp_combiner.auth import (
     _NETWORK_ERROR_GRACE_SECONDS,
     _REFRESH_MARGIN_SECONDS,
     _WAKE_GAP_SECONDS,
+    _account_from_token_response,
     _BearerAuth,
     _is_network_error,
     _ProbeOutcome,
@@ -1237,3 +1238,31 @@ class TestLoginHint:
         assert "login_hint=new" in _with_login_hint(url, "new")
         assert "old" not in _with_login_hint(url, "new")
         assert _with_login_hint(url, None) == url
+
+
+class TestAccountFromTokenResponse:
+    @staticmethod
+    def _response(body: Mapping[str, object]) -> httpx2.Response:
+        return httpx2.Response(200, json=dict(body))
+
+    @staticmethod
+    def _jwt(claims: dict[str, object]) -> str:
+        import base64
+        import json
+
+        def part(obj: dict[str, object]) -> str:
+            return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+        return f"{part({'alg': 'none'})}.{part(claims)}."
+
+    def test_reads_the_id_token_email(self) -> None:
+        body = {"access_token": "a", "id_token": self._jwt({"email": "me@x.com"})}
+        assert _account_from_token_response(self._response(body)) == "me@x.com"
+
+    def test_falls_back_to_preferred_username(self) -> None:
+        body = {"id_token": self._jwt({"preferred_username": "me"})}
+        assert _account_from_token_response(self._response(body)) == "me"
+
+    def test_none_without_a_usable_id_token(self) -> None:
+        for body in ({"access_token": "a"}, {"id_token": "not.a-jwt"}, {"id_token": 3}):
+            assert _account_from_token_response(self._response(body)) is None

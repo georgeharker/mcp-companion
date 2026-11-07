@@ -35,6 +35,10 @@ tagged `vX.Y.Z`.
   and shown on the authorization page ("Sign in as …"), in the `-32042`
   message and in the text fallback — so two servers sharing one Google client
   (e.g. two Workspace accounts) say which login each needs.
+- The "authorized" page names the account that signed in, when the provider
+  says (an `id_token` `email`, e.g. Google with the `openid`/`email` scopes),
+  and warns if it isn't the `login_hint`; otherwise it shows the requested
+  account. Display only: the id_token isn't relied on for anything else.
 - With `oauth.public_url` set, the `-32042` URL elicitation hands clients the
   combiner's short link, so the user lands on that page first; without it, the
   provider URL as before.
