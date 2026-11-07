@@ -18,6 +18,10 @@ tagged `vX.Y.Z`.
   in. Unknown servers, non-OAuth servers, disabled servers and browser-only
   (`prompt: browser`) servers get an explanatory tool error; a connected server
   answers that it is.
+- `${VAR}` interpolation in a server's auth settings: OAuth `client_id`,
+  `client_secret` and `client_metadata_url`, and bearer tokens, resolved when
+  the auth is built (as elsewhere in servers.json) — so secrets can come from
+  the environment, e.g. a container's injected env.
 - A URL-elicitation error raised inside a tool now reaches the client as
   `-32042` (fastmcp masks MCP errors raised by tools into tool errors).
 

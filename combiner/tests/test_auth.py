@@ -114,6 +114,34 @@ class TestBuildAuth:
         modified = next(flow)
         assert modified.headers["Authorization"] == "Bearer tok123"
 
+    def test_bearer_token_interpolates_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SRV_TOKEN", "from-env")
+        result = build_auth("srv", auth_config={"bearer": "${SRV_TOKEN}"})
+        assert isinstance(result, _BearerAuth)
+        modified = next(result.auth_flow(httpx2.Request("GET", "http://example.com")))
+        assert modified.headers["Authorization"] == "Bearer from-env"
+
+    def test_oauth_client_credentials_interpolate_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastmcp.client.auth import OAuth
+
+        monkeypatch.setenv("SRV_CLIENT_ID", "id-from-env")
+        monkeypatch.setenv("SRV_CLIENT_SECRET", "secret-from-env")
+        result = build_auth(
+            "srv",
+            auth_config={
+                "oauth": {"client_id": "${SRV_CLIENT_ID}", "client_secret": "${SRV_CLIENT_SECRET}"}
+            },
+            server_url="http://example.com/mcp",
+            token_dir=tmp_path,
+        )
+        assert isinstance(result, OAuth)
+        info = result._static_client_info
+        assert info is not None
+        assert info.client_id == "id-from-env"
+        assert info.client_secret == "secret-from-env"
+
     def test_bearer_non_string_raises(self) -> None:
         with pytest.raises(ValueError, match="bearer token must be a string"):
             build_auth("srv", auth_config={"bearer": 12345})
