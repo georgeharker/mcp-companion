@@ -779,6 +779,12 @@ retried. A client that doesn't declare URL elicitation gets the link in the
 tool error text instead. Links stay valid for 15 minutes; a call after that
 issues a fresh one.
 
+A server that has never been authorized mounts no tools, so there is no call
+to route to it. `combiner__authorize_server(server_name)` — always available —
+starts its authorization on demand and fails with the same `-32042` link (or
+the text fallback); a server already connected says so. This is the way in for
+headless deployments.
+
 `elicit` without `public_url` still works, with a startup warning: the link
 redirects to the loopback callback, so it only completes from a browser on the
 combiner host (a local chat), not from another device.
@@ -1419,6 +1425,7 @@ The combiner exposes management tools that the LLM can call:
 
 - `combiner__status` — list all configured servers and their state
 - `combiner__enable_server` / `combiner__disable_server` — toggle servers globally (all sessions)
+- `combiner__authorize_server` — start OAuth authorization for a server and hand over the link (see [Authorizing from another device](#authorizing-from-another-device))
 - `combiner__session_disable_server` / `combiner__session_enable_server` — toggle a server for the calling session only
 
 ### Usage

@@ -29,6 +29,7 @@ from conftest import (
     ServedOAuthMock,
     free_port_pair,
     poll_until,
+    stdio_mock_entry,
     write_servers_config,
 )
 from fakes import content_text, recording_connection
@@ -649,3 +650,88 @@ class TestCombinerLoopbackFlow:
                     return None
 
             assert await poll_until(_echo, timeout=30.0, desc="call after auth") == "Echo: hi"
+
+
+@pytest.mark.e2e
+class TestAuthorizeServerTool:
+    """combiner__authorize_server: authorization as a call-time operation on an
+    always-mounted tool, for upstreams that mount no tools until authorized."""
+
+    async def _start(self, procs: ProcFactory, mock: ServedOAuthMock, tmp_path: Path) -> str:
+        port = free_port_pair()
+        config = write_servers_config(
+            tmp_path / "servers.json",
+            {
+                "mock": {"url": mock.mcp_url, "transport": "http", "auth": "oauth"},
+                "plain": stdio_mock_entry("plain"),
+            },
+            oauth={
+                "public_url": f"http://127.0.0.1:{port}",
+                "prompt": "elicit",
+                "token_dir": str(tmp_path / "tokens"),
+            },
+        )
+        combiner = await procs.start_combiner(
+            config, port=port, extra_args=["--log-file", str(tmp_path / "combiner.log")]
+        )
+        await combiner.wait_server_state("mock", ("auth_failed",))
+        return combiner.mcp_url
+
+    async def test_an_unauthorized_server_gets_a_url_elicitation(
+        self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path
+    ) -> None:
+        mock = await oauth_mock()
+        mcp_url = await self._start(procs, mock, tmp_path)
+        async with Client(
+            mcp_url, elicitation_handler=_never_elicit, mode=CLIENT_CONNECT_MODE
+        ) as client:
+            # The server mounts nothing until authorized: the tool is the way in.
+            names = {t.name for t in await client.list_tools()}
+            assert "combiner__authorize_server" in names
+            assert not any(n.startswith("mock_") for n in names)
+
+            with pytest.raises(MCPError) as caught:
+                await client.call_tool("combiner__authorize_server", {"server_name": "mock"})
+            error = caught.value.error
+            assert error.code == mt.URL_ELICITATION_REQUIRED
+            assert isinstance(error.data, dict)
+            (elicitation,) = error.data["elicitations"]
+            assert {"url", "message", "elicitationId"} <= set(elicitation)
+            assert "'mock'" in elicitation["message"]
+
+            page = await _follow_as_user(elicitation["url"])
+            assert page.status_code == 200, page.text
+
+            async def _authorized() -> str | None:
+                try:
+                    return content_text(
+                        await client.call_tool(
+                            "combiner__authorize_server", {"server_name": "mock"}
+                        )
+                    )
+                except (ToolError, MCPError):
+                    return None
+
+            done = await poll_until(_authorized, timeout=30.0, desc="authorized")
+            assert "already authorized" in done
+
+    async def test_clients_without_url_elicitation_get_the_link_as_text(
+        self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path
+    ) -> None:
+        mock = await oauth_mock()
+        mcp_url = await self._start(procs, mock, tmp_path)
+        async with Client(mcp_url, mode=CLIENT_CONNECT_MODE) as client:
+            with pytest.raises(ToolError, match="needs authorization") as caught:
+                await client.call_tool("combiner__authorize_server", {"server_name": "mock"})
+        assert "/oauth/authorize/" in str(caught.value)
+
+    async def test_unknown_and_non_oauth_servers_are_refused(
+        self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path
+    ) -> None:
+        mock = await oauth_mock()
+        mcp_url = await self._start(procs, mock, tmp_path)
+        async with Client(mcp_url, mode=CLIENT_CONNECT_MODE) as client:
+            with pytest.raises(ToolError, match="No server 'nope'; configured: mock, plain"):
+                await client.call_tool("combiner__authorize_server", {"server_name": "nope"})
+            with pytest.raises(ToolError, match="doesn't use OAuth"):
+                await client.call_tool("combiner__authorize_server", {"server_name": "plain"})

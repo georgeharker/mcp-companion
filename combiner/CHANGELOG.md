@@ -4,6 +4,23 @@ All notable changes to the combiner are documented here. The version moves in
 lockstep with the rest of the repo (`scripts/bump-version.sh`); releases are
 tagged `vX.Y.Z`.
 
+## [Unreleased]
+
+### Added
+
+- **`combiner__authorize_server(server_name)`** — an always-mounted meta tool
+  that starts OAuth authorization for any configured OAuth upstream (never
+  authorized, revoked, link expired) and fails with the authorization link:
+  MCP's URL-elicitation error (`-32042`, with its `elicitations` payload) for
+  clients that support it, else a tool error naming the short link — the same
+  policy as call-time authorization. A never-authorized server mounts no tools,
+  so on headless deployments nothing could trigger its prompt; this is the way
+  in. Unknown servers, non-OAuth servers, disabled servers and browser-only
+  (`prompt: browser`) servers get an explanatory tool error; a connected server
+  answers that it is.
+- A URL-elicitation error raised inside a tool now reaches the client as
+  `-32042` (fastmcp masks MCP errors raised by tools into tool errors).
+
 ## [0.21.4] — 2026-11-05
 
 ### Changed

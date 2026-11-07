@@ -88,6 +88,19 @@ def _add_serve_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
+    parser.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="TLS certificate chain (PEM) — serve the MCP listener over HTTPS "
+        "on --port (e.g. the tailscale-issued ts.net cert). The OAuth public "
+        "URL should name the same port.",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        default=None,
+        help="TLS private key (PEM) for --ssl-certfile",
+    )
+
     # OAuth token-caching overrides (both override the config-file 'oauth' section)
     oauth_group = parser.add_mutually_exclusive_group()
     oauth_group.add_argument(
@@ -344,6 +357,9 @@ def _serve(args: argparse.Namespace) -> None:
     config = uvicorn.Config(
         app,
         log_level="info",
+        # From the raw parsed args — ServeOptions doesn't carry the ssl fields
+        ssl_certfile=getattr(args, "ssl_certfile", None),
+        ssl_keyfile=getattr(args, "ssl_keyfile", None),
         # Bound the graceful-shutdown drain. The combiner holds long-lived MCP
         # streamable-http / SSE connections that never close on their own, so the
         # uvicorn default (None = wait forever) makes SIGTERM hang — and our

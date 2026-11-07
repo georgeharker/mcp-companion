@@ -25,6 +25,7 @@ from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
 from fastmcp.tools import Tool, ToolResult
 from fastmcp.tools.base import InputRequiredToolResult
 from mcp.server.connection import Connection
+from mcp.shared.exceptions import UrlElicitationRequiredError
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from mcp_combiner import authprompt, fastvalidate, heldcalls, nvim_proxy, permissions
@@ -545,6 +546,12 @@ class ToolProcessingMiddleware(Middleware):
             # so the MCP layer returns a -32002 JSON-RPC error, not a tool result.
             raise
         except ToolError as e:
+            # fastmcp masks an MCPError raised inside a tool as a ToolError; a
+            # URL elicitation (combiner__authorize_server) must reach the client
+            # as itself (-32042 + its elicitations), as the gate above sends it.
+            cause = e.__cause__
+            if isinstance(cause, UrlElicitationRequiredError):
+                raise cause from None
             # Already a proper tool error — re-raise unchanged, unless the
             # call's own 401 sent the server out-of-band: fastmcp's proxy wraps
             # the resulting closed upstream session as a ToolError, and the

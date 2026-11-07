@@ -209,6 +209,65 @@ def register_meta_tools(
         return result
 
     @combiner.tool()
+    async def combiner__authorize_server(ctx: Context, server_name: str) -> str:
+        """Start (or restart) OAuth authorization for an upstream server and
+        hand the authorization link to the user.
+
+        For a server that needs authorization — never authorized, token
+        revoked, link expired — this call FAILS with the link: as MCP's
+        URL-elicitation error (-32042) for clients that support it (the client
+        shows it to the user), else as a tool error naming the link. That is
+        the expected result, not a failure: open the link, authorize, and the
+        server connects. Use it when a server shows ``auth_failed`` and has no
+        tools to call. A server already connected answers that it is.
+
+        Args:
+            server_name: A configured server that uses OAuth.
+        """
+        from mcp_combiner import authprompt
+        from mcp_combiner.auth import authorizes_out_of_band
+        from mcp_combiner.config import oauth_options
+        from mcp_combiner.middleware import _connection_of
+
+        srv = config.servers.get(server_name)
+        if srv is None:
+            raise ToolError(
+                f"No server '{server_name}'; configured: {', '.join(sorted(config.servers))}"
+            )
+        if oauth_options(srv.auth) is None:
+            raise ToolError(f"Server '{server_name}' doesn't use OAuth; nothing to authorize")
+        if srv.disabled:
+            raise ToolError(
+                f"Server '{server_name}' is disabled — combiner__enable_server it first"
+            )
+        if not conn_manager.has_connection(server_name):
+            conn_manager.register(config, server_name, srv)
+        pending = authprompt.pending_for(server_name)
+        if pending is None:
+            if conn_manager.is_connected(server_name):
+                return f"Server '{server_name}' is already authorized and connected."
+            if not authorizes_out_of_band(conn_manager.get_auth(server_name)):
+                raise ToolError(
+                    f"Server '{server_name}' authorizes in a browser on the combiner host "
+                    "(oauth prompt 'browser'); combiner__enable_server starts that flow"
+                )
+            # Auth-failed (or never connected): run the flow so it publishes a
+            # fresh pending authorization — the same flow a routed call runs.
+            if conn_manager.is_auth_failed(server_name):
+                await conn_manager.reauthorize(server_name)
+            else:
+                await conn_manager.connect(config, server_name, srv)
+            pending = authprompt.pending_for(server_name)
+        if pending is None:
+            if conn_manager.is_connected(server_name):
+                return f"Server '{server_name}' is already authorized and connected."
+            raise ToolError(
+                f"Couldn't start authorization for '{server_name}' "
+                f"(state: {conn_manager.lifecycle_state(server_name)}); see the combiner log"
+            )
+        raise authprompt.prompt_error(pending, _connection_of(ctx))
+
+    @combiner.tool()
     async def combiner__enable_server(server_name: str) -> str:
         """Enable a disabled MCP server and mount it on the combiner.
 
