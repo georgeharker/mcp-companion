@@ -22,6 +22,7 @@ from mcp_combiner.auth import (
     _ProbeOutcome,
     _RefreshOutcome,
     _RefreshTokenOAuth,
+    _with_login_hint,
     build_auth,
     create_encrypted_store,
 )
@@ -141,6 +142,16 @@ class TestBuildAuth:
         assert info is not None
         assert info.client_id == "id-from-env"
         assert info.client_secret == "secret-from-env"
+
+    def test_login_hint_reaches_the_oauth_client(self, tmp_path: Path) -> None:
+        result = build_auth(
+            "srv",
+            auth_config={"oauth": {"login_hint": "me@example.com"}},
+            server_url="http://example.com/mcp",
+            token_dir=tmp_path,
+        )
+        assert isinstance(result, _RefreshTokenOAuth)
+        assert result.login_hint == "me@example.com"
 
     def test_bearer_non_string_raises(self) -> None:
         with pytest.raises(ValueError, match="bearer token must be a string"):
@@ -1212,3 +1223,17 @@ class TestUpstream401Suppression:
         # finally-block heartbeat set _last_seen_at
         assert oauth._last_seen_at is not None
         assert oauth._last_seen_at >= before
+
+
+class TestLoginHint:
+    def test_added_to_the_authorization_url(self) -> None:
+        url = _with_login_hint(
+            "https://accounts.google.com/o/oauth2/auth?client_id=x&a=b", "me@x.com"
+        )
+        assert "login_hint=me%40x.com" in url and "client_id=x" in url and "a=b" in url
+
+    def test_replaces_an_existing_hint_and_is_a_no_op_without_one(self) -> None:
+        url = "https://idp.example/authorize?login_hint=old&x=1"
+        assert "login_hint=new" in _with_login_hint(url, "new")
+        assert "old" not in _with_login_hint(url, "new")
+        assert _with_login_hint(url, None) == url

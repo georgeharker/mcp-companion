@@ -77,7 +77,10 @@ def register_routes(
         if request.query_params.get("go"):
             return RedirectResponse(pending.url, status_code=302)
         return authpages.authorize_page(
-            pending.server, pending.url, pending.expires_at - time.monotonic()
+            pending.server,
+            pending.url,
+            pending.expires_at - time.monotonic(),
+            login_hint=pending.login_hint,
         )
 
     @combiner.custom_route("/oauth/callback/{server}", methods=["GET"])

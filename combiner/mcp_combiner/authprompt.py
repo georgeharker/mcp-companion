@@ -63,12 +63,15 @@ class PendingAuthorization:
     notified: weakref.WeakSet[Connection] = field(default_factory=weakref.WeakSet)
     #: loopback callback server (no public_url) — cancelled once settled.
     callback_task: asyncio.Task[None] | None = None
+    #: the account to sign in with (auth.oauth.login_hint), when configured.
+    login_hint: str | None = None
 
     def expired(self) -> bool:
         return time.monotonic() >= self.expires_at
 
     def message(self) -> str:
-        return f"Authorize the '{self.server}' MCP server to continue."
+        account = f" — sign in as {self.login_hint}" if self.login_hint else ""
+        return f"Authorize the '{self.server}' MCP server{account} to continue."
 
 
 class AuthorizationPending(OAuthFlowError):
@@ -247,8 +250,9 @@ def prompt_error(pending: PendingAuthorization, connection: Connection | None) -
     # The short link, bare: a markdown link renders without being clickable
     # in some hosts, and the full URL is too long to survive wrapping.
     return ToolError(
-        f"Server '{pending.server}' needs authorization. Open {short_link(pending)} "
-        "to authorize, then retry."
+        f"Server '{pending.server}' needs authorization"
+        + (f" (sign in as {pending.login_hint})" if pending.login_hint else "")
+        + f". Open {short_link(pending)} to authorize, then retry."
     )
 
 

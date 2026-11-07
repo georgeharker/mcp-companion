@@ -263,9 +263,13 @@ class _RefreshTokenOAuth(OAuth):
         client_secret: str | None = None,
         client_metadata_url: str | None = None,
         callback_port: int | None = None,
+        login_hint: str | None = None,
     ) -> None:
         # Read by _bind(), which the parent constructor calls.
         self.server_name = server_name
+        #: Which account to sign in with (auth.oauth.login_hint): sent to the
+        #: provider as ``login_hint`` and shown to the user.
+        self.login_hint = login_hint
         self.prompt: AuthPrompt = prompt
         self.public_url = public_url
         super().__init__(
@@ -343,7 +347,9 @@ class _RefreshTokenOAuth(OAuth):
             # OIDC requires prompt=consent when offline_access is requested.
             if "offline_access" in ctx.client_metadata.scope.split():
                 params["prompt"] = "consent"
-        url = _with_offline_access(f"{auth_endpoint}?{urlencode(params)}")
+        url = _with_login_hint(
+            _with_offline_access(f"{auth_endpoint}?{urlencode(params)}"), self.login_hint
+        )
         await self._preflight_authorization_url(url)
 
         verifier = pkce.code_verifier
@@ -360,6 +366,7 @@ class _RefreshTokenOAuth(OAuth):
             exchange=exchange,
             expires_at=time.monotonic() + _PENDING_AUTHORIZATION_TTL,
             elicit=self.prompt != "browser",
+            login_hint=self.login_hint,
         )
         if self.public_url is None:
             pending.callback_task = asyncio.create_task(
@@ -1153,7 +1160,9 @@ class _RefreshTokenOAuth(OAuth):
             )
 
     async def redirect_handler(self, authorization_url: str) -> None:
-        await super().redirect_handler(_with_offline_access(authorization_url))
+        await super().redirect_handler(
+            _with_login_hint(_with_offline_access(authorization_url), self.login_hint)
+        )
 
 
 #: How long a detached authorization's link stays valid. Longer than the
@@ -1167,6 +1176,18 @@ def _link_ttl() -> float:
 
 
 _PENDING_AUTHORIZATION_TTL = _link_ttl()
+
+
+def _with_login_hint(authorization_url: str, login_hint: str | None) -> str:
+    """Add ``login_hint`` (OIDC; Google, Microsoft and most OpenID providers
+    pre-select or pre-fill that account) — which login to use, when several
+    servers share a provider. Unchanged without a hint."""
+    if not login_hint:
+        return authorization_url
+    parsed = urlparse(authorization_url)
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    params["login_hint"] = [login_hint]
+    return urlunparse(parsed._replace(query=urlencode({k: v[0] for k, v in params.items()})))
 
 
 def _with_offline_access(authorization_url: str) -> str:
@@ -1306,6 +1327,9 @@ def build_auth(
             if isinstance(oauth_opts.get("client_metadata_url"), str)
             else oauth_opts.get("client_metadata_url"),
             callback_port=oauth_opts.get("callback_port"),
+            login_hint=interpolate_value(oauth_opts["login_hint"])
+            if isinstance(oauth_opts.get("login_hint"), str)
+            else None,
             cache_tokens=effective_cache,
             prompt=resolve_auth_prompt(server_name, oauth_opts.get("prompt"), prompt, public_url),
             public_url=public_url,
@@ -1327,6 +1351,7 @@ def _build_oauth(
     cache_tokens: bool = True,
     prompt: AuthPrompt = "browser",
     public_url: str | None = None,
+    login_hint: str | None = None,
 ) -> _RefreshTokenOAuth:
     """Construct a FastMCP ``OAuth`` provider.
 
@@ -1378,6 +1403,7 @@ def _build_oauth(
         client_secret=client_secret,
         client_metadata_url=client_metadata_url,
         callback_port=callback_port,
+        login_hint=login_hint,
     )
 
 

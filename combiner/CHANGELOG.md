@@ -30,6 +30,11 @@ tagged `vX.Y.Z`.
   link, authorized, and failed pages get the same treatment. Self-contained
   (inline CSS and SVG, no external fetches), phone-sized, light and dark,
   served `no-store` with a strict CSP and no framing.
+- **`auth.oauth.login_hint`** (per server): the account to sign in with. Sent to
+  the provider as `login_hint` (Google and most OpenID providers pre-select it)
+  and shown on the authorization page ("Sign in as …"), in the `-32042`
+  message and in the text fallback — so two servers sharing one Google client
+  (e.g. two Workspace accounts) say which login each needs.
 - With `oauth.public_url` set, the `-32042` URL elicitation hands clients the
   combiner's short link, so the user lands on that page first; without it, the
   provider URL as before.

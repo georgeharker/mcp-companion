@@ -81,6 +81,10 @@ code {
 }
 .button[aria-disabled="true"] { opacity: .45; pointer-events: none; }
 .meta { font-size: 14px; color: var(--muted); text-align: center; margin: 0; }
+.account {
+  color: var(--text); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 12px; padding: 10px 14px; margin: 0;
+}
 .status {
   display: inline-flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 10px;
 }
@@ -113,14 +117,22 @@ def _page(title: str, body: str, status: int = 200, script: str = "") -> HTMLRes
     return HTMLResponse(document, status_code=status, headers=headers)
 
 
-def authorize_page(server: str, provider_url: str, seconds_left: float) -> HTMLResponse:
-    """The short link's page: who is asking, and the way on to the provider."""
+def authorize_page(
+    server: str, provider_url: str, seconds_left: float, login_hint: str | None = None
+) -> HTMLResponse:
+    """The short link's page: who is asking, which account, and the way on."""
     name = html.escape(server)
     seconds = max(0, math.floor(seconds_left))
+    account = (
+        f'<p class="account">Sign in as <strong>{html.escape(login_hint)}</strong></p>'
+        if login_hint
+        else ""
+    )
     body = (
         f"<h1>Authorize <code>{name}</code></h1>"
         f"<p>Your MCP combiner needs your permission to connect to <strong>{name}</strong>. "
         "You'll sign in with the service and approve access; then you're sent back here.</p>"
+        f"{account}"
         f'<a class="button" id="go" href="{html.escape(provider_url, quote=True)}" '
         f'rel="noreferrer">Authorize {name}</a>'
         f'<p class="meta" id="left" data-seconds="{seconds}">'

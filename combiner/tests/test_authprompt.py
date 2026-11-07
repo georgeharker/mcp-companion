@@ -687,12 +687,21 @@ class TestAuthorizeServerTool:
     """combiner__authorize_server: authorization as a call-time operation on an
     always-mounted tool, for upstreams that mount no tools until authorized."""
 
-    async def _start(self, procs: ProcFactory, mock: ServedOAuthMock, tmp_path: Path) -> str:
+    async def _start(
+        self,
+        procs: ProcFactory,
+        mock: ServedOAuthMock,
+        tmp_path: Path,
+        login_hint: str | None = None,
+    ) -> str:
         port = free_port_pair()
+        auth: dict[str, Any] | str = (
+            {"oauth": {"login_hint": login_hint}} if login_hint is not None else "oauth"
+        )
         config = write_servers_config(
             tmp_path / "servers.json",
             {
-                "mock": {"url": mock.mcp_url, "transport": "http", "auth": "oauth"},
+                "mock": {"url": mock.mcp_url, "transport": "http", "auth": auth},
                 "plain": stdio_mock_entry("plain"),
             },
             oauth={
@@ -765,3 +774,25 @@ class TestAuthorizeServerTool:
                 await client.call_tool("combiner__authorize_server", {"server_name": "nope"})
             with pytest.raises(ToolError, match="doesn't use OAuth"):
                 await client.call_tool("combiner__authorize_server", {"server_name": "plain"})
+
+    async def test_login_hint_names_the_account_everywhere(
+        self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path
+    ) -> None:
+        """Which account to use, when several servers share a provider (Google):
+        in the elicitation message, on the page, and to the provider."""
+        mock = await oauth_mock()
+        mcp_url = await self._start(procs, mock, tmp_path, login_hint="george@example.com")
+        async with Client(
+            mcp_url, elicitation_handler=_never_elicit, mode=CLIENT_CONNECT_MODE
+        ) as client:
+            with pytest.raises(MCPError) as caught:
+                await client.call_tool("combiner__authorize_server", {"server_name": "mock"})
+        assert isinstance(caught.value.error.data, dict)
+        (elicitation,) = caught.value.error.data["elicitations"]
+        assert "sign in as george@example.com" in elicitation["message"]
+        async with httpx2.AsyncClient() as http:
+            page = await http.get(elicitation["url"])
+        assert "Sign in as <strong>george@example.com</strong>" in page.text
+        button = _AUTHORIZE_BUTTON.search(page.text)
+        assert button is not None
+        assert "login_hint=george%40example.com" in html.unescape(button.group(1))

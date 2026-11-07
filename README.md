@@ -683,6 +683,7 @@ When `client_id` is provided, dynamic client registration is skipped.
 | `cache_tokens`        | `boolean`          | `true`  | Persist tokens to disk for this server (overrides global setting)                                                                                                                                    |
 | `callback_port`       | `integer`          | —       | Local port for the OAuth redirect callback (e.g. `9876`). Required when the auth provider validates redirect URIs strictly (Google, GitHub, etc.) — must match the URI registered in your OAuth app. |
 | `prompt`              | `string`           | —       | How the authorization link reaches the user: `browser`, `elicit` or `both` (overrides the global `oauth.prompt`; see [Authorizing from another device](#authorizing-from-another-device)).           |
+| `login_hint`          | `string`           | —       | The account to sign in with, e.g. `me@example.com`. Sent to the provider as `login_hint` (Google, Microsoft and most OpenID providers pre-select that account) and shown on the authorization page and in the prompt — useful when several servers share one provider. `${VAR}` allowed. |
 
 ### OAuth token caching
 
