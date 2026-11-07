@@ -120,6 +120,13 @@ def short_link(pending: PendingAuthorization) -> str:
     return f"{base}/oauth/authorize/{pending.elicitation_id}"
 
 
+def _elicitation_url(pending: PendingAuthorization) -> str:
+    from mcp_combiner.runtime import RUNTIME
+
+    config = RUNTIME.config
+    return short_link(pending) if config is not None and config.oauth.public_url else pending.url
+
+
 def pending_for(server: str) -> PendingAuthorization | None:
     """The live pending authorization for *server*, dropping an expired one."""
     pending = _pending.get(server)
@@ -214,7 +221,10 @@ def prompt_error(pending: PendingAuthorization, connection: Connection | None) -
     A client that supports URL elicitation gets ``-32042`` with the URL (shown
     to the user, not the model). Otherwise the URL goes in the tool error text —
     the only channel such a client has to the user. A browser-only flow never
-    hands the URL out.
+    hands the URL out. With ``oauth.public_url`` the URL is the combiner's short
+    link, whose page (authpages) names the server before sending the user on to
+    the provider; without it, the provider URL itself (the short link would be a
+    loopback address no other device can open).
     """
     if not pending.elicit:
         return ToolError(
@@ -228,7 +238,7 @@ def prompt_error(pending: PendingAuthorization, connection: Connection | None) -
                 ElicitRequestURLParams(
                     mode="url",
                     message=pending.message(),
-                    url=pending.url,
+                    url=_elicitation_url(pending),
                     elicitation_id=pending.elicitation_id,
                 )
             ],

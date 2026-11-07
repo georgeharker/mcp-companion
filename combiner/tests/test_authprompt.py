@@ -13,8 +13,10 @@ downstream client gets ``-32042``, "the user" follows the link, the combiner's
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
+import re
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -271,11 +273,19 @@ class TestComplete:
 # ── e2e: the real flow against the mock OAuth server ───────────────
 
 
+_AUTHORIZE_BUTTON = re.compile(r'<a class="button" id="go" href="([^"]+)"')
+
+
 async def _follow_as_user(url: str) -> httpx2.Response:
-    """What the user's browser does: open the link and follow the redirects
-    (the mock authorization server auto-consents)."""
+    """What the user's browser does: open the link, press Authorize on the
+    combiner's page if it shows one, and follow the redirects (the mock
+    authorization server auto-consents)."""
     async with httpx2.AsyncClient(follow_redirects=True, timeout=30.0) as http:
-        return await http.get(url)
+        page = await http.get(url)
+        button = _AUTHORIZE_BUTTON.search(page.text)
+        if button is None:
+            return page
+        return await http.get(html.unescape(button.group(1)))
 
 
 @pytest.mark.e2e
@@ -442,11 +452,12 @@ class TestCombinerPublicUrlFlow:
             assert error.code == mt.URL_ELICITATION_REQUIRED
             assert isinstance(error.data, dict)
             (elicitation,) = error.data["elicitations"]
-            assert "%2Foauth%2Fcallback%2Fmock" in elicitation["url"]
+            # With a public_url the link is the combiner's own page (authpages).
+            assert "/oauth/authorize/" in elicitation["url"]
 
             page = await _follow_as_user(elicitation["url"])
             assert page.status_code == 200
-            assert "is authorized" in page.text
+            assert "is connected" in page.text
 
             async def _completed() -> list[str]:
                 return notes.elicitation_completed()
@@ -514,13 +525,32 @@ class TestCombinerPublicUrlFlow:
         async with Client(mcp_url, mode=CLIENT_CONNECT_MODE) as client:
             with pytest.raises(ToolError, match="needs authorization") as caught:
                 await client.call_tool("mock_echo", {"message": "hi"})
-        # The error carries the combiner's SHORT link, which redirects to the
-        # real authorization URL.
+        # The error carries the combiner's SHORT link: a page naming the server,
+        # whose Authorize button leads on to the real authorization URL.
         short = next(w for w in str(caught.value).split() if "/oauth/authorize/" in w)
         async with httpx2.AsyncClient() as http:
-            r = await http.get(short, follow_redirects=False)
-        assert r.status_code == 302
-        assert "/oauth/authorize?" in r.headers["location"]
+            page = await http.get(short, follow_redirects=False)
+            assert page.status_code == 200
+            assert "Authorize <code>mock</code>" in page.text
+            button = _AUTHORIZE_BUTTON.search(page.text)
+            assert button is not None
+            assert "/oauth/authorize?" in html.unescape(button.group(1))
+            assert 'data-seconds="' in page.text  # the expiry countdown
+            # Self-contained: no external stylesheets, scripts or images.
+            assert not re.search(
+                r'(src|href)="https?://(?!127\.0\.0\.1)', page.text.split('id="go"')[0]
+            )
+            assert page.headers["cache-control"] == "no-store"
+            assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+            # ?go=1 keeps the direct redirect for scripts.
+            direct = await http.get(short + "?go=1", follow_redirects=False)
+            assert direct.status_code == 302
+            assert "/oauth/authorize?" in direct.headers["location"]
+            # An unknown (expired, used) link gets the styled gone page.
+            gone = await http.get(short.rsplit("/", 1)[0] + "/" + "0" * 32)
+            assert gone.status_code == 404
+            assert "expired or was already used" in gone.text
+            assert 'class="mark"' in gone.text
 
     async def test_bad_state_is_refused_by_the_callback(
         self, procs: ProcFactory, oauth_mock: OAuthMockFactory, tmp_path: Path

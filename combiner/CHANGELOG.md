@@ -22,6 +22,17 @@ tagged `vX.Y.Z`.
   `client_secret` and `client_metadata_url`, and bearer tokens, resolved when
   the auth is built (as elsewhere in servers.json) — so secrets can come from
   the environment, e.g. a container's injected env.
+- **Proper authorization pages** (`mcp_combiner/authpages.py`): the short link
+  `/oauth/authorize/<id>` shows a page — combiner logo, the server's name, what
+  happens next, an Authorize button on to the provider, and a live countdown to
+  the link's expiry (it disables itself when the link lapses) — instead of
+  redirecting at once (`?go=1` keeps the direct redirect). The expired/used
+  link, authorized, and failed pages get the same treatment. Self-contained
+  (inline CSS and SVG, no external fetches), phone-sized, light and dark,
+  served `no-store` with a strict CSP and no framing.
+- With `oauth.public_url` set, the `-32042` URL elicitation hands clients the
+  combiner's short link, so the user lands on that page first; without it, the
+  provider URL as before.
 - A URL-elicitation error raised inside a tool now reaches the client as
   `-32042` (fastmcp masks MCP errors raised by tools into tool errors).
 

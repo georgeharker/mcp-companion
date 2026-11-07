@@ -13,8 +13,8 @@ whose values are wire ``mcp-session-id``s — since fastmcp 4 the same ids
 
 from __future__ import annotations
 
-import html
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from mcp_combiner import authprompt
+from mcp_combiner import authpages, authprompt
 from mcp_combiner.config import CombinerConfig, HealthResponse, ServerStatusInfo
 from mcp_combiner.connections import ConnectionManager
 from mcp_combiner.runtime import RUNTIME, connection_session_id
@@ -30,16 +30,6 @@ from mcp_combiner.status import build_server_status
 from mcp_combiner.toolcache import _notify_session_by_id, notify_chat_tools_changed
 
 logger = logging.getLogger("mcp-combiner")
-
-
-def _callback_page(message: str, status: int = 200) -> HTMLResponse:
-    body = html.escape(message)
-    return HTMLResponse(
-        "<!doctype html><meta charset=utf-8>"
-        '<meta name=viewport content="width=device-width,initial-scale=1">'
-        f"<title>mcp-combiner</title><p>{body}</p>",
-        status_code=status,
-    )
 
 
 def register_routes(
@@ -77,16 +67,18 @@ def register_routes(
     # Short authorization links (authprompt.short_link): redirect to the real,
     # very long authorization URL. Open for the same reason as the callback;
     # the elicitation id is the secret.
+    # The page names the server and offers the way on (authpages); ``?go=1``
+    # skips it and redirects straight to the provider (scripts, old clients).
     @combiner.custom_route("/oauth/authorize/{elicitation_id}", methods=["GET"])
     async def oauth_authorize(request: Request) -> Response:
         pending = authprompt.pending_by_elicitation(request.path_params["elicitation_id"])
         if pending is None:
-            return _callback_page(
-                "This authorization link has expired or was already used. "
-                "Retry the tool call for a fresh one.",
-                status=404,
-            )
-        return RedirectResponse(pending.url, status_code=302)
+            return authpages.gone_page()
+        if request.query_params.get("go"):
+            return RedirectResponse(pending.url, status_code=302)
+        return authpages.authorize_page(
+            pending.server, pending.url, pending.expires_at - time.monotonic()
+        )
 
     @combiner.custom_route("/oauth/callback/{server}", methods=["GET"])
     async def oauth_callback(request: Request) -> HTMLResponse:
@@ -101,11 +93,13 @@ def register_routes(
                 iss=query.get("iss"),
             )
         except authprompt.CallbackRejected as exc:
-            return _callback_page(f"Authorization failed: {exc}", status=400)
+            return authpages.failed_page(server, str(exc), status=400)
         except Exception as exc:  # noqa: BLE001 — shown to the user, logged for ops
             logger.warning("OAuth callback for '%s' failed: %s", server, exc)
-            return _callback_page("Authorization failed: the token exchange was rejected.", 502)
-        return _callback_page(f"'{server}' is authorized. You can close this tab.")
+            return authpages.failed_page(
+                server, "The service rejected the token exchange.", status=502
+            )
+        return authpages.authorized_page(server)
 
     # The general session map: every correlation the combiner holds around a
     # chat token — downstream wire session, nvim instance bind, and the
